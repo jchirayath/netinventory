@@ -451,6 +451,20 @@ def link_class(link):
     return ""
 
 
+def band(link):
+    """Extract the radio band (or Ethernet) from the router's connection medium:
+    '2.4 GHz' / '5 GHz' / '6 GHz' / 'Ethernet' / 'Wi-Fi' / ''."""
+    l = (link or "").lower()
+    if "ethernet" in l or "eth" in l:
+        return "Ethernet"
+    m = re.search(r"(2\.4|5|6)\s*ghz", l)
+    if m:
+        return m.group(1) + " GHz"
+    if "wi-fi" in l or "wifi" in l or "wlan" in l:
+        return "Wi-Fi (band?)"
+    return ""
+
+
 # (keyword, category) ordered most- to least-specific; first hit wins.
 _CATEGORY_RULES = [
     ("camera|cam |blink|wyze|hualai|raysharp|dvr|nvr|doorbell", "Camera / Security"),
@@ -644,15 +658,15 @@ def write_xlsx(master):
 
     # --- Sheet 1: Devices (full detail, sorted by IP) ---
     ws = wb.add_worksheet("Devices")
-    cols = ["IP", "Device", "Category", "Link", "Status", "MAC", "Vendor",
+    cols = ["IP", "Device", "Category", "Link", "Band", "Status", "MAC", "Vendor",
             "Hostname", "LastSeen", "Source", "Notes"]
-    widths = [14, 28, 20, 14, 9, 19, 26, 24, 12, 14, 24]
+    widths = [14, 28, 20, 10, 10, 9, 19, 26, 24, 12, 14, 24]
     for c, (name, wdt) in enumerate(zip(cols, widths)):
         ws.set_column(c, c, wdt)
         ws.write(0, c, name, hdr)
     for i, r in enumerate(rows, start=1):
         vals = [r["IP"], r["Device"], categorize(r), link_class(r["Link"]),
-                r["Status"], r["MAC"], r["Vendor"], r["Hostname"],
+                band(r["Link"]), r["Status"], r["MAC"], r["Vendor"], r["Hostname"],
                 r["LastSeen"], r["Source"], r["Notes"]]
         for c, v in enumerate(vals):
             ws.write(i, c, v, cell)
@@ -665,9 +679,9 @@ def write_xlsx(master):
         key = r["Device"] or f"(unnamed) {r['MAC']}"
         groups.setdefault(key, []).append(r)
     ws2 = wb.add_worksheet("By Device")
-    cols2 = ["Device", "Category", "Status", "Link", "#MACs", "IP(s)", "MAC(s)",
+    cols2 = ["Device", "Category", "Status", "Connection", "#MACs", "IP(s)", "MAC(s)",
              "Vendor", "LastSeen", "Notes"]
-    widths2 = [28, 20, 12, 18, 7, 30, 40, 26, 12, 24]
+    widths2 = [28, 20, 12, 22, 7, 30, 40, 26, 12, 24]
     for c, (name, wdt) in enumerate(zip(cols2, widths2)):
         ws2.set_column(c, c, wdt)
         ws2.write(0, c, name, hdr)
@@ -676,10 +690,10 @@ def write_xlsx(master):
                                                   default="")))
     for i, (name, grp) in enumerate(grp_sorted, start=1):
         disp = "" if name.startswith("(unnamed)") else name
-        links = sorted({link_class(x["Link"]) for x in grp if link_class(x["Link"])})
+        conns = sorted({band(x["Link"]) for x in grp if band(x["Link"])})
         vals = [disp, categorize(grp[0]),
                 "/".join(sorted({x["Status"] for x in grp})),
-                " + ".join(links),
+                " + ".join(conns),
                 len(grp),
                 ", ".join(sorted({x["IP"] for x in grp if x["IP"]}, key=ip_key)),
                 ", ".join(x["MAC"] for x in grp),
@@ -720,6 +734,7 @@ def write_xlsx(master):
 
     nxt = table(0, "Devices by Category", tally(categorize))
     nxt = table(nxt, "Devices by Connection", tally(lambda r: link_class(r["Link"]) or "Unknown"))
+    nxt = table(nxt, "Devices by Band", tally(lambda r: band(r["Link"]) or "Unknown"))
     table(nxt, "Devices by Status", tally(lambda r: r["Status"]))
 
     # --- Sheet 4: Suggested Pairs (likely same physical device) ---
@@ -1111,14 +1126,15 @@ def cmd_cloud(args):
 def cmd_show(args):
     master = load_master()
     q = (args.query or "").lower()
-    rows = sorted(master.values(),
-                  key=lambda r: (r["Device"] == "", r["Device"].lower(), ip_key(r["IP"])))
+    rows = sorted(master.values(), key=lambda r: ip_key(r["IP"]))
     for r in rows:
-        if q and q not in r["Device"].lower() and q not in r["Hostname"].lower() \
-                and q not in r["MAC"].lower():
+        # query matches name / hostname / MAC / connection (e.g. "5 ghz", "wired")
+        hay = " ".join([r["Device"], r["Hostname"], r["MAC"], r["Link"],
+                        link_class(r["Link"])]).lower()
+        if q and q not in hay:
             continue
-        print(f"{r['Device'] or '(unnamed)':28} {r['IP']:15} {r['MAC']:18} "
-              f"{r['Status']:8} {r['Vendor'][:24]:24} {r['Hostname']}")
+        print(f"{r['IP']:15} {band(r['Link']) or '—':9} {r['Device'] or '(unnamed)':28} "
+              f"{r['MAC']:18} {r['Status']:8} {r['Vendor'][:22]:22} {r['Hostname']}")
 
 
 def main():

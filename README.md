@@ -89,9 +89,18 @@ overwrites a name you set.
 
 ## Wired vs wireless, and dual-NIC devices
 
-The router reports each device's connection medium, stored in the `Link` column
-(`Wired` / `Wireless`). A device with both a wired and a Wi-Fi interface is two MACs
-sharing one `Device` name; the **By Device** tab shows it as `Wired + Wireless`.
+The router reports each device's connection medium **and Wi-Fi band**, stored in the
+`Link` column (`Ethernet`, `Wi-Fi 2.4 GHz`, `Wi-Fi 5 GHz`, `Wi-Fi 6 GHz`). The
+**Devices** tab shows both a coarse `Link` (Wired/Wireless) and the exact `Band`; the
+**Summary** tab includes a *Devices by Band* rollup. Filter from the CLI:
+
+```bash
+./netinv.py show "5 ghz"      # everything on the 5 GHz band
+./netinv.py show wired        # everything on Ethernet
+```
+
+A device with both a wired and a Wi-Fi interface is two MACs sharing one `Device`
+name; the **By Device** tab shows its combined connections (e.g. `Ethernet + 5 GHz`).
 
 `netinv.py pairs` suggests MACs that are probably the same physical device:
 - by **shared hostname** (default), or
