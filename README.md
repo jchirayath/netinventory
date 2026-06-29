@@ -76,7 +76,8 @@ overwrites a name you set.
 ## Commands
 
 ```
-./netinv.py update [--scan] [--router] [--cloud] [--auto-name]   # gather + merge + report
+./netinv.py update [--scan] [--router] [--cloud] [--auto-name] [--notify]   # gather + merge + report
+./netinv.py watch [--interval 300] [--notify] [--once]           # poll & alert on new devices
 ./netinv.py name "Friendly Name" <mac> [<mac> ...]               # group MAC(s) under a name
 ./netinv.py show [filter]                                        # print inventory
 ./netinv.py report                                               # rebuild reports from devices.csv
@@ -121,6 +122,24 @@ A BSSID is **mine** if it broadcasts one of your home SSIDs (`home_ssids.txt`, o
 last 5 octets / locally-administered-bit flip, or the same OUI with a small last-octet
 offset, which is how a device's AP/Direct radio relates to its client MAC. Everything
 else is a **neighbor**; signal strength is shown to break ties.
+
+## Detecting new devices
+
+Every MAC gets a `FirstSeen` timestamp the first time it's observed. When a
+refresh sees a MAC it has never recorded, it prints it, appends a row to
+`events.csv` (an append-only join history), and — with `--notify` — pops a macOS
+notification.
+
+```bash
+./netinv.py update --scan --router --notify   # one-off, alert on any new device
+./netinv.py watch --interval 300 --notify     # poll every 5 min, alert on joins
+./netinv.py watch --once --no-router           # single local-only sweep
+```
+
+`watch` keeps polling (gateway + local scan + SSDP), merging, and alerting until
+you stop it — leave it running in a terminal, or wrap it in a `launchd`/cron job
+for unattended monitoring. Each join is captured with its time, IP, MAC, vendor,
+hostname, and band in `events.csv`.
 
 ## Status / staleness
 

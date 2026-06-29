@@ -5,6 +5,7 @@ report-by-device.csv
 inventory.xlsx
 wifi_scan.csv
 cloud_devices.csv
+events.csv
 home_ssids.txt
 
 # Cached/scraped pages and any raw captures

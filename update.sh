@@ -23,6 +23,6 @@ for a in "$@"; do
   [ "$a" = "--no-cloud" ]  && CLOUD_FLAG=""
 done
 
-./netinv.py update --scan $ROUTER_FLAG $CLOUD_FLAG --auto-name
+./netinv.py update --scan $ROUTER_FLAG $CLOUD_FLAG --auto-name --notify
 echo
 echo "Report: $(pwd)/report.md"

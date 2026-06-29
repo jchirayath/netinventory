@@ -42,6 +42,7 @@ REPORT_BY_DEVICE = os.path.join(HERE, "report-by-device.csv")
 REPORT_XLSX = os.path.join(HERE, "inventory.xlsx")
 HOME_SSIDS_FILE = os.path.join(HERE, "home_ssids.txt")
 WIFI_SCAN_OUT = os.path.join(HERE, "wifi_scan.csv")
+EVENTS_LOG = os.path.join(HERE, "events.csv")
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 ROUTER_HOST = os.environ.get("NETINV_ROUTER", "192.168.1.1")
@@ -50,8 +51,12 @@ SUBNET = os.environ.get("NETINV_SUBNET", "192.168.1.0/24")
 STALE_DAYS = int(os.environ.get("NETINV_STALE_DAYS", "30"))
 
 FIELDS = ["Device", "MAC", "IP", "Vendor", "Hostname", "Link", "Status",
-          "LastSeen", "Source", "Notes"]
+          "FirstSeen", "LastSeen", "Source", "Notes"]
 TODAY = dt.date.today().isoformat()
+
+
+def now_stamp():
+    return dt.datetime.now().isoformat(timespec="seconds")
 
 MAC_RE = re.compile(r"\b([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})\b")
 
@@ -105,6 +110,9 @@ def load_master():
                 continue
             rows[mac] = {k: (r.get(k) or "").strip() for k in FIELDS}
             rows[mac]["MAC"] = mac
+            # backfill FirstSeen for rows that predate first-seen tracking
+            if not rows[mac]["FirstSeen"]:
+                rows[mac]["FirstSeen"] = rows[mac]["LastSeen"]
     return rows
 
 
@@ -390,6 +398,7 @@ def merge(master, sightings):
         if row is None:
             row = {k: "" for k in FIELDS}
             row["MAC"] = mac
+            row["FirstSeen"] = now_stamp()        # brand-new device
             master[mac] = row
         row["IP"] = better(s["ip"], row["IP"])
         row["Vendor"] = better(s["vendor"], row["Vendor"])
@@ -463,6 +472,57 @@ def band(link):
     if "wi-fi" in l or "wifi" in l or "wlan" in l:
         return "Wi-Fi (band?)"
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# new-device detection / event log
+# --------------------------------------------------------------------------- #
+def log_events(rows, kind="join"):
+    """Append device events to events.csv (append-only history of joins)."""
+    if not rows:
+        return
+    newfile = not os.path.exists(EVENTS_LOG)
+    ts = now_stamp()
+    with open(EVENTS_LOG, "a", newline="") as f:
+        w = csv.writer(f, delimiter=";")
+        if newfile:
+            w.writerow(["Timestamp", "Event", "MAC", "IP", "Vendor",
+                        "Hostname", "Band", "Device", "Source"])
+        for r in rows:
+            w.writerow([ts, kind, r["MAC"], r["IP"], r["Vendor"], r["Hostname"],
+                        band(r["Link"]), r["Device"], r["Source"]])
+
+
+def notify(title, message):
+    """Best-effort macOS Notification Center banner."""
+    try:
+        msg = message.replace('"', "'").replace("\\", "")
+        ttl = title.replace('"', "'")
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{msg}" with title "{ttl}" sound name "Submarine"'],
+            capture_output=True, timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def report_new(master, before_macs, do_notify=False):
+    """Print, log, and optionally notify about MACs not present before this run."""
+    new = [master[m] for m in master if m not in before_macs]
+    if not new:
+        return new
+    log_events(new, kind="join")
+    print(f"\n  *** {len(new)} NEW device(s) joined the network ***")
+    for r in new:
+        print(f"    + {(r['IP'] or '(no ip)'):15} {r['MAC']}  "
+              f"{(band(r['Link']) or '—'):9} {(r['Vendor'][:24] or '?'):24} "
+              f"{r['Hostname'] or r['Device'] or ''}")
+    if do_notify:
+        for r in new:
+            label = r["Device"] or r["Hostname"] or r["Vendor"] or r["MAC"]
+            notify("New device on network", f"{label} ({r['IP'] or r['MAC']})")
+    print(f"  logged to {EVENTS_LOG}")
+    return new
 
 
 # (keyword, category) ordered most- to least-specific; first hit wins.
@@ -659,15 +719,15 @@ def write_xlsx(master):
     # --- Sheet 1: Devices (full detail, sorted by IP) ---
     ws = wb.add_worksheet("Devices")
     cols = ["IP", "Device", "Category", "Link", "Band", "Status", "MAC", "Vendor",
-            "Hostname", "LastSeen", "Source", "Notes"]
-    widths = [14, 28, 20, 10, 10, 9, 19, 26, 24, 12, 14, 24]
+            "Hostname", "FirstSeen", "LastSeen", "Source", "Notes"]
+    widths = [14, 28, 20, 10, 10, 9, 19, 26, 24, 19, 12, 14, 24]
     for c, (name, wdt) in enumerate(zip(cols, widths)):
         ws.set_column(c, c, wdt)
         ws.write(0, c, name, hdr)
     for i, r in enumerate(rows, start=1):
         vals = [r["IP"], r["Device"], categorize(r), link_class(r["Link"]),
                 band(r["Link"]), r["Status"], r["MAC"], r["Vendor"], r["Hostname"],
-                r["LastSeen"], r["Source"], r["Notes"]]
+                r["FirstSeen"], r["LastSeen"], r["Source"], r["Notes"]]
         for c, v in enumerate(vals):
             ws.write(i, c, v, cell)
     ws.freeze_panes(1, 0)
@@ -885,6 +945,7 @@ def auto_name(master):
 
 def cmd_update(args):
     master = load_master()
+    before = set(master)                 # MACs known before this run
     sightings = []
     do_local = args.scan or not (args.router or args.import_csv is not None)
     if args.import_csv is not None:
@@ -906,6 +967,10 @@ def cmd_update(args):
         print(f"  auto-named {named} device(s) from discovery")
     save_master(master)
     write_reports(master)
+    # an imported export isn't a real "join", so only flag new devices when we
+    # actually looked at the live network this run
+    if do_local or args.router:
+        report_new(master, before, do_notify=args.notify)
     print(f"\n  {len(master)} MACs in {MASTER}  ·  {len(seen)} online this run")
     unnamed = sum(1 for r in master.values() if not r["Device"])
     if unnamed:
@@ -914,6 +979,37 @@ def cmd_update(args):
     if pairs:
         print(f"  {len(pairs)} possible wired+wifi device(s) detected — "
               f"run ./netinv.py pairs")
+
+
+def cmd_watch(args):
+    """Poll the network on an interval and alert when a new device joins."""
+    import time
+    use_router = not args.no_router
+    print(f"  watching {SUBNET} every {args.interval}s "
+          f"(router={'on' if use_router else 'off'}, notify={'on' if args.notify else 'off'})"
+          f" — Ctrl-C to stop")
+    creds = get_router_creds() if use_router else (None, None)
+    n = 0
+    while True:
+        n += 1
+        master = load_master()
+        before = set(master)
+        sightings = []
+        if use_router and creds[1]:
+            sightings += router_scan(*creds)
+        sightings += local_scan(do_sweep=not args.no_sweep)
+        if not args.no_ssdp:
+            sightings += ssdp_discover()
+        seen = merge(master, sightings)
+        auto_name(master)
+        save_master(master)
+        write_reports(master)
+        new = report_new(master, before, do_notify=args.notify)
+        if not new:
+            print(f"  [{now_stamp()}] poll #{n}: {len(seen)} online, no new devices")
+        if args.once:
+            break
+        time.sleep(args.interval)
 
 
 def cmd_wifi_scan(args):
@@ -1150,9 +1246,20 @@ def main():
                    help="also pull names from configured smart-home clouds")
     u.add_argument("--auto-name", action="store_true",
                    help="fill blank friendly names from high-quality discovered names")
+    u.add_argument("--notify", action="store_true",
+                   help="macOS notification when a new device joins")
     u.add_argument("--import-csv", nargs="?", const=DEFAULT_IMPORT, default=None,
                    metavar="PATH", help=f"import old export (default {DEFAULT_IMPORT})")
     u.set_defaults(func=cmd_update)
+
+    w = sub.add_parser("watch", help="poll on an interval and alert when a new device joins")
+    w.add_argument("--interval", type=int, default=300, help="seconds between polls (default 300)")
+    w.add_argument("--no-router", action="store_true", help="local scan only (skip gateway)")
+    w.add_argument("--no-sweep", action="store_true", help="skip nmap, use existing ARP cache")
+    w.add_argument("--no-ssdp", action="store_true", help="skip SSDP/UPnP name discovery")
+    w.add_argument("--notify", action="store_true", help="macOS notification on new device")
+    w.add_argument("--once", action="store_true", help="run a single poll and exit")
+    w.set_defaults(func=cmd_watch)
 
     n = sub.add_parser("name", help="assign MAC(s) to a friendly device name")
     n.add_argument("device")
