@@ -1,0 +1,26 @@
+# ── Network data — NEVER commit (contains real MACs / IPs / SSIDs) ──
+devices.csv
+report.md
+report-by-device.csv
+inventory.xlsx
+wifi_scan.csv
+cloud_devices.csv
+home_ssids.txt
+
+# Cached/scraped pages and any raw captures
+*.html
+router_devices_raw.html
+
+# Credentials / local config (secrets live in the macOS Keychain; never in files)
+.netinv.env
+*.env
+secrets*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

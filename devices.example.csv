@@ -1,0 +1,5 @@
+Device;MAC;IP;Vendor;Hostname;Link;Status;LastSeen;Source;Notes
+Living Room TV;AA:BB:CC:00:00:01;10.0.0.20;Example Corp;living-room-tv;Wired;online;2026-01-01;router+scan;
+Living Room TV;AA:BB:CC:00:00:02;;Example Corp;living-room-tv;Wireless;online;2026-01-01;router;both NICs = one device
+Office Printer;AA:BB:CC:00:00:03;10.0.0.31;Example Corp;PRINTER01;Wireless;online;2026-01-01;ssdp+scan;
+;AA:BB:CC:00:00:99;10.0.0.50;;wlan0-12;Wireless;online;2026-01-01;router+scan;unnamed — fill in the Device column

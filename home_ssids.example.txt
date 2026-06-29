@@ -1,0 +1,4 @@
+# Your home Wi-Fi network name(s), one per line. Copy this to home_ssids.txt
+# (which is gitignored). Used by `netinv.py wifi-scan` to tell your own APs
+# from neighbors'. You can also set NETINV_HOME_SSIDS=Name1,Name2 instead.
+MyHomeWiFi

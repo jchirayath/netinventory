@@ -1,0 +1,7 @@
+# Optional dependencies for the smart-home cloud connectors (connectors.py).
+# Install only the ones you use:  pip install -r requirements-cloud.txt
+tinytuya      # tuya / smartlife  -> device name + MAC + IP
+wyze-sdk      # wyze              -> nickname + MAC
+blinkpy       # blink             -> camera names (no MAC)
+aiohttp       # required by blinkpy
+# smartthings uses the Python standard library only (PAT bearer token)
