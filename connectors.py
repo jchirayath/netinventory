@@ -24,6 +24,7 @@ Install only what you use:
 """
 
 import json
+import os
 import re
 import subprocess
 import urllib.request
@@ -226,35 +227,52 @@ def discover_wyze(c):
 
 
 def discover_blink(c):
-    """Blink via blinkpy (async). Returns camera names; no MAC (cloud cameras)."""
+    """Blink via blinkpy (async). Returns camera names (no MAC — cloud cameras).
+
+    2FA: Blink sends a code on first login from a new client. Pass it via the
+    NETINV_BLINK_2FA env var (not a stdin prompt, so it works headless). The
+    auth token is cached to ~/.netinv_blink.json so later runs skip 2FA."""
     try:
         import asyncio
         from aiohttp import ClientSession
         from blinkpy.blinkpy import Blink
         from blinkpy.auth import Auth
+        from blinkpy.helpers.util import json_load
     except ImportError:
         print("  ! blink: `pip install blinkpy aiohttp` first")
         return []
+    token_path = os.path.expanduser("~/.netinv_blink.json")
+    code = os.environ.get("NETINV_BLINK_2FA", "").strip()
 
     async def _run():
         async with ClientSession() as session:
             blink = Blink(session=session)
-            blink.auth = Auth({"username": c["email"], "password": c["password"]},
-                              no_prompt=False, session=session)
+            if os.path.exists(token_path):
+                blink.auth = Auth(await json_load(token_path), session=session)
+            else:
+                blink.auth = Auth({"username": c["email"], "password": c["password"]},
+                                  no_prompt=True, session=session)
             await blink.start()
-            # 2FA: if a key is required, blinkpy prompts on stdin for the PIN
-            await blink.setup_post_verify()
+            if getattr(blink, "key_required", False):
+                if not code:
+                    print("  ! blink: 2FA required — Blink just sent a code to your "
+                          "email/phone. Re-run with NETINV_BLINK_2FA=<code>")
+                    return None
+                await blink.auth.send_auth_key(blink, code)
+                await blink.setup_post_verify()
+            try:
+                blink.save(token_path)        # cache token -> no 2FA next time
+            except Exception:  # noqa: BLE001
+                pass
             out = []
             for name, cam in blink.cameras.items():
-                ip = ""
                 attrs = getattr(cam, "attributes", {}) or {}
-                ip = attrs.get("ip_address", "") or ""
-                out.append(_item("blink", name, ip=ip,
+                out.append(_item("blink", name, ip=attrs.get("ip_address", "") or "",
                                  model=attrs.get("type", "")))
             return out
 
     try:
-        return asyncio.run(_run())
+        return asyncio.run(_run()) or []
     except Exception as e:  # noqa: BLE001
         print(f"  ! blink: {e}")
         return []
