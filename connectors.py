@@ -226,6 +226,55 @@ def discover_wyze(c):
         return []
 
 
+def blink_login_interactive():
+    """Interactive Blink/Amazon 2FA login — RUN IN A REAL TERMINAL. Triggers the
+    code, prompts for it live, then caches the token to ~/.netinv_blink.json so
+    later `cloud blink` runs need no 2FA."""
+    c = creds("blink")
+    if not c:
+        print("  blink not configured — run: ./netinv.py set-cloud blink")
+        return
+    try:
+        import asyncio
+        from aiohttp import ClientSession
+        from blinkpy.blinkpy import Blink
+        from blinkpy.auth import Auth, BlinkTwoFARequiredError
+    except ImportError:
+        print("  ! blink: ./.venv/bin/python -m pip install blinkpy aiohttp")
+        return
+    token_path = os.path.expanduser("~/.netinv_blink.json")
+
+    async def _run():
+        async with ClientSession() as session:
+            blink = Blink(session=session)
+            blink.auth = Auth({"username": c["email"], "password": c["password"]},
+                              no_prompt=True, session=session)
+            try:
+                await blink.start()
+                print("  logged in (no 2FA needed).")
+            except BlinkTwoFARequiredError:
+                print("  Blink/Amazon should have sent a code — check email AND text "
+                      "messages (and your authenticator if your Amazon account uses one).")
+                code = input("  Enter the 2FA code: ").strip()
+                if not code:
+                    print("  aborted (no code).")
+                    return
+                await blink.auth.complete_2fa_login(code)
+            await blink.setup_post_verify()
+            await blink.save(token_path)
+            cams = list(blink.cameras.items())
+            print(f"  success — token cached, {len(cams)} camera(s):")
+            for name, cam in cams:
+                a = getattr(cam, "attributes", {}) or {}
+                print(f"    {name}  {a.get('type', '')}")
+            print("  now run:  ./.venv/bin/python netinv.py cloud blink")
+
+    try:
+        asyncio.run(_run())
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! blink login failed: {e}")
+
+
 def discover_blink(c):
     """Blink via blinkpy (async). Returns camera names (no MAC — cloud cameras).
 

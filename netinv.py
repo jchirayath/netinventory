@@ -1353,6 +1353,12 @@ def cmd_set_router_password(args):
 CLOUD_REF = os.path.join(HERE, "cloud_devices.csv")
 
 
+def cmd_blink_login(args):
+    """Interactive Blink 2FA login (run in a real terminal)."""
+    import connectors
+    connectors.blink_login_interactive()
+
+
 def cmd_set_cloud(args):
     """Store a cloud connector's credentials in the macOS Keychain."""
     import getpass
@@ -1510,6 +1516,9 @@ def main():
     sc = sub.add_parser("set-cloud", help="store a cloud connector's credentials in Keychain")
     sc.add_argument("provider", help="tuya | wyze | blink | smartthings | apple")
     sc.set_defaults(func=cmd_set_cloud)
+
+    bl = sub.add_parser("blink-login", help="interactive Blink 2FA login (run in a terminal)")
+    bl.set_defaults(func=cmd_blink_login)
 
     s = sub.add_parser("show", help="print current inventory")
     s.add_argument("query", nargs="?")
