@@ -162,10 +162,11 @@ python3 -m venv .venv
 ./.venv/bin/python netinv.py cloud                            # pull names from clouds
 ```
 
-For **Tuya/SmartLife** the cloud returns the app name but no LAN MAC, so the
-connector recovers it from the Tuya device id (WiFi devices embed their MAC).
-Zigbee/BLE sub-devices behind a hub have no WiFi MAC and land in
-`cloud_devices.csv` as a name reference.
+For **Tuya/SmartLife** the cloud returns the app name but no LAN MAC (only a
+public IP). The connector runs a local Tuya broadcast scan to map each cloud
+device → its LAN IP → MAC (via ARP), falling back to the MAC embedded in
+all-hex WiFi device ids. Zigbee/BLE sub-devices behind a hub don't broadcast on
+WiFi, so they land in `cloud_devices.csv` as a name reference.
 
 ### Smart-home cloud connectors
 

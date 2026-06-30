@@ -116,25 +116,90 @@ def discover_tuya(c):
     if not isinstance(devs, list):
         print(f"  ! tuya: unexpected response: {str(resp)[:160]}")
         return []
+
+    # The cloud gives the app name but no LAN MAC (and only a public IP). WiFi
+    # devices broadcast their id + LAN IP locally, so scan the LAN to map
+    # cloud id -> LAN IP -> MAC (via ARP). Zigbee/BLE sub-devices don't
+    # broadcast, so they correctly resolve to no MAC.
+    id2ip = {}
+    try:
+        local = tinytuya.deviceScan(False, 18)
+        for ip, info in local.items():
+            did = info.get("gwId") or info.get("id")
+            if did:
+                id2ip[did] = ip
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! tuya: local scan failed ({e}); using id-embedded MACs only")
+    ip2mac = _resolve_arp(set(id2ip.values()))
+
     out = []
     for d in devs:
-        # WiFi devices embed their MAC as the last 12 hex of the device id;
-        # cloud-assigned 'eb...' ids (Zigbee/BLE sub-devices) do not. The 'ip'
-        # field is the WAN/public IP, useless for LAN matching -> drop it.
-        mac = _mac_from_tuya_id(d.get("id", "")) or _mac_from_tuya_id(d.get("uuid", ""))
-        out.append(_item("tuya", d.get("name"), mac=mac, ip="",
+        did = d.get("id", "")
+        lan_ip = id2ip.get(did, "")
+        # Authoritative: the live LAN scan + ARP. Fall back to an id-embedded
+        # MAC only for all-hex WiFi ids (cloud 'eb...' UUIDs would yield garbage).
+        mac = ip2mac.get(lan_ip, "") if lan_ip else ""
+        if not mac:
+            mac = _mac_from_tuya_id(did)
+        out.append(_item("tuya", d.get("name"), mac=mac, ip=lan_ip,
                          model=d.get("product_name", "") or d.get("category_name", ""),
                          online=bool(d.get("online", True))))
+    print(f"  tuya: {len(devs)} cloud devices, {len(id2ip)} seen on the LAN")
     return out
 
 
 def _mac_from_tuya_id(s):
-    """Tuya WiFi device ids end with the device MAC (12 hex). Returns it as a
-    colon MAC, or '' for cloud-UUID ids that don't embed a MAC."""
-    tail = (s or "")[-12:].upper()
-    if re.fullmatch(r"[0-9A-F]{12}", tail):
+    """An all-hex Tuya WiFi device id embeds the MAC as its trailing 12 hex.
+    Cloud 'eb...' UUIDs contain letters and embed no MAC -> return ''."""
+    s = (s or "")
+    if re.fullmatch(r"[0-9A-Fa-f]{16,24}", s):
+        tail = s[-12:].upper()
         return ":".join(tail[i:i + 2] for i in range(0, 12, 2))
     return ""
+
+
+def _norm_mac(m):
+    p = (m or "").replace("-", ":").split(":")
+    if len(p) != 6:
+        return (m or "").upper()
+    try:
+        return ":".join(f"{int(x, 16):02X}" for x in p)
+    except ValueError:
+        return m.upper()
+
+
+def _resolve_arp(ips):
+    """Ping each IP to refresh the ARP cache, then return {ip: MAC}."""
+    if not ips:
+        return {}
+    procs = []
+    for ip in ips:
+        try:
+            procs.append(subprocess.Popen(
+                ["ping", "-c", "1", "-t", "2", ip],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        except Exception:  # noqa: BLE001
+            pass
+    for p in procs:
+        try:
+            p.wait(3)
+        except Exception:  # noqa: BLE001
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+    out = {}
+    try:
+        arp = subprocess.run(["arp", "-an"], capture_output=True,
+                             text=True, timeout=15).stdout
+    except Exception:  # noqa: BLE001
+        return out
+    for ln in arp.splitlines():
+        a = re.search(r"\((\d+\.\d+\.\d+\.\d+)\)", ln)
+        b = re.search(r"at ([0-9a-fA-F:]+) on", ln)
+        if a and b:
+            out[a.group(1)] = _norm_mac(b.group(1))
+    return out
 
 
 def discover_wyze(c):
