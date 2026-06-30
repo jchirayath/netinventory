@@ -24,6 +24,7 @@ Install only what you use:
 """
 
 import json
+import re
 import subprocess
 import urllib.request
 
@@ -110,18 +111,30 @@ def discover_tuya(c):
         return []
     cloud = tinytuya.Cloud(apiRegion=c["region"], apiKey=c["access_id"],
                            apiSecret=c["access_secret"])
-    devs = cloud.getdevices(True)  # verbose -> includes mac/ip when known
+    resp = cloud.getdevices(True)  # verbose -> raw {'result': [...], ...}
+    devs = resp.get("result", []) if isinstance(resp, dict) else resp
     if not isinstance(devs, list):
-        print(f"  ! tuya: unexpected response: {str(devs)[:120]}")
+        print(f"  ! tuya: unexpected response: {str(resp)[:160]}")
         return []
     out = []
     for d in devs:
-        out.append(_item("tuya", d.get("name"),
-                         mac=d.get("mac", ""),
-                         ip=d.get("ip", ""),
-                         model=d.get("product_name", "") or d.get("category", ""),
+        # WiFi devices embed their MAC as the last 12 hex of the device id;
+        # cloud-assigned 'eb...' ids (Zigbee/BLE sub-devices) do not. The 'ip'
+        # field is the WAN/public IP, useless for LAN matching -> drop it.
+        mac = _mac_from_tuya_id(d.get("id", "")) or _mac_from_tuya_id(d.get("uuid", ""))
+        out.append(_item("tuya", d.get("name"), mac=mac, ip="",
+                         model=d.get("product_name", "") or d.get("category_name", ""),
                          online=bool(d.get("online", True))))
     return out
+
+
+def _mac_from_tuya_id(s):
+    """Tuya WiFi device ids end with the device MAC (12 hex). Returns it as a
+    colon MAC, or '' for cloud-UUID ids that don't embed a MAC."""
+    tail = (s or "")[-12:].upper()
+    if re.fullmatch(r"[0-9A-F]{12}", tail):
+        return ":".join(tail[i:i + 2] for i in range(0, 12, 2))
+    return ""
 
 
 def discover_wyze(c):

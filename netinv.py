@@ -1174,16 +1174,15 @@ def cloud_merge(master, items):
     ref = []
     for it in items:
         mac = norm_mac(it["mac"]) if it["mac"] else ""
-        if mac.count(":") != 5:
+        if mac.count(":") != 5 and it["ip"]:
             mac = ip2mac.get(it["ip"], "")
-        if not mac:
+        # Only enrich devices already on the network. A cloud account also lists
+        # Zigbee/BLE sub-devices (no WiFi MAC) and devices whose id-derived MAC
+        # we can't confirm -> those go to the reference list, never new rows.
+        if not mac or mac not in master:
             ref.append(it)
             continue
-        row = master.get(mac)
-        if row is None:
-            row = {k: "" for k in FIELDS}
-            row["MAC"] = mac
-            master[mac] = row
+        row = master[mac]
         if it["ip"]:
             row["IP"] = it["ip"]
         if name_quality(it["name"]) > name_quality(row["Hostname"]):

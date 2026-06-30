@@ -153,9 +153,19 @@ Secrets are **never written to disk** — they live in the macOS Keychain.
 
 ```bash
 ./netinv.py set-router-password             # internet-password for your gateway
-./netinv.py set-cloud tuya                  # then wyze / blink / smartthings / apple
-pip install -r requirements-cloud.txt       # only the SDKs you actually use
+
+# Cloud SDKs go in a local venv (Homebrew Python blocks system pip);
+# update.sh uses it automatically when present.
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements-cloud.txt   # only what you use
+./.venv/bin/python netinv.py set-cloud tuya                   # then wyze / blink / ...
+./.venv/bin/python netinv.py cloud                            # pull names from clouds
 ```
+
+For **Tuya/SmartLife** the cloud returns the app name but no LAN MAC, so the
+connector recovers it from the Tuya device id (WiFi devices embed their MAC).
+Zigbee/BLE sub-devices behind a hub have no WiFi MAC and land in
+`cloud_devices.csv` as a name reference.
 
 ### Smart-home cloud connectors
 

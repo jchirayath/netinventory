@@ -23,6 +23,8 @@ for a in "$@"; do
   [ "$a" = "--no-cloud" ]  && CLOUD_FLAG=""
 done
 
-./netinv.py update --scan $ROUTER_FLAG $CLOUD_FLAG --auto-name --notify
+# use the local venv (cloud SDKs live there) when present, else system python3
+PY="python3"; [ -x ".venv/bin/python" ] && PY=".venv/bin/python"
+"$PY" netinv.py update --scan $ROUTER_FLAG $CLOUD_FLAG --auto-name --notify
 echo
 echo "Report: $(pwd)/report.md"
