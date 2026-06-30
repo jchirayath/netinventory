@@ -475,6 +475,61 @@ def band(link):
 
 
 # --------------------------------------------------------------------------- #
+# OUI vendor lookup (offline, via nmap's prefix database)
+# --------------------------------------------------------------------------- #
+_OUI_DB = None
+
+
+def _oui_db():
+    """Load {6-hex-prefix: vendor} from nmap's bundled nmap-mac-prefixes."""
+    global _OUI_DB
+    if _OUI_DB is not None:
+        return _OUI_DB
+    _OUI_DB = {}
+    import glob
+    cands = (glob.glob("/opt/homebrew/Cellar/nmap/*/share/nmap/nmap-mac-prefixes")
+             + ["/opt/homebrew/share/nmap/nmap-mac-prefixes",
+                "/usr/local/share/nmap/nmap-mac-prefixes",
+                "/usr/share/nmap/nmap-mac-prefixes"])
+    path = next((p for p in cands if os.path.exists(p)), None)
+    if not path:
+        return _OUI_DB
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = re.match(r"([0-9A-Fa-f]{6})\s+(.+)", line)
+            if m:
+                _OUI_DB[m.group(1).upper()] = m.group(2).strip()
+    return _OUI_DB
+
+
+def is_local_admin_mac(mac):
+    """True if the MAC is locally-administered (randomized/private — no real OUI)."""
+    try:
+        return bool(int(mac[:2], 16) & 0x2)
+    except (ValueError, IndexError):
+        return False
+
+
+def oui_lookup(mac):
+    """Manufacturer for a MAC via OUI, or '' (randomized MACs have no real OUI)."""
+    if not mac or is_local_admin_mac(mac):
+        return ""
+    return _oui_db().get(mac.replace(":", "")[:6].upper(), "")
+
+
+def enrich_vendors(master):
+    """Fill a blank Vendor from the MAC's OUI. Returns how many were filled."""
+    n = 0
+    for row in master.values():
+        if not row["Vendor"]:
+            v = oui_lookup(row["MAC"])
+            if v:
+                row["Vendor"] = v
+                n += 1
+    return n
+
+
+# --------------------------------------------------------------------------- #
 # new-device detection / event log
 # --------------------------------------------------------------------------- #
 def log_events(rows, kind="join"):
@@ -959,12 +1014,25 @@ def cmd_update(args):
             sightings += ssdp_discover()
 
     seen = merge(master, sightings)
+    filled = enrich_vendors(master)
+    if filled:
+        print(f"  filled {filled} vendor(s) via OUI lookup")
     if args.cloud:
         import connectors
         cloud_merge(master, connectors.discover())
     if args.auto_name:
         named = auto_name(master)
         print(f"  auto-named {named} device(s) from discovery")
+    if args.fingerprint:
+        # new joins first, then still-unnamed online devices not yet fingerprinted
+        new = [master[m] for m in master if m not in before]
+        todo = new + [r for r in master.values()
+                      if not r["Device"] and r["Status"] == "online" and r["IP"]
+                      and not r["Notes"].startswith("fp:") and r not in new]
+        todo = todo[:args.fp_limit]
+        if todo:
+            print(f"  fingerprinting {len(todo)} device(s) (active nmap)...")
+            fingerprint_rows(todo, fast=args.fp_fast, apply_notes=True, verbose=False)
     save_master(master)
     write_reports(master)
     # an imported export isn't a real "join", so only flag new devices when we
@@ -1060,6 +1128,142 @@ def cmd_wifi_scan(args):
         print(f"  added {added} of-mine BSSID(s) to inventory")
 
 
+# --------------------------------------------------------------------------- #
+# active fingerprinting (ports + service banners -> device-type guess)
+# --------------------------------------------------------------------------- #
+# port -> (service hint, device-type hint)
+_PORT_HINTS = {
+    554: ("RTSP", "IP camera"), 8554: ("RTSP", "IP camera"),
+    8060: ("Roku ECP", "Roku / TV"), 8008: ("Google Cast", "Chromecast / Nest"),
+    8009: ("Google Cast", "Chromecast / Nest"), 9999: ("TP-Link Kasa", "Kasa plug/switch"),
+    6668: ("Tuya", "Tuya/SmartLife device"), 1883: ("MQTT", "IoT hub/broker"),
+    8883: ("MQTT/TLS", "IoT hub/broker"), 5000: ("UPnP/AirPlay", "media/NAS"),
+    7000: ("AirPlay", "Apple TV/HomePod"), 3689: ("DAAP", "Apple media"),
+    631: ("IPP", "printer"), 9100: ("JetDirect", "printer"), 515: ("LPD", "printer"),
+    32400: ("Plex", "media server"), 5353: ("mDNS", ""), 1900: ("SSDP", ""),
+    22: ("SSH", "computer/server"), 3306: ("MySQL", "server"), 445: ("SMB", "computer/NAS"),
+    62078: ("iOS-sync", "iPhone/iPad"), 49152: ("UPnP", "media/IoT"),
+}
+
+
+def fingerprint_host(ip, fast=True):
+    """nmap service scan over a curated IoT port set + HTTP banner grab."""
+    ports = "21,22,23,80,443,445,515,554,631,1883,3306,3689,5000,7000,8000,"\
+            "8008,8009,8060,8080,8443,8554,8883,9100,9999,32400,49152,62078"
+    info = {"ports": [], "services": [], "http": ""}
+    try:
+        out = subprocess.run(
+            ["nmap", "-Pn", "-n", "-T4", "--open", "-p", ports]
+            + (["-sV", "--version-light"] if not fast else []) + [ip],
+            capture_output=True, text=True, timeout=120).stdout
+    except Exception as e:  # noqa: BLE001
+        info["error"] = str(e)
+        return info
+    for line in out.splitlines():
+        m = re.match(r"\s*(\d+)/tcp\s+open\s+(\S+)\s*(.*)$", line)
+        if not m:
+            continue
+        port = int(m.group(1))
+        info["ports"].append(port)
+        name, extra = m.group(2).strip(), m.group(3).strip()
+        svc = f"{name} {extra}".strip()
+        if svc and svc != "unknown":
+            info["services"].append(f"{port}:{svc}")
+    # HTTP banner (Server header + <title>)
+    for port, scheme in ((80, "http"), (8080, "http"), (443, "https"), (8008, "http")):
+        if port in info["ports"]:
+            try:
+                r = subprocess.run(
+                    ["curl", "-sk", "-m", "4", "-D", "-", f"{scheme}://{ip}:{port}/"],
+                    capture_output=True, text=True, timeout=6).stdout
+                srv = re.search(r"^Server:\s*(.+)$", r, re.M | re.I)
+                ttl = re.search(r"<title>([^<]{1,60})</title>", r, re.I)
+                bits = [b.group(1).strip() for b in (srv, ttl) if b]
+                if bits:
+                    info["http"] = " | ".join(bits)
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+    return info
+
+
+def guess_type(vendor, info):
+    """Heuristic device-type label from vendor + open ports + service/HTTP banners."""
+    types, ports = [], set(info.get("ports", []))
+    for p in ports:
+        hint = _PORT_HINTS.get(p, ("", ""))[1]
+        if hint:
+            types.append(hint)
+    blob = (vendor + " " + info.get("http", "") + " "
+            + " ".join(info.get("services", []))).lower()
+    for kw, t in (("broadband|gateway|router|openwrt|technicolor|vantiva", "router/gateway"),
+                  ("iphone-sync", "iPhone/iPad"), ("roku|dial", "Roku / TV"),
+                  ("hue|hap", "Hue / HomeKit"), ("epson|ipp|jetdirect|printer", "printer"),
+                  ("dahua|hikvision|raysharp|rtsp|camera", "IP camera"),
+                  ("synology|qnap|smb|netbios", "NAS / computer"),
+                  ("sonos|airplay|spotify", "speaker / media"),
+                  ("plex", "media server"), ("mqtt", "IoT hub"),
+                  ("espressif|tuya|tasmota|smartlife", "ESP/smart-home device")):
+        if re.search(kw, blob):
+            types.append(t)
+    # de-dup preserving order
+    seen, out = set(), []
+    for t in types:
+        if t and t not in seen:
+            seen.add(t); out.append(t)
+    return ", ".join(out[:3])
+
+
+def fingerprint_rows(rows, fast=False, apply_notes=False, verbose=True):
+    """Fingerprint each row; optionally record findings to Notes. Returns
+    [(row, info, guess)]. Notes are only set when there's a real signal, and
+    they're prefixed 'fp:' so a later run can skip already-fingerprinted rows."""
+    results = []
+    for r in rows:
+        if not r["IP"]:
+            continue
+        info = fingerprint_host(r["IP"], fast=fast)
+        g = guess_type(r["Vendor"], info)
+        results.append((r, info, g))
+        if verbose:
+            print(f"  {r['IP']:15} {r['MAC']}  {r['Vendor'][:22] or '?':22}")
+            if info.get("ports"):
+                print(f"      ports: {','.join(str(p) for p in sorted(info['ports']))}")
+            if info.get("services"):
+                print(f"      svc:   {'; '.join(info['services'][:5])}")
+            if info.get("http"):
+                print(f"      http:  {info['http']}")
+            print(f"      ==> guess: {g or '(unclear — vendor only)'}\n")
+        if apply_notes:
+            parts = [f"fp: {r['Vendor'] or '?'}"]
+            if g:
+                parts.append(g)
+            if info.get("ports"):
+                parts.append("ports " + ",".join(str(p) for p in sorted(info["ports"])))
+            r["Notes"] = "; ".join(parts)
+    return results
+
+
+def cmd_fingerprint(args):
+    master = load_master()
+    enrich_vendors(master)
+    if args.target:
+        t = norm_mac(args.target) if ":" in args.target and len(args.target) == 17 else args.target
+        rows = [r for r in master.values() if r["MAC"] == t or r["IP"] == args.target]
+    else:
+        rows = [r for r in master.values()
+                if not r["Device"] and r["Status"] == "online" and r["IP"]][:args.limit]
+    if not rows:
+        print("  nothing to fingerprint (give an IP/MAC, or run a scan first)")
+        return
+    print(f"  fingerprinting {len(rows)} device(s) — this runs active nmap scans\n")
+    fingerprint_rows(rows, fast=args.fast, apply_notes=args.apply)
+    if args.apply:
+        save_master(master)
+        write_reports(master)
+        print("  wrote fingerprint hints to Notes")
+
+
 def cmd_pairs(args):
     """Show (or apply) suggested same-device MAC groupings."""
     master = load_master()
@@ -1119,6 +1323,7 @@ def cmd_name(args):
 
 def cmd_report(args):
     master = load_master()
+    enrich_vendors(master)
     # refresh status against STALE_DAYS without scanning
     for row in master.values():
         if row["Status"] != "online":
@@ -1247,6 +1452,11 @@ def main():
                    help="fill blank friendly names from high-quality discovered names")
     u.add_argument("--notify", action="store_true",
                    help="macOS notification when a new device joins")
+    u.add_argument("--fingerprint", action="store_true",
+                   help="active-fingerprint new joins + unnamed online devices")
+    u.add_argument("--fp-fast", action="store_true", help="fingerprint: ports only (skip -sV)")
+    u.add_argument("--fp-limit", type=int, default=10,
+                   help="max devices to fingerprint per run (default 10)")
     u.add_argument("--import-csv", nargs="?", const=DEFAULT_IMPORT, default=None,
                    metavar="PATH", help=f"import old export (default {DEFAULT_IMPORT})")
     u.set_defaults(func=cmd_update)
@@ -1278,6 +1488,13 @@ def main():
     wf.add_argument("--add-mine", action="store_true",
                     help="add BSSIDs identified as mine into the inventory")
     wf.set_defaults(func=cmd_wifi_scan)
+
+    fp = sub.add_parser("fingerprint", help="probe ports/banners to identify unknown devices")
+    fp.add_argument("target", nargs="?", help="IP or MAC (default: unnamed online devices)")
+    fp.add_argument("--fast", action="store_true", help="port scan only, skip -sV service detection")
+    fp.add_argument("--limit", type=int, default=8, help="max devices when scanning all (default 8)")
+    fp.add_argument("--apply", action="store_true", help="write findings to each device's Notes")
+    fp.set_defaults(func=cmd_fingerprint)
 
     pr = sub.add_parser("pairs", help="show MACs likely to be the same device (wired+wifi)")
     pr.add_argument("--by-mac", action="store_true",

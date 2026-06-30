@@ -18,13 +18,15 @@ cd "$(dirname "$0")"
 
 ROUTER_FLAG="--router"
 CLOUD_FLAG="--cloud"
+FP_FLAG="--fingerprint --fp-fast"   # OUI is always on; active probe is incremental
 for a in "$@"; do
-  [ "$a" = "--no-router" ] && ROUTER_FLAG=""
-  [ "$a" = "--no-cloud" ]  && CLOUD_FLAG=""
+  [ "$a" = "--no-router" ]      && ROUTER_FLAG=""
+  [ "$a" = "--no-cloud" ]       && CLOUD_FLAG=""
+  [ "$a" = "--no-fingerprint" ] && FP_FLAG=""
 done
 
 # use the local venv (cloud SDKs live there) when present, else system python3
 PY="python3"; [ -x ".venv/bin/python" ] && PY=".venv/bin/python"
-"$PY" netinv.py update --scan $ROUTER_FLAG $CLOUD_FLAG --auto-name --notify
+"$PY" netinv.py update --scan $ROUTER_FLAG $CLOUD_FLAG $FP_FLAG --auto-name --notify
 echo
 echo "Report: $(pwd)/report.md"

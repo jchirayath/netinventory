@@ -82,6 +82,7 @@ overwrites a name you set.
 ./netinv.py show [filter]                                        # print inventory
 ./netinv.py report                                               # rebuild reports from devices.csv
 ./netinv.py pairs [--by-mac] [--apply]                           # find likely wired+wifi duplicates
+./netinv.py fingerprint [ip|mac] [--fast] [--apply]              # identify a device by ports/banners
 ./netinv.py wifi-scan [file] [--add-mine]                        # classify a Wi-Fi survey
 ./netinv.py set-router-password                                  # store router login in Keychain
 ./netinv.py set-cloud <provider>                                 # store a cloud connector's creds
@@ -140,6 +141,31 @@ notification.
 you stop it — leave it running in a terminal, or wrap it in a `launchd`/cron job
 for unattended monitoring. Each join is captured with its time, IP, MAC, vendor,
 hostname, and band in `events.csv`.
+
+## Identifying unknown devices (fingerprinting)
+
+Two layers, both built in:
+
+**OUI vendor lookup (passive, automatic).** Every run fills a blank `Vendor`
+from the MAC's manufacturer prefix using nmap's offline OUI database — no
+scanning, instant. Randomized/private MACs (phones) have no real OUI and stay
+blank by design.
+
+**Active fingerprinting (port + service + banner probe).** Identifies device
+*type* by scanning a curated set of IoT ports, reading HTTP/TLS banners, and
+matching service signatures (e.g. `8060`→Roku, `9999`→Kasa, `62078`→iPhone,
+RTSP→camera, IPP→printer):
+
+```bash
+./netinv.py fingerprint 192.168.1.50        # one device
+./netinv.py fingerprint --apply             # unnamed online devices -> hints in Notes
+./netinv.py update --scan --fingerprint     # fold it into a refresh (incremental)
+```
+
+`update --fingerprint` probes new joins + still-unnamed online devices (up to
+`--fp-limit`, default 10), skipping any already fingerprinted, and writes a
+`fp: …` hint to each device's `Notes`. `update.sh` runs it in fast mode by
+default (`--no-fingerprint` to skip). Active scans only touch your own LAN.
 
 ## Status / staleness
 
