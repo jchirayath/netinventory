@@ -47,6 +47,10 @@ DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 ROUTER_HOST = os.environ.get("NETINV_ROUTER", "192.168.1.1")
 SUBNET = os.environ.get("NETINV_SUBNET", "192.168.1.0/24")
+# Cached gateway session (reused across runs to avoid re-login lockouts).
+ROUTER_COOKIES = os.path.join(HERE, "router_cookies.txt")
+ROUTER_COOLDOWN_FILE = os.path.join(HERE, ".router_cooldown")
+ROUTER_COOLDOWN_MIN = int(os.environ.get("NETINV_ROUTER_COOLDOWN_MIN", "30"))
 # A device not seen for this many days is reported as "defunct".
 STALE_DAYS = int(os.environ.get("NETINV_STALE_DAYS", "30"))
 
@@ -260,39 +264,96 @@ def ssdp_discover(timeout=3):
     return out
 
 
-def router_scan(user, password):
-    """Log into the Xfinity/Technicolor gateway and scrape connected devices.
+def _router_valid(html):
+    """A real connected-devices page carries the device JS arrays."""
+    return "onlineHostMAC" in html or "offlineHostMAC" in html
 
-    Login flow (discovered from the gateway): POST username/password/locale to
-    /check.jst with a cookie jar, then GET connected_devices_computers.jst.
+
+def _router_cooldown_remaining():
+    """Minutes left on the self-imposed lockout cooldown (0 = clear)."""
+    if not os.path.exists(ROUTER_COOLDOWN_FILE):
+        return 0
+    try:
+        t = dt.datetime.fromisoformat(open(ROUTER_COOLDOWN_FILE).read().strip())
+    except (ValueError, OSError):
+        return 0
+    left = ROUTER_COOLDOWN_MIN - (dt.datetime.now() - t).total_seconds() / 60
+    return max(0, int(left + 0.999))
+
+
+def router_scan(user, password):
+    """Scrape the Xfinity/Technicolor gateway's connected-devices page.
+
+    Session reuse: the authenticated cookie is cached to router_cookies.txt and
+    tried first on every run, so we log in only when the session has expired.
+    Repeated logins trip the gateway's brute-force lockout — this avoids that.
+    On a detected lockout we back off for ROUTER_COOLDOWN_MIN minutes.
     """
+    cd = _router_cooldown_remaining()
+    if cd > 0:
+        print(f"  ! router in lockout cooldown (~{cd} min left); skipping login")
+        return []
+
     base = f"http://{ROUTER_HOST}"
-    cj = http.cookiejar.CookieJar()
+    cj = http.cookiejar.MozillaCookieJar(ROUTER_COOKIES)
+    if os.path.exists(ROUTER_COOKIES):
+        try:
+            cj.load(ignore_discard=True, ignore_expires=True)
+        except Exception:  # noqa: BLE001
+            pass
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     opener.addheaders = [("User-Agent", "Mozilla/5.0 netinv")]
 
+    # 1) Try the cached session first — no login.
+    html = ""
     try:
-        opener.open(f"{base}/index.jst", timeout=10).read()  # seed cookie
-        data = urllib.parse.urlencode(
-            {"username": user, "password": password, "locale": "false"}
-        ).encode()
-        opener.open(f"{base}/check.jst", data=data, timeout=10).read()
         html = opener.open(f"{base}/connected_devices_computers.jst",
                            timeout=15).read().decode("utf-8", "replace")
-    except Exception as e:  # noqa: BLE001
-        print(f"  ! router login/scrape failed: {e}")
-        return []
+    except Exception:  # noqa: BLE001
+        html = ""
 
-    # Logged-in pages still contain a "Logout"->home_loggedout link and i18n
-    # strings, so don't test for those. The real signal is the device arrays.
-    if "onlineHostMAC" not in html and "offlineHostMAC" not in html:
-        print("  ! router login failed (no device data returned - check password)")
-        return []
+    if _router_valid(html):
+        print("  router: reusing cached session (no login)")
+    else:
+        # 2) Session missing/expired -> log in once.
+        if not password:
+            print("  ! router: no password available; skipping")
+            return []
+        try:
+            opener.open(f"{base}/index.jst", timeout=10).read()
+            data = urllib.parse.urlencode(
+                {"username": user, "password": password, "locale": "false"}).encode()
+            opener.open(f"{base}/check.jst", data=data, timeout=10).read()
+            html = opener.open(f"{base}/connected_devices_computers.jst",
+                               timeout=15).read().decode("utf-8", "replace")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! router login/scrape failed: {e}")
+            return []
+        if not _router_valid(html):
+            if "locked" in html.lower():
+                with open(ROUTER_COOLDOWN_FILE, "w") as f:
+                    f.write(now_stamp())
+                print(f"  ! router account LOCKED (too many logins). Backing off "
+                      f"{ROUTER_COOLDOWN_MIN} min; the cached session will be reused after.")
+            else:
+                print("  ! router login failed (no device data — check password)")
+            return []
+        try:
+            cj.save(ignore_discard=True, ignore_expires=True)
+            os.chmod(ROUTER_COOKIES, 0o600)
+        except Exception:  # noqa: BLE001
+            pass
+        print("  router: logged in (session cached for reuse)")
 
-    # cache raw HTML so the parser can be refined against the real structure
+    # success -> clear any stale cooldown marker
+    if os.path.exists(ROUTER_COOLDOWN_FILE):
+        try:
+            os.remove(ROUTER_COOLDOWN_FILE)
+        except OSError:
+            pass
+
     with open(os.path.join(HERE, "router_devices_raw.html"), "w") as f:
         f.write(html)
-
     sightings = parse_router_html(html)
     print(f"  router reported {len(sightings)} devices "
           f"({sum(s['online'] for s in sightings)} online)")

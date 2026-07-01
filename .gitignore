@@ -12,6 +12,10 @@ home_ssids.txt
 *.html
 router_devices_raw.html
 
+# Cached gateway session + lockout-cooldown state
+router_cookies.txt
+.router_cooldown
+
 # Credentials / local config (secrets live in the macOS Keychain; never in files)
 .netinv.env
 *.env

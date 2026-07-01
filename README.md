@@ -67,7 +67,11 @@ overwritten by a refresh.
 2. **SSDP / UPnP** — reads each device's `<friendlyName>` (often the name *you* gave
    it, e.g. "Family Room TV").
 3. **Router** — scrapes the gateway's connected-devices page for DHCP hostnames,
-   wired/wireless link type, and authoritative online/offline status.
+   wired/wireless link type, and authoritative online/offline status. The
+   authenticated session cookie is cached (`router_cookies.txt`) and reused, so
+   it only logs in when the session has expired — repeated logins trip the
+   gateway's brute-force lockout. If a lockout is detected it backs off for
+   `NETINV_ROUTER_COOLDOWN_MIN` minutes (default 30) instead of hammering it.
 4. **Smart-home clouds** (optional) — the names you set in each app.
 
 `--auto-name` fills a blank `Device` from the best discovered name; it never
