@@ -86,6 +86,7 @@ overwrites a name you set.
 ./netinv.py show [filter]                                        # print inventory
 ./netinv.py alerts [--rule id] [--notify]                        # evaluate alert rules
 ./netinv.py history "<name|mac>"                                 # join history + record
+./netinv.py serve [--host H] [--port 8787]                       # JSON API + web dashboard
 ./netinv.py report                                               # rebuild reports from devices.csv
 ./netinv.py pairs [--by-mac] [--apply]                           # find likely wired+wifi duplicates
 ./netinv.py fingerprint [ip|mac] [--fast] [--apply]              # identify a device by ports/banners

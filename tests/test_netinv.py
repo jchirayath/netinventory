@@ -222,6 +222,33 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(sevs, sorted(sevs, key=lambda s: {"high": 0, "med": 1, "low": 2}[s]))
 
 
+class TestApi(unittest.TestCase):
+    def _master(self):
+        def row(**kw):
+            base = {"Device": "", "MAC": "AA:BB:CC:00:00:01", "IP": "10.0.0.5",
+                    "Vendor": "", "Hostname": "", "Link": "Ethernet",
+                    "Status": "online", "FirstSeen": "2026-01-01",
+                    "LastSeen": "2026-01-01", "Source": "scan", "Notes": ""}
+            base.update(kw)
+            return base
+        return {"a": row(Device="Office PC", IP="10.0.0.9"),
+                "b": row(MAC="AA:BB:CC:00:00:02", IP="10.0.0.2", Status="offline",
+                         Link="Wi-Fi 5 GHz")}
+
+    def test_devices_sorted_and_enriched(self):
+        d = netinv.api_devices(self._master())
+        self.assertEqual([x["IP"] for x in d], ["10.0.0.2", "10.0.0.9"])  # IP-sorted
+        self.assertIn("category", d[0])
+        self.assertIn("band", d[0])
+
+    def test_summary_counts(self):
+        s = netinv.api_summary(self._master())
+        self.assertEqual(s["total"], 2)
+        self.assertEqual(s["online"], 1)
+        self.assertEqual(s["by_band"].get("5 GHz"), 1)
+        self.assertEqual(s["by_band"].get("Ethernet"), 1)
+
+
 class TestConnectors(unittest.TestCase):
     def test_tuya_id_embeds_mac_for_hex_id(self):
         # all-hex WiFi id: trailing 12 hex are the MAC

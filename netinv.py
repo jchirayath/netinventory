@@ -754,6 +754,39 @@ def evaluate_alerts(master, rules=ALERT_RULES):
     return sorted(out, key=lambda a: order.get(a["severity"], 9))
 
 
+def api_devices(master):
+    """Inventory as a list of JSON-ready dicts (sorted by IP)."""
+    out = []
+    for r in sorted(master.values(), key=lambda x: ip_key(x["IP"])):
+        d = {k: r[k] for k in FIELDS}
+        d["category"] = categorize(r)
+        d["band"] = band(r["Link"])
+        d["link_class"] = link_class(r["Link"])
+        out.append(d)
+    return out
+
+
+def api_summary(master):
+    """Rollup counts for a dashboard."""
+    devs = list(master.values())
+
+    def tally(fn):
+        c = {}
+        for r in devs:
+            k = fn(r) or "unknown"
+            c[k] = c.get(k, 0) + 1
+        return c
+
+    return {
+        "total": len(devs),
+        "online": sum(1 for r in devs if r["Status"] == "online"),
+        "unnamed": sum(1 for r in devs if not r["Device"]),
+        "by_status": tally(lambda r: r["Status"]),
+        "by_band": tally(lambda r: band(r["Link"]) or "unknown"),
+        "by_category": tally(categorize),
+    }
+
+
 def device_history(query):
     """Join-history rows from events.csv for a device (match MAC or name)."""
     if not os.path.exists(EVENTS_LOG):
@@ -1621,6 +1654,79 @@ def cmd_cloud(args):
     print(f"\n  {len(master)} MACs in {MASTER}  ·  {unnamed} still unnamed")
 
 
+_DASHBOARD = """<!doctype html><meta charset=utf-8><title>netinventory</title>
+<style>body{font:14px system-ui;margin:1.5rem;color:#111}h1{font-size:1.3rem}
+table{border-collapse:collapse;width:100%}th,td{padding:4px 8px;border-bottom:1px solid #eee;text-align:left}
+th{background:#1F4E78;color:#fff;position:sticky;top:0;cursor:pointer}tr:hover{background:#f6f9ff}
+.on{color:#137333}.off{color:#999}.pill{background:#eef;border-radius:8px;padding:1px 6px;font-size:12px}
+#sum{margin:.5rem 0 1rem;color:#555}input{padding:5px 8px;width:16rem;margin-bottom:.5rem}</style>
+<h1>netinventory</h1><div id=sum>loading…</div>
+<input id=q placeholder="filter…" oninput=render()>
+<table><thead><tr><th>IP<th>Device<th>Category<th>Band<th>Status<th>Vendor<th>MAC<th>Hostname</tr></thead>
+<tbody id=t></tbody></table><script>
+let D=[];async function load(){D=await (await fetch('/api/devices')).json();
+const s=await (await fetch('/api/summary')).json();
+sum.textContent=`${s.total} devices · ${s.online} online · ${s.unnamed} unnamed`;render()}
+function render(){const q=document.getElementById('q').value.toLowerCase();
+t.innerHTML=D.filter(d=>!q||JSON.stringify(d).toLowerCase().includes(q)).map(d=>
+`<tr><td>${d.IP}</td><td>${d.Device||'<i>—</i>'}</td><td>${d.category}</td><td>${d.band}</td>
+<td class=${d.Status=='online'?'on':'off'}>${d.Status}</td><td>${d.Vendor}</td>
+<td><span class=pill>${d.MAC}</span></td><td>${d.Hostname}</td></tr>`).join('')}
+load();setInterval(load,15000)</script>"""
+
+
+def cmd_serve(args):
+    """Read-only JSON API + a tiny dashboard for a GUI/iOS companion to consume."""
+    import http.server
+    import json as _json
+
+    def payload(path):
+        master = load_master()
+        enrich_vendors(master)
+        if path == "/api/devices":
+            return api_devices(master)
+        if path == "/api/summary":
+            return api_summary(master)
+        if path == "/api/alerts":
+            return evaluate_alerts(master)
+        if path == "/api/events":
+            return device_history("")  # all
+        return None
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # quiet
+            pass
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path in ("/", "/index.html"):
+                body = _DASHBOARD.encode()
+                ctype = "text/html; charset=utf-8"
+            else:
+                data = payload(path)
+                if data is None:
+                    self.send_error(404)
+                    return
+                body = _json.dumps(data).encode()
+                ctype = "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"  netinventory API on http://{args.host}:{args.port}  "
+          f"(/, /api/devices, /api/summary, /api/alerts, /api/events)")
+    if args.host not in ("127.0.0.1", "localhost"):
+        print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  stopped")
+
+
 def cmd_alerts(args):
     master = load_master()
     enrich_vendors(master)
@@ -1761,6 +1867,11 @@ def main():
     h = sub.add_parser("history", help="join history + current record for a device")
     h.add_argument("query", help="MAC or name substring")
     h.set_defaults(func=cmd_history)
+
+    sv = sub.add_parser("serve", help="read-only JSON API + dashboard (for a GUI/iOS app)")
+    sv.add_argument("--host", default="127.0.0.1", help="bind host (default localhost)")
+    sv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
+    sv.set_defaults(func=cmd_serve)
 
     args = p.parse_args()
     args.func(args)
