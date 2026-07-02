@@ -212,14 +212,26 @@ WiFi, so they land in `cloud_devices.csv` as a name reference.
 only. Map each once by reading the device's Wi-Fi Address (iOS: Settings → Wi-Fi → ⓘ);
 the private MAC is stable per network, so the label sticks.
 
-## Configuration (env vars)
+## Configuration
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `NETINV_ROUTER` | `192.168.1.1` | Gateway host |
-| `NETINV_SUBNET` | `192.168.1.0/24` | Subnet to scan |
-| `NETINV_STALE_DAYS` | `30` | Days unseen before a device is `defunct` |
-| `NETINV_HOME_SSIDS` | — | Comma-separated home SSIDs for `wifi-scan` |
+Settings resolve **env var → config file → default**. The config file is an INI
+at `~/.netinv/config` (or `$NETINV_CONFIG`) with a `[netinv]` section — see
+[`config.example`](config.example). The LAN filter is derived from `subnet`, so
+non-`192.168.1.x` networks work by setting it.
+
+| Variable | Config key | Default | Purpose |
+|---|---|---|---|
+| `NETINV_ROUTER` | `router_host` | `192.168.1.1` | Gateway host |
+| `NETINV_SUBNET` | `subnet` | `192.168.1.0/24` | Subnet to scan (drives LAN filter) |
+| `NETINV_STALE_DAYS` | `stale_days` | `30` | Days unseen before a device is `defunct` |
+| `NETINV_ROUTER_COOLDOWN_MIN` | `router_cooldown_min` | `30` | Lockout back-off minutes |
+| `NETINV_HOME_SSIDS` | `home_ssids` | — | Comma-separated home SSIDs for `wifi-scan` |
+
+## Tests
+
+```bash
+python -m unittest discover -s tests   # 25 tests, stdlib only, no network
+```
 
 ## Requirements
 

@@ -45,14 +45,43 @@ WIFI_SCAN_OUT = os.path.join(HERE, "wifi_scan.csv")
 EVENTS_LOG = os.path.join(HERE, "events.csv")
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
-ROUTER_HOST = os.environ.get("NETINV_ROUTER", "192.168.1.1")
-SUBNET = os.environ.get("NETINV_SUBNET", "192.168.1.0/24")
+def _load_config():
+    """Optional INI at $NETINV_CONFIG or ~/.netinv/config, section [netinv]."""
+    import configparser
+    path = os.environ.get("NETINV_CONFIG", os.path.expanduser("~/.netinv/config"))
+    if not os.path.exists(path):
+        return {}
+    p = configparser.ConfigParser()
+    try:
+        p.read(path)
+        return dict(p.items("netinv")) if p.has_section("netinv") else {}
+    except (configparser.Error, OSError):
+        return {}
+
+
+_CONFIG = _load_config()
+
+
+def _cfg(key, env, default):
+    """Resolve a setting: env var wins, then config file, then default."""
+    return os.environ.get(env) or _CONFIG.get(key) or default
+
+
+ROUTER_HOST = _cfg("router_host", "NETINV_ROUTER", "192.168.1.1")
+SUBNET = _cfg("subnet", "NETINV_SUBNET", "192.168.1.0/24")
 # Cached gateway session (reused across runs to avoid re-login lockouts).
 ROUTER_COOKIES = os.path.join(HERE, "router_cookies.txt")
 ROUTER_COOLDOWN_FILE = os.path.join(HERE, ".router_cooldown")
-ROUTER_COOLDOWN_MIN = int(os.environ.get("NETINV_ROUTER_COOLDOWN_MIN", "30"))
+ROUTER_COOLDOWN_MIN = int(_cfg("router_cooldown_min", "NETINV_ROUTER_COOLDOWN_MIN", "30"))
 # A device not seen for this many days is reported as "defunct".
-STALE_DAYS = int(os.environ.get("NETINV_STALE_DAYS", "30"))
+STALE_DAYS = int(_cfg("stale_days", "NETINV_STALE_DAYS", "30"))
+
+
+def subnet_prefix(subnet=None):
+    """'192.168.1.0/24' -> '192.168.1.' (the /24 host prefix used for LAN checks)."""
+    net = (subnet or SUBNET).split("/")[0]
+    parts = net.split(".")
+    return ".".join(parts[:3]) + "." if len(parts) == 4 else "192.168.1."
 
 FIELDS = ["Device", "MAC", "IP", "Vendor", "Hostname", "Link", "Status",
           "FirstSeen", "LastSeen", "Source", "Notes"]
@@ -90,7 +119,7 @@ def ip_key(ip):
 
 
 def is_lan_ip(ip):
-    return bool(ip) and ip.startswith("192.168.1.") and not ip.endswith(".255")
+    return bool(ip) and ip.startswith(subnet_prefix()) and not ip.endswith(".255")
 
 
 def better(new, old, bad=("", "N/A", "n/a", "?", "unknown")):
@@ -739,9 +768,11 @@ def suggest_pairs_by_mac(master):
 # Wi-Fi neighbor-scan classifier (mine vs neighbor)
 # --------------------------------------------------------------------------- #
 def home_ssids():
-    """Home SSID(s): NETINV_HOME_SSIDS env (comma-sep), else home_ssids.txt."""
-    env = os.environ.get("NETINV_HOME_SSIDS", "")
-    out = {s.strip().lower() for s in env.split(",") if s.strip()}
+    """Home SSID(s) from: NETINV_HOME_SSIDS env, config [netinv] home_ssids
+    (both comma-separated), and home_ssids.txt (one per line)."""
+    out = set()
+    for src in (os.environ.get("NETINV_HOME_SSIDS", ""), _CONFIG.get("home_ssids", "")):
+        out |= {s.strip().lower() for s in src.split(",") if s.strip()}
     if os.path.exists(HOME_SSIDS_FILE):
         with open(HOME_SSIDS_FILE) as f:
             out |= {ln.strip().lower() for ln in f if ln.strip()}

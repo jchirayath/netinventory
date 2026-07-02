@@ -29,6 +29,24 @@ class TestMac(unittest.TestCase):
         self.assertEqual(netinv.oui_lookup("AA:BB:CC:00:00:01"), "")  # LA -> no OUI
 
 
+class TestSubnet(unittest.TestCase):
+    def test_prefix_derivation(self):
+        self.assertEqual(netinv.subnet_prefix("192.168.1.0/24"), "192.168.1.")
+        self.assertEqual(netinv.subnet_prefix("10.0.0.0/24"), "10.0.0.")
+        self.assertEqual(netinv.subnet_prefix("172.16.5.0/24"), "172.16.5.")
+
+    def test_is_lan_ip_uses_configured_subnet(self):
+        # patch the module-derived prefix to a 10.x net and confirm filtering
+        orig = netinv.SUBNET
+        try:
+            netinv.SUBNET = "10.0.0.0/24"
+            self.assertTrue(netinv.is_lan_ip("10.0.0.42"))
+            self.assertFalse(netinv.is_lan_ip("10.0.0.255"))
+            self.assertFalse(netinv.is_lan_ip("192.168.1.42"))
+        finally:
+            netinv.SUBNET = orig
+
+
 class TestSortAndFilter(unittest.TestCase):
     def test_ip_key_orders_numerically(self):
         ips = ["10.0.0.20", "10.0.0.3", "10.0.0.100"]

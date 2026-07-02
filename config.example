@@ -1,0 +1,13 @@
+# netinventory config — copy to ~/.netinv/config (or point NETINV_CONFIG at it).
+# Every key is optional; env vars (NETINV_*) override these; these override defaults.
+[netinv]
+# Gateway host to scrape/scan
+router_host = 192.168.1.1
+# Subnet to scan (the /24 host prefix is derived from this for LAN filtering)
+subnet = 192.168.1.0/24
+# Days unseen before a device is marked "defunct"
+stale_days = 30
+# Minutes to back off after a detected router lockout
+router_cooldown_min = 30
+# Home Wi-Fi network name(s) for `wifi-scan`, comma-separated
+home_ssids = MyHomeWiFi
