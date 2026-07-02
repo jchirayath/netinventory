@@ -28,6 +28,10 @@ class TestMac(unittest.TestCase):
     def test_oui_skips_random_mac(self):
         self.assertEqual(netinv.oui_lookup("AA:BB:CC:00:00:01"), "")  # LA -> no OUI
 
+    def test_oui_resolves_known_prefix(self):
+        # 00:00:0C is Cisco's classic OUI — stable in the bundled DB
+        self.assertIn("Cisco", netinv.oui_lookup("00:00:0C:12:34:56"))
+
 
 class TestSubnet(unittest.TestCase):
     def test_prefix_derivation(self):

@@ -571,24 +571,38 @@ _OUI_DB = None
 
 
 def _oui_db():
-    """Load {6-hex-prefix: vendor} from nmap's bundled nmap-mac-prefixes."""
+    """Load {6-hex-prefix: vendor}. Prefer the bundled gzip (works without nmap
+    installed); fall back to a system nmap-mac-prefixes file."""
     global _OUI_DB
     if _OUI_DB is not None:
         return _OUI_DB
     _OUI_DB = {}
     import glob
+    import gzip
+
+    def _ingest(lines):
+        for line in lines:
+            m = re.match(r"([0-9A-Fa-f]{6})\s+(.+)", line)
+            if m:
+                _OUI_DB[m.group(1).upper()] = m.group(2).strip()
+
+    bundled = os.path.join(HERE, "data", "oui-prefixes.txt.gz")
+    if os.path.exists(bundled):
+        try:
+            with gzip.open(bundled, "rt", encoding="utf-8", errors="replace") as f:
+                _ingest(f)
+            if _OUI_DB:
+                return _OUI_DB
+        except OSError:
+            pass
     cands = (glob.glob("/opt/homebrew/Cellar/nmap/*/share/nmap/nmap-mac-prefixes")
              + ["/opt/homebrew/share/nmap/nmap-mac-prefixes",
                 "/usr/local/share/nmap/nmap-mac-prefixes",
                 "/usr/share/nmap/nmap-mac-prefixes"])
     path = next((p for p in cands if os.path.exists(p)), None)
-    if not path:
-        return _OUI_DB
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            m = re.match(r"([0-9A-Fa-f]{6})\s+(.+)", line)
-            if m:
-                _OUI_DB[m.group(1).upper()] = m.group(2).strip()
+    if path:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            _ingest(f)
     return _OUI_DB
 
 
