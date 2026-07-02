@@ -38,3 +38,7 @@ dist/
 # LaunchAgent cron log
 netinv-cron.log
 *.log
+
+# IDE / misc
+*.iml
+~$*
