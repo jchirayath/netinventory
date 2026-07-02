@@ -169,6 +169,34 @@ class TestCategorizeGuess(unittest.TestCase):
         self.assertIn("iPhone", g)
 
 
+class TestEventsRetention(unittest.TestCase):
+    def test_prune_drops_old_keeps_recent(self):
+        import csv
+        import datetime as dt
+        import tempfile
+        old = (dt.date.today() - dt.timedelta(days=400)).isoformat() + "T10:00:00"
+        new = dt.date.today().isoformat() + "T10:00:00"
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["Timestamp", "Event", "MAC"])
+            w.writerow([old, "join", "AA:BB:CC:00:00:01"])
+            w.writerow([new, "join", "AA:BB:CC:00:00:02"])
+        orig_log, orig_days = netinv.EVENTS_LOG, netinv.EVENTS_RETENTION_DAYS
+        try:
+            netinv.EVENTS_LOG, netinv.EVENTS_RETENTION_DAYS = path, 365
+            netinv.prune_events()
+            with open(path, newline="") as f:
+                rows = list(csv.reader(f, delimiter=";"))
+        finally:
+            netinv.EVENTS_LOG, netinv.EVENTS_RETENTION_DAYS = orig_log, orig_days
+            os.remove(path)
+        macs = [r[2] for r in rows[1:]]
+        self.assertIn("AA:BB:CC:00:00:02", macs)     # recent kept
+        self.assertNotIn("AA:BB:CC:00:00:01", macs)  # old pruned
+
+
 class TestConnectors(unittest.TestCase):
     def test_tuya_id_embeds_mac_for_hex_id(self):
         # all-hex WiFi id: trailing 12 hex are the MAC

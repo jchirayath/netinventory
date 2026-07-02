@@ -79,6 +79,9 @@ ROUTER_COOLDOWN_FILE = os.path.join(DATA_DIR, ".router_cooldown")
 ROUTER_COOLDOWN_MIN = int(_cfg("router_cooldown_min", "NETINV_ROUTER_COOLDOWN_MIN", "30"))
 # A device not seen for this many days is reported as "defunct".
 STALE_DAYS = int(_cfg("stale_days", "NETINV_STALE_DAYS", "30"))
+# events.csv join-history retention.
+EVENTS_RETENTION_DAYS = int(_cfg("events_retention_days",
+                                 "NETINV_EVENTS_RETENTION_DAYS", "365"))
 
 
 def subnet_prefix(subnet=None):
@@ -640,6 +643,35 @@ def enrich_vendors(master):
 # --------------------------------------------------------------------------- #
 # new-device detection / event log
 # --------------------------------------------------------------------------- #
+def prune_events():
+    """Drop events older than EVENTS_RETENTION_DAYS so the log stays bounded.
+    Rows with an unparseable timestamp are kept (fail-safe)."""
+    if not os.path.exists(EVENTS_LOG) or EVENTS_RETENTION_DAYS <= 0:
+        return
+    cutoff = dt.date.today() - dt.timedelta(days=EVENTS_RETENTION_DAYS)
+    try:
+        with open(EVENTS_LOG, newline="") as f:
+            rows = list(csv.reader(f, delimiter=";"))
+    except OSError:
+        return
+    if len(rows) < 2:
+        return
+    header, data = rows[0], rows[1:]
+    kept = []
+    for r in data:
+        try:
+            keep = dt.date.fromisoformat(r[0][:10]) >= cutoff
+        except (ValueError, IndexError):
+            keep = True
+        if keep:
+            kept.append(r)
+    if len(kept) != len(data):
+        with open(EVENTS_LOG, "w", newline="") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(header)
+            w.writerows(kept)
+
+
 def log_events(rows, kind="join"):
     """Append device events to events.csv (append-only history of joins)."""
     if not rows:
@@ -989,6 +1021,7 @@ def write_xlsx(master):
 
 
 def write_reports(master):
+    prune_events()   # keep the join history bounded
     # group by device (unnamed -> each MAC is its own group)
     groups = OrderedDict()
     for row in sorted(master.values(),
