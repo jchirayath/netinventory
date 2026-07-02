@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+  leak-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No network-data files tracked
+        run: |
+          for f in devices.csv report.md report-by-device.csv inventory.xlsx \
+                   wifi_scan.csv cloud_devices.csv events.csv home_ssids.txt \
+                   router_cookies.txt; do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              echo "::error::network-data file is tracked: $f"; exit 1
+            fi
+          done
+      - name: No real MACs committed
+        run: |
+          hits=$(git grep -InE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' \
+                   -- ':!data/*' ':!*.gz' \
+                 | grep -viE '(AA:BB:CC|A2:00:00|00:11:22|08:00:27|AC:11:22|AE:11:22|00:AA:BB|00:00:0C|FF:FF:FF|aa:bb:cc)' \
+                 || true)
+          if [ -n "$hits" ]; then
+            echo "::error::possible real MAC address committed:"; echo "$hits"; exit 1
+          fi
+          echo "clean — no real MACs, no data files"

@@ -142,9 +142,13 @@ notification.
 ```
 
 `watch` keeps polling (gateway + local scan + SSDP), merging, and alerting until
-you stop it — leave it running in a terminal, or wrap it in a `launchd`/cron job
-for unattended monitoring. Each join is captured with its time, IP, MAC, vendor,
-hostname, and band in `events.csv`.
+you stop it. Each join is captured with its time, IP, MAC, vendor, hostname, and
+band in `events.csv`. For unattended scheduled runs, install the LaunchAgent:
+
+```bash
+./contrib/install-launchagent.sh 1800     # run ./update.sh every 30 min
+./contrib/install-launchagent.sh uninstall
+```
 
 ## Identifying unknown devices (fingerprinting)
 

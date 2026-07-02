@@ -34,3 +34,7 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# LaunchAgent cron log
+netinv-cron.log
+*.log
