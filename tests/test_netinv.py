@@ -197,6 +197,31 @@ class TestEventsRetention(unittest.TestCase):
         self.assertNotIn("AA:BB:CC:00:00:01", macs)  # old pruned
 
 
+class TestAlerts(unittest.TestCase):
+    def _row(self, **kw):
+        base = {"Device": "", "MAC": "AA:BB:CC:00:00:01", "IP": "10.0.0.5",
+                "Vendor": "", "Hostname": "", "Link": "", "Status": "online",
+                "FirstSeen": "2000-01-01", "LastSeen": "2000-01-01"}
+        base.update(kw)
+        return base
+
+    def test_unknown_online_flagged(self):
+        master = {"m": self._row()}  # online, no vendor, unnamed
+        alerts = netinv.evaluate_alerts(master)
+        self.assertTrue(any(a["rule"] == "unknown-online" for a in alerts))
+
+    def test_named_wired_device_no_high_alert(self):
+        master = {"m": self._row(Device="Office PC", Vendor="Intel", Status="online")}
+        alerts = netinv.evaluate_alerts(master)
+        self.assertFalse(any(a["severity"] == "high" for a in alerts))
+
+    def test_severity_sort(self):
+        master = {"a": self._row(Device="X", Status="offline"),   # low
+                  "b": self._row()}                                # high
+        sevs = [a["severity"] for a in netinv.evaluate_alerts(master)]
+        self.assertEqual(sevs, sorted(sevs, key=lambda s: {"high": 0, "med": 1, "low": 2}[s]))
+
+
 class TestConnectors(unittest.TestCase):
     def test_tuya_id_embeds_mac_for_hex_id(self):
         # all-hex WiFi id: trailing 12 hex are the MAC

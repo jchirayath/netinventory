@@ -84,6 +84,8 @@ overwrites a name you set.
 ./netinv.py watch [--interval 300] [--notify] [--once]           # poll & alert on new devices
 ./netinv.py name "Friendly Name" <mac> [<mac> ...]               # group MAC(s) under a name
 ./netinv.py show [filter]                                        # print inventory
+./netinv.py alerts [--rule id] [--notify]                        # evaluate alert rules
+./netinv.py history "<name|mac>"                                 # join history + record
 ./netinv.py report                                               # rebuild reports from devices.csv
 ./netinv.py pairs [--by-mac] [--apply]                           # find likely wired+wifi duplicates
 ./netinv.py fingerprint [ip|mac] [--fast] [--apply]              # identify a device by ports/banners

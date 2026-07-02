@@ -720,6 +720,55 @@ def report_new(master, before_macs, do_notify=False):
     return new
 
 
+# --------------------------------------------------------------------------- #
+# alert-rule engine  (pure: evaluate rules over the inventory)
+# --------------------------------------------------------------------------- #
+ALERT_RULES = [
+    ("unknown-online", "high",
+     "Unidentified device online (no vendor, unnamed)",
+     lambda r: r["Status"] == "online" and not r["Vendor"] and not r["Device"]),
+    ("new-today", "high", "Device first seen today",
+     lambda r: (r.get("FirstSeen") or "")[:10] == TODAY),
+    ("unnamed-online", "med", "Online device with no friendly name",
+     lambda r: r["Status"] == "online" and not r["Device"]),
+    ("named-offline", "low", "Known device is offline",
+     lambda r: bool(r["Device"]) and r["Status"] in ("offline", "defunct")),
+]
+
+
+def evaluate_alerts(master, rules=ALERT_RULES):
+    """Return alert dicts for rows matching each rule. Pure and testable."""
+    out = []
+    for r in master.values():
+        for rid, sev, desc, pred in rules:
+            try:
+                if pred(r):
+                    out.append({
+                        "rule": rid, "severity": sev, "desc": desc,
+                        "device": r["Device"] or r["Hostname"] or "(unnamed)",
+                        "mac": r["MAC"], "ip": r["IP"], "band": band(r["Link"]),
+                    })
+            except Exception:  # noqa: BLE001
+                pass
+    order = {"high": 0, "med": 1, "low": 2}
+    return sorted(out, key=lambda a: order.get(a["severity"], 9))
+
+
+def device_history(query):
+    """Join-history rows from events.csv for a device (match MAC or name)."""
+    if not os.path.exists(EVENTS_LOG):
+        return []
+    q = query.lower()
+    out = []
+    with open(EVENTS_LOG, newline="") as f:
+        rows = list(csv.DictReader(f, delimiter=";"))
+    for r in rows:
+        hay = " ".join(str(v) for v in r.values()).lower()
+        if q in hay:
+            out.append(r)
+    return out
+
+
 # (keyword, category) ordered most- to least-specific; first hit wins.
 _CATEGORY_RULES = [
     ("camera|cam |blink|wyze|hualai|raysharp|dvr|nvr|doorbell", "Camera / Security"),
@@ -1572,6 +1621,43 @@ def cmd_cloud(args):
     print(f"\n  {len(master)} MACs in {MASTER}  ·  {unnamed} still unnamed")
 
 
+def cmd_alerts(args):
+    master = load_master()
+    enrich_vendors(master)
+    alerts = evaluate_alerts(master)
+    if args.rule:
+        alerts = [a for a in alerts if a["rule"] == args.rule]
+    if not alerts:
+        print("  no alerts")
+        return
+    icon = {"high": "!!", "med": "! ", "low": "· "}
+    for a in alerts:
+        print(f"  {icon.get(a['severity'], '  ')} [{a['rule']}] {a['device']:26} "
+              f"{a['ip']:15} {a['mac']}  {a['band']}")
+    print(f"\n  {len(alerts)} alert(s). Filter with --rule <id>; "
+          f"rules: {', '.join(r[0] for r in ALERT_RULES)}")
+    if args.notify:
+        highs = [a for a in alerts if a["severity"] == "high"]
+        for a in highs[:5]:
+            notify("Network alert", f"{a['desc']}: {a['device']} ({a['ip'] or a['mac']})")
+
+
+def cmd_history(args):
+    hist = device_history(args.query)
+    cur = [r for r in load_master().values()
+           if args.query.lower() in " ".join(
+               [r["Device"], r["Hostname"], r["MAC"], r["IP"]]).lower()]
+    if cur:
+        print("  current inventory:")
+        for r in cur:
+            print(f"    {r['Device'] or '(unnamed)':26} {r['IP']:15} {r['MAC']}  "
+                  f"{r['Status']}  first={r['FirstSeen'][:10]} last={r['LastSeen']}")
+    print(f"\n  join events ({len(hist)}):" if hist else "\n  no join events logged")
+    for r in hist:
+        print(f"    {r.get('Timestamp', '')}  {r.get('Event', '')}  "
+              f"{r.get('IP', '')}  {r.get('MAC', '')}  {r.get('Band', '')}")
+
+
 def cmd_show(args):
     master = load_master()
     q = (args.query or "").lower()
@@ -1666,6 +1752,15 @@ def main():
     s = sub.add_parser("show", help="print current inventory")
     s.add_argument("query", nargs="?")
     s.set_defaults(func=cmd_show)
+
+    al = sub.add_parser("alerts", help="evaluate alert rules against the inventory")
+    al.add_argument("--rule", help="show only this rule id")
+    al.add_argument("--notify", action="store_true", help="macOS notification for high alerts")
+    al.set_defaults(func=cmd_alerts)
+
+    h = sub.add_parser("history", help="join history + current record for a device")
+    h.add_argument("query", help="MAC or name substring")
+    h.set_defaults(func=cmd_history)
 
     args = p.parse_args()
     args.func(args)
