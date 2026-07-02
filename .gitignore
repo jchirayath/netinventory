@@ -29,3 +29,8 @@ venv/
 
 # OS
 .DS_Store
+
+# Python build/install artifacts
+*.egg-info/
+build/
+dist/

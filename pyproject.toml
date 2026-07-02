@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netinventory"
+version = "0.1.0"
+description = "Home network device inventory — MAC-keyed, DHCP-resilient, with router/SSDP/cloud discovery, fingerprinting, and a Wi-Fi neighbor classifier."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Jacob Chirayath" }]
+keywords = ["network", "inventory", "macos", "nmap", "ssdp", "tuya", "home-network"]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+]
+# Core is standard-library only. Optional features pull extras below.
+dependencies = []
+
+[project.optional-dependencies]
+xlsx = ["xlsxwriter"]
+tuya = ["tinytuya"]
+wyze = ["wyze-sdk"]
+blink = ["blinkpy", "aiohttp"]
+apple = ["pyicloud"]
+# Everything (cloud connectors + xlsx report)
+all = ["xlsxwriter", "tinytuya", "wyze-sdk", "blinkpy", "aiohttp", "pyicloud"]
+
+[project.urls]
+Homepage = "https://github.com/jchirayath/netinventory"
+Repository = "https://github.com/jchirayath/netinventory"
+
+[project.scripts]
+netinv = "netinv:main"
+
+[tool.setuptools]
+py-modules = ["netinv", "connectors"]
+
+# Ship the bundled OUI database alongside the modules.
+[tool.setuptools.package-data]
+"*" = ["data/oui-prefixes.txt.gz"]
+
+[tool.setuptools.data-files]
+"share/netinventory/data" = ["data/oui-prefixes.txt.gz"]

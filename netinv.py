@@ -35,14 +35,18 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MASTER = os.path.join(HERE, "devices.csv")
-REPORT_MD = os.path.join(HERE, "report.md")
-REPORT_BY_DEVICE = os.path.join(HERE, "report-by-device.csv")
-REPORT_XLSX = os.path.join(HERE, "inventory.xlsx")
-HOME_SSIDS_FILE = os.path.join(HERE, "home_ssids.txt")
-WIFI_SCAN_OUT = os.path.join(HERE, "wifi_scan.csv")
-EVENTS_LOG = os.path.join(HERE, "events.csv")
+HERE = os.path.dirname(os.path.abspath(__file__))     # code + read-only assets
+# Writable data lives in DATA_DIR (defaults to the code dir, so running from a
+# clone is unchanged; an installed copy can point NETINV_HOME elsewhere).
+DATA_DIR = os.environ.get("NETINV_HOME") or HERE
+os.makedirs(DATA_DIR, exist_ok=True)
+MASTER = os.path.join(DATA_DIR, "devices.csv")
+REPORT_MD = os.path.join(DATA_DIR, "report.md")
+REPORT_BY_DEVICE = os.path.join(DATA_DIR, "report-by-device.csv")
+REPORT_XLSX = os.path.join(DATA_DIR, "inventory.xlsx")
+HOME_SSIDS_FILE = os.path.join(DATA_DIR, "home_ssids.txt")
+WIFI_SCAN_OUT = os.path.join(DATA_DIR, "wifi_scan.csv")
+EVENTS_LOG = os.path.join(DATA_DIR, "events.csv")
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 def _load_config():
@@ -70,8 +74,8 @@ def _cfg(key, env, default):
 ROUTER_HOST = _cfg("router_host", "NETINV_ROUTER", "192.168.1.1")
 SUBNET = _cfg("subnet", "NETINV_SUBNET", "192.168.1.0/24")
 # Cached gateway session (reused across runs to avoid re-login lockouts).
-ROUTER_COOKIES = os.path.join(HERE, "router_cookies.txt")
-ROUTER_COOLDOWN_FILE = os.path.join(HERE, ".router_cooldown")
+ROUTER_COOKIES = os.path.join(DATA_DIR, "router_cookies.txt")
+ROUTER_COOLDOWN_FILE = os.path.join(DATA_DIR, ".router_cooldown")
 ROUTER_COOLDOWN_MIN = int(_cfg("router_cooldown_min", "NETINV_ROUTER_COOLDOWN_MIN", "30"))
 # A device not seen for this many days is reported as "defunct".
 STALE_DAYS = int(_cfg("stale_days", "NETINV_STALE_DAYS", "30"))
@@ -381,7 +385,7 @@ def router_scan(user, password):
         except OSError:
             pass
 
-    with open(os.path.join(HERE, "router_devices_raw.html"), "w") as f:
+    with open(os.path.join(DATA_DIR, "router_devices_raw.html"), "w") as f:
         f.write(html)
     sightings = parse_router_html(html)
     print(f"  router reported {len(sightings)} devices "
@@ -1456,7 +1460,7 @@ def cmd_set_router_password(args):
         print(f"  ! failed to store: {r.stderr.strip()}")
 
 
-CLOUD_REF = os.path.join(HERE, "cloud_devices.csv")
+CLOUD_REF = os.path.join(DATA_DIR, "cloud_devices.csv")
 
 
 def cmd_blink_login(args):
