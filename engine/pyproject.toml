@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "netinventory"
 version = "0.1.0"
-description = "Home network device inventory — MAC-keyed, DHCP-resilient, with router/SSDP/cloud discovery, fingerprinting, and a Wi-Fi neighbor classifier."
+description = "Home network device inventory — MAC-keyed, DHCP-resilient, with router/SSDP/mDNS/cloud discovery, fingerprinting, and a Wi-Fi neighbor classifier."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Jacob Chirayath" }]
-keywords = ["network", "inventory", "macos", "nmap", "ssdp", "tuya", "home-network"]
+keywords = ["network", "inventory", "macos", "nmap", "ssdp", "mdns", "dns-sd", "tuya", "home-network"]
 classifiers = [
   "Environment :: Console",
   "Operating System :: MacOS",

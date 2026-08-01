@@ -12,6 +12,10 @@ home_ssids.txt
 *.html
 router_devices_raw.html
 
+# Dashboard screenshots & browser snapshots — contain real MACs/IPs/hostnames
+/*.png
+.playwright-mcp/
+
 # Cached gateway session + lockout-cooldown state
 router_cookies.txt
 .router_cooldown

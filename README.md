@@ -16,7 +16,10 @@ The engine is the scanner (Python + nmap/arp/SSDP/router scrape/cloud). It can't
 run on iOS, so the split is deliberate:
 
 - **`engine/`** runs on a Mac. `netinv serve` exposes a read-only JSON API
-  (`/api/devices|summary|alerts|events`) plus a web dashboard.
+  (`/api/devices|summary|alerts|events`) plus a web dashboard. Renaming from the
+  dashboard/app is opt-in: `netinv serve --allow-write` enables `POST /api/name`
+  (off by default; the write path sends no CORS header, so cross-site pages
+  can't reach it).
 - **`app/`** is the viewer. On macOS it reads `http://127.0.0.1:8787`; on iOS
   (which can't scan) it points at the Mac's LAN IP.
 

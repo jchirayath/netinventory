@@ -142,6 +142,7 @@ class TestRouterParse(unittest.TestCase):
         "IPv4 Address</b><br/></dd>10.0.0.20<dd><b id='macaddlocnew'>MAC Address"
         "</b><br/></dd>AA:BB:CC:00:00:01"
         "MAC Address</b><br/></dd>AA:BB:CC:00:00:01 lorem "
+        "headers='rssi-level'> -72 dBm </td>"
         "headers='connection-type' id=ethcon><span id=ethcon>Wi-Fi 5 GHz</span>"
     )
 
@@ -153,6 +154,12 @@ class TestRouterParse(unittest.TestCase):
         self.assertEqual(by_mac["AA:BB:CC:00:00:01"]["ip"], "10.0.0.20")
         self.assertEqual(by_mac["AA:BB:CC:00:00:01"]["link"], "Wi-Fi 5 GHz")
         self.assertFalse(by_mac["AA:BB:CC:00:00:09"]["online"])
+
+    def test_parses_rssi(self):
+        by_mac = {x["mac"]: x for x in netinv.parse_router_html(self.HTML)}
+        # Wi-Fi client gets its signal; the offline one (no rssi cell) stays None
+        self.assertEqual(by_mac["AA:BB:CC:00:00:01"]["rssi"], -72)
+        self.assertIsNone(by_mac["AA:BB:CC:00:00:09"]["rssi"])
 
 
 class TestCategorizeGuess(unittest.TestCase):
@@ -221,6 +228,29 @@ class TestAlerts(unittest.TestCase):
         sevs = [a["severity"] for a in netinv.evaluate_alerts(master)]
         self.assertEqual(sevs, sorted(sevs, key=lambda s: {"high": 0, "med": 1, "low": 2}[s]))
 
+    def test_weak_signal_alert_fires_with_rssi(self):
+        master = {"m": self._row(Device="Laptop", Vendor="Intel",
+                                 Link="Wi-Fi 5 GHz", Status="online", RSSI="-80")}
+        alerts = netinv.evaluate_alerts(master)
+        weak = [a for a in alerts if a["rule"] == "weak-signal"]
+        self.assertEqual(len(weak), 1)
+        self.assertEqual(weak[0]["rssi"], -80)
+
+    def test_weak_signal_alert_ignores_good_and_offline(self):
+        master = {"good": self._row(MAC="AA:BB:CC:00:00:02", Link="Wi-Fi 5 GHz",
+                                    Status="online", RSSI="-55"),
+                  "off": self._row(MAC="AA:BB:CC:00:00:03", Link="Wi-Fi 5 GHz",
+                                   Status="offline", RSSI="-88")}
+        alerts = netinv.evaluate_alerts(master)
+        self.assertFalse(any(a["rule"] == "weak-signal" for a in alerts))
+
+    def test_rssi_of_parses_and_defaults(self):
+        self.assertEqual(netinv.rssi_of({"RSSI": "-80"}), -80)
+        self.assertIsNone(netinv.rssi_of({"RSSI": ""}))
+        self.assertIsNone(netinv.rssi_of({}))
+        self.assertEqual(netinv.rssi_label(-80), "-80 dBm (weak)")
+        self.assertEqual(netinv.rssi_label(None), "")
+
 
 class TestApi(unittest.TestCase):
     def _master(self):
@@ -241,12 +271,135 @@ class TestApi(unittest.TestCase):
         self.assertIn("category", d[0])
         self.assertIn("band", d[0])
 
+    def test_signal_class_buckets(self):
+        self.assertEqual(netinv.signal_class(-55), "good")
+        self.assertEqual(netinv.signal_class(-67), "good")
+        self.assertEqual(netinv.signal_class(-70), "fair")
+        self.assertEqual(netinv.signal_class(-80), "weak")
+        self.assertEqual(netinv.signal_class(None), "")
+
+    def test_devices_expose_rssi_and_signal(self):
+        m = self._master()
+        m["b"]["RSSI"] = "-80"          # the Wi-Fi device
+        d = {x["MAC"]: x for x in netinv.api_devices(m)}
+        wifi = d["AA:BB:CC:00:00:02"]
+        self.assertEqual(wifi["rssi"], -80)
+        self.assertEqual(wifi["signal"], "weak")
+        wired = d["AA:BB:CC:00:00:01"]  # no RSSI -> null / no bucket
+        self.assertIsNone(wired["rssi"])
+        self.assertEqual(wired["signal"], "")
+
     def test_summary_counts(self):
         s = netinv.api_summary(self._master())
         self.assertEqual(s["total"], 2)
         self.assertEqual(s["online"], 1)
         self.assertEqual(s["by_band"].get("5 GHz"), 1)
         self.assertEqual(s["by_band"].get("Ethernet"), 1)
+
+
+class TestMdns(unittest.TestCase):
+    """mDNS/DNS-SD parsing and its fill-only vendor merge (synthetic packets)."""
+    import struct as _struct
+
+    def _lan_ip(self):
+        # a valid host IP under whatever subnet is configured (default .9)
+        oct3 = [int(x) for x in netinv.subnet_prefix().split(".") if x]
+        return oct3 + [9]
+
+    def _resp(self):
+        """A response carrying A + SRV(compressed target) + TXT + PTR for one
+        AirPlay instance 'Living Room' (model AppleTV6,2) on the LAN subnet."""
+        st = self._struct
+        buf = bytearray(st.pack(">HHHHHH", 0, 0x8400, 0, 4, 0, 0))
+        a_off = len(buf)
+        buf += netinv._dns_encode_name("appletv.local")
+        buf += st.pack(">HHIH", 1, 1, 120, 4) + bytes(self._lan_ip())         # A
+        inst = "DEADBEEF1234@Living Room._airplay._tcp.local"
+        buf += netinv._dns_encode_name(inst)
+        srv = st.pack(">HHH", 0, 0, 7000) + st.pack(">H", 0xC000 | a_off)      # SRV
+        buf += st.pack(">HHIH", 33, 1, 120, len(srv)) + srv
+        buf += netinv._dns_encode_name(inst)
+        txt = b"\x0dmd=AppleTV6,2\x11fn=Living Room TV"                        # TXT
+        buf += st.pack(">HHIH", 16, 1, 120, len(txt)) + txt
+        buf += netinv._dns_encode_name("_airplay._tcp.local")
+        ptr = netinv._dns_encode_name(inst)                                    # PTR
+        buf += st.pack(">HHIH", 12, 1, 120, len(ptr)) + ptr
+        return bytes(buf)
+
+    def test_parse_links_a_srv_txt(self):
+        a, srv, txt, inst = {}, {}, {}, {}
+        netinv._parse_mdns(self._resp(), a, srv, txt, inst)
+        self.assertEqual(a.get("appletv.local"),
+                         ".".join(str(o) for o in self._lan_ip()))
+        key = "deadbeef1234@living room._airplay._tcp.local"
+        self.assertEqual(srv.get(key), "appletv.local")
+        self.assertEqual(txt[key]["md"], "AppleTV6,2")
+        self.assertEqual(txt[key]["fn"], "Living Room TV")
+
+    def test_clean_model_rejects_numeric_metadata(self):
+        self.assertEqual(netinv._clean_model("0,1,2"), "")   # _raop metadata list
+        self.assertEqual(netinv._clean_model("AppleTV6,2"), "AppleTV6,2")
+
+    def test_looks_like_id(self):
+        self.assertTrue(netinv._looks_like_id("B61A2CDE8909DB5D-7BCE5BF6DAF65E9A"))
+        self.assertTrue(netinv._looks_like_id("76aae0d3-a313-504f-9a9b-ccf7497a927f"))
+        self.assertFalse(netinv._looks_like_id("Living Room"))
+        self.assertFalse(netinv._looks_like_id("Epson837"))
+
+    def test_model_fills_empty_vendor_only(self):
+        # empty vendor -> model fills it
+        m = {"AA:BB:CC:00:00:01": {k: "" for k in netinv.FIELDS}}
+        m["AA:BB:CC:00:00:01"]["MAC"] = "AA:BB:CC:00:00:01"
+        netinv.merge(m, [{"mac": "AA:BB:CC:00:00:01", "ip": "10.0.0.5",
+                          "vendor": "", "model": "Mac15,11", "hostname": "Studio",
+                          "source": "mdns", "online": True}])
+        self.assertEqual(m["AA:BB:CC:00:00:01"]["Vendor"], "Mac15,11")
+
+    def test_model_never_clobbers_oui_vendor(self):
+        # real OUI vendor present -> model must NOT overwrite it
+        m = {"00:11:22:33:44:55": {k: "" for k in netinv.FIELDS}}
+        m["00:11:22:33:44:55"].update(MAC="00:11:22:33:44:55", Vendor="Apple, Inc.")
+        netinv.merge(m, [{"mac": "00:11:22:33:44:55", "ip": "10.0.0.6",
+                          "vendor": "", "model": "AppleTV6,2", "hostname": "Den",
+                          "source": "mdns", "online": True}])
+        self.assertEqual(m["00:11:22:33:44:55"]["Vendor"], "Apple, Inc.")
+
+
+class TestApplyName(unittest.TestCase):
+    def _master(self):
+        return {"AA:BB:CC:00:00:01": {k: "" for k in netinv.FIELDS} |
+                {"MAC": "AA:BB:CC:00:00:01"}}
+
+    def test_renames_existing(self):
+        m = self._master()
+        self.assertEqual(netinv.apply_name(m, ["aa:bb:cc:0:0:1"], "  Office PC  "), 1)
+        self.assertEqual(m["AA:BB:CC:00:00:01"]["Device"], "Office PC")  # trimmed
+
+    def test_empty_name_clears(self):
+        m = self._master()
+        m["AA:BB:CC:00:00:01"]["Device"] = "Old"
+        netinv.apply_name(m, ["AA:BB:CC:00:00:01"], "")
+        self.assertEqual(m["AA:BB:CC:00:00:01"]["Device"], "")
+
+    def test_length_capped(self):
+        m = self._master()
+        netinv.apply_name(m, ["AA:BB:CC:00:00:01"], "x" * 200)
+        self.assertEqual(len(m["AA:BB:CC:00:00:01"]["Device"]), netinv.MAX_NAME_LEN)
+
+    def test_create_false_skips_unknown(self):
+        m = self._master()
+        self.assertEqual(
+            netinv.apply_name(m, ["DE:AD:BE:EF:00:01"], "Ghost", create=False), 0)
+        self.assertNotIn("DE:AD:BE:EF:00:01", m)
+
+    def test_create_true_adds_manual(self):
+        m = self._master()
+        self.assertEqual(netinv.apply_name(m, ["DE:AD:BE:EF:00:01"], "New"), 1)
+        self.assertEqual(m["DE:AD:BE:EF:00:01"]["Source"], "manual")
+
+    def test_bad_mac_ignored(self):
+        m = self._master()
+        self.assertEqual(netinv.apply_name(m, ["not-a-mac"], "X"), 0)
 
 
 class TestConnectors(unittest.TestCase):

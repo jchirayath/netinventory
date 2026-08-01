@@ -13,6 +13,7 @@ else is refreshed automatically.
 Data sources merged on each run, keyed by MAC:
   - the existing export (Documents/DevicesMacs.csv)  [--import-csv]
   - a local scan of this machine's subnet (nmap ping-sweep + ARP + reverse DNS)
+  - SSDP/UPnP and mDNS/DNS-SD name discovery  [--no-ssdp / --no-mdns to skip]
   - the Xfinity/Technicolor gateway's connected-devices page  [--router]
 
 Usage:
@@ -29,8 +30,10 @@ import http.cookiejar
 import os
 import re
 import socket
+import struct
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
@@ -91,7 +94,7 @@ def subnet_prefix(subnet=None):
     return ".".join(parts[:3]) + "." if len(parts) == 4 else "192.168.1."
 
 FIELDS = ["Device", "MAC", "IP", "Vendor", "Hostname", "Link", "Status",
-          "FirstSeen", "LastSeen", "Source", "Notes"]
+          "FirstSeen", "LastSeen", "Source", "Notes", "RSSI"]
 TODAY = dt.date.today().isoformat()
 
 
@@ -300,6 +303,193 @@ def ssdp_discover(timeout=3):
     return out
 
 
+# Common DNS-SD service types worth probing directly. The meta-query
+# (_services._dns-sd._udp.local) enumerates whatever else is advertised, but
+# asking for the popular ones by name makes discovery faster and more reliable.
+_MDNS_SERVICES = [
+    "_services._dns-sd._udp.local",   # meta-query: list all advertised services
+    "_airplay._tcp.local",            # Apple TV / AirPlay
+    "_raop._tcp.local",               # AirPlay audio (HomePod, receivers)
+    "_googlecast._tcp.local",         # Chromecast / Google / Nest
+    "_spotify-connect._tcp.local",
+    "_ipp._tcp.local", "_ipps._tcp.local", "_printer._tcp.local",  # printers
+    "_hap._tcp.local", "_homekit._tcp.local",   # HomeKit accessories
+    "_companion-link._tcp.local",     # Apple devices
+    "_amzn-wplay._tcp.local",         # Amazon devices
+    "_matter._tcp.local", "_matterc._udp.local",
+    "_http._tcp.local", "_workstation._tcp.local",
+]
+
+
+def _dns_encode_name(name):
+    out = b""
+    for label in name.split("."):
+        if label:
+            b = label.encode("utf-8")
+            out += bytes([len(b)]) + b
+    return out + b"\x00"
+
+
+def _dns_read_name(buf, off):
+    """Parse a (possibly compression-pointer'd) DNS name.
+    Return (labels, offset-past-name-in-the-record-stream)."""
+    labels, jumped, next_off, steps = [], False, off, 0
+    while off < len(buf):
+        length = buf[off]
+        if length == 0:
+            off += 1
+            if not jumped:
+                next_off = off
+            break
+        if length & 0xC0 == 0xC0:              # compression pointer
+            if off + 1 >= len(buf):
+                break
+            ptr = ((length & 0x3F) << 8) | buf[off + 1]
+            if not jumped:
+                next_off = off + 2
+            off, jumped, steps = ptr, True, steps + 1
+            if steps > 64:                     # guard against pointer loops
+                break
+            continue
+        off += 1
+        labels.append(buf[off:off + length].decode("utf-8", "replace"))
+        off += length
+    return labels, next_off
+
+
+def _parse_mdns(buf, a_recs, srv, txt, instances):
+    """Accumulate A / PTR / SRV / TXT records from one mDNS response packet."""
+    if len(buf) < 12:
+        return
+    qd, an, ns, ar = struct.unpack(">HHHH", buf[4:12])
+    off = 12
+    for _ in range(qd):                        # skip questions
+        _, off = _dns_read_name(buf, off)
+        off += 4
+    for _ in range(an + ns + ar):
+        name_labels, off = _dns_read_name(buf, off)
+        if off + 10 > len(buf):
+            return
+        rtype, _rclass, _ttl, rdlen = struct.unpack(">HHIH", buf[off:off + 10])
+        off += 10
+        rend = off + rdlen
+        low = ".".join(name_labels).lower()
+        if rtype == 1 and rdlen == 4:                       # A record
+            ip = ".".join(str(b) for b in buf[off:off + 4])
+            if is_lan_ip(ip):
+                a_recs[low] = ip
+        elif rtype == 12:                                   # PTR -> instance
+            inst_labels, _ = _dns_read_name(buf, off)
+            if inst_labels and not inst_labels[0].startswith("_"):
+                instances.setdefault(".".join(inst_labels).lower(), inst_labels[0])
+        elif rtype == 33 and rdlen >= 7:                    # SRV -> target host
+            tgt_labels, _ = _dns_read_name(buf, off + 6)
+            srv[low] = ".".join(tgt_labels).lower()
+            if name_labels:
+                instances.setdefault(low, name_labels[0])
+        elif rtype == 16:                                   # TXT key=value pairs
+            d, p = {}, off
+            while p < rend:
+                l = buf[p]
+                p += 1
+                if l == 0 or p + l > rend:
+                    break
+                kv = buf[p:p + l].decode("utf-8", "replace")
+                p += l
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    d[k.lower()] = v
+            if d:
+                txt.setdefault(low, {}).update(d)
+        off = rend
+
+
+def mdns_discover(timeout=3):
+    """mDNS / DNS-SD discovery (source 'mdns'). Multicast a PTR query for a set
+    of common service types plus the DNS-SD meta-query, then parse the A/PTR/
+    SRV/TXT replies. DNS-SD *instance* names are user-assigned (e.g. 'Living
+    Room Apple TV') and TXT 'fn='/'md=' give friendly-name/model — all excellent
+    discovered data, and unlike OUI they survive MAC randomization. IP -> MAC
+    via the ARP table."""
+    a_recs, srv, txt, instances = {}, {}, {}, {}
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        s.settimeout(timeout)
+        header = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0)
+        for svc in _MDNS_SERVICES:
+            pkt = header + _dns_encode_name(svc) + struct.pack(">HH", 12, 1)  # PTR/IN
+            try:
+                s.sendto(pkt, ("224.0.0.251", 5353))
+            except OSError:
+                pass
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data, addr = s.recvfrom(9000)
+            except socket.timeout:
+                break
+            if is_lan_ip(addr[0]):
+                _parse_mdns(data, a_recs, srv, txt, instances)
+    except OSError as e:
+        print(f"  ! mDNS failed: {e}")
+        return []
+    finally:
+        try:
+            s.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    ip2mac = arp_table()
+    out, seen_ip = [], set()
+    # 1) service instances -> friendly name + model, resolved to an IP via SRV/A
+    for inst_low, label in instances.items():
+        host = srv.get(inst_low)
+        ip = a_recs.get(host) if host else None
+        if not ip:
+            continue
+        t = txt.get(inst_low, {})
+        name = t.get("fn") or t.get("n") or label            # fn= beats a UUID label
+        # AirPlay/RAOP instances are 'DEADBEEF1234@Living Room' -> keep the label.
+        name = re.sub(r"^[0-9A-Fa-f]{6,}@", "", name).strip()
+        # md=/am= is a model string; skip _raop's numeric 'md=0,1,2' metadata list.
+        model = _clean_model(t.get("md") or t.get("model") or t.get("am") or "")
+        mac = ip2mac.get(ip)
+        if mac and name and not _looks_like_id(name):
+            # model is carried separately: it fills an *empty* Vendor but must
+            # never clobber the authoritative OUI manufacturer (see merge()).
+            out.append({"mac": mac, "ip": ip, "vendor": "", "model": model,
+                        "hostname": name, "source": "mdns", "online": True})
+            seen_ip.add(ip)
+    # 2) plain A-record hostnames for IPs no service instance covered
+    for host, ip in a_recs.items():
+        if ip in seen_ip:
+            continue
+        name = host.split(".")[0]
+        mac = ip2mac.get(ip)
+        if mac and name and not _looks_like_id(name):
+            out.append({"mac": mac, "ip": ip, "vendor": "", "hostname": name,
+                        "source": "mdns", "online": True})
+            seen_ip.add(ip)
+    print(f"  mDNS discovered {len(out)} named devices")
+    return out
+
+
+def _clean_model(s):
+    """A TXT model value is only useful if it names something. Reject pure
+    digit/comma lists (e.g. _raop 'md=0,1,2' metadata formats, not a model)."""
+    s = (s or "").strip()
+    return s if re.search(r"[A-Za-z]", s) else ""
+
+
+def _looks_like_id(name):
+    """True for opaque machine IDs (long hex blobs / UUIDs) that make poor names."""
+    n = (name or "").strip()
+    return bool(re.fullmatch(r"[0-9A-Fa-f]{8,}(-[0-9A-Fa-f]{4,})*", n)) \
+        or bool(re.fullmatch(r"[0-9A-Fa-f-]{25,}", n))
+
+
 def _router_valid(html):
     """A real connected-devices page carries the device JS arrays."""
     return "onlineHostMAC" in html or "offlineHostMAC" in html
@@ -428,6 +618,16 @@ def parse_router_html(html):
             html, re.S):
         link_by_mac[norm_mac(mac)] = re.sub(r"\s+", " ", ct).strip()
 
+    # MAC -> Wi-Fi signal strength ('-NN dBm') from the per-device rssi-level
+    # cell. The lookahead keeps the match inside one device block (Ethernet
+    # clients show a non-numeric cell and are skipped, leaving rssi absent).
+    rssi_by_mac = {}
+    for m in re.finditer(
+            r"MAC Address</b><br/?></dd>\s*(([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})"
+            r"(?:(?!MAC Address</b>).)*?headers='rssi-level'[^>]*>\s*(-?\d+)\s*dBm",
+            html, re.S):
+        rssi_by_mac[norm_mac(m.group(1))] = int(m.group(3))
+
     out = []
     for prefix, online in (("online", True), ("offline", False)):
         macs = _js_array(html, f"{prefix}HostMAC")
@@ -443,6 +643,7 @@ def parse_router_html(html):
                 "vendor": "",
                 "hostname": name,
                 "link": link_by_mac.get(mac, ""),
+                "rssi": rssi_by_mac.get(mac),
                 "source": "router",
                 "online": online,
             })
@@ -499,7 +700,15 @@ def merge(master, sightings):
             master[mac] = row
         row["IP"] = better(s["ip"], row["IP"])
         row["Vendor"] = better(s["vendor"], row["Vendor"])
+        # A discovered model (e.g. mDNS 'md=Mac15,11') is fill-only: it names a
+        # device whose MAC is randomized so OUI found nothing, but it must not
+        # override a real manufacturer that OUI/router already supplied.
+        if s.get("model") and not row["Vendor"]:
+            row["Vendor"] = s["model"]
         row["Link"] = better(s.get("link", ""), row["Link"])
+        # RSSI is a live per-scan reading from the gateway; refresh when present.
+        if s.get("rssi") is not None:
+            row["RSSI"] = str(s["rssi"])
         # keep the highest-quality discovered name (SSDP friendly > router > raw)
         if name_quality(s["hostname"]) > name_quality(row["Hostname"]):
             row["Hostname"] = s["hostname"].strip()
@@ -733,6 +942,8 @@ ALERT_RULES = [
      lambda r: r["Status"] == "online" and not r["Device"]),
     ("named-offline", "low", "Known device is offline",
      lambda r: bool(r["Device"]) and r["Status"] in ("offline", "defunct")),
+    ("weak-signal", "med", "Weak Wi-Fi signal (<= -75 dBm) — drops/DHCP failures likely",
+     lambda r: r["Status"] == "online" and signal_class(rssi_of(r)) == "weak"),
 ]
 
 
@@ -747,6 +958,7 @@ def evaluate_alerts(master, rules=ALERT_RULES):
                         "rule": rid, "severity": sev, "desc": desc,
                         "device": r["Device"] or r["Hostname"] or "(unnamed)",
                         "mac": r["MAC"], "ip": r["IP"], "band": band(r["Link"]),
+                        "rssi": rssi_of(r),
                     })
             except Exception:  # noqa: BLE001
                 pass
@@ -754,14 +966,52 @@ def evaluate_alerts(master, rules=ALERT_RULES):
     return sorted(out, key=lambda a: order.get(a["severity"], 9))
 
 
+def signal_class(rssi):
+    """Bucket a Wi-Fi RSSI (dBm) into good / fair / weak for at-a-glance UI.
+    None (wired or unknown) -> ''. Thresholds follow common Wi-Fi guidance:
+    >= -67 solid, -68..-74 usable, <= -75 marginal (drops, slow DHCP)."""
+    if rssi is None:
+        return ""
+    if rssi >= -67:
+        return "good"
+    if rssi >= -74:
+        return "fair"
+    return "weak"
+
+
+def rssi_of(row):
+    """Parse a master row's stored RSSI ('-80') into an int, or None if the
+    device has no Wi-Fi signal reading (wired / never reported)."""
+    v = str(row.get("RSSI", "")).strip()
+    return int(v) if v.lstrip("-").isdigit() else None
+
+
+def rssi_label(rssi):
+    """Human 'RSSI dBm (bucket)' for reports, or '' when absent."""
+    if rssi is None:
+        return ""
+    sc = signal_class(rssi)
+    return f"{rssi} dBm ({sc})" if sc else f"{rssi} dBm"
+
+
+def group_rssi(rows):
+    """Weakest (lowest) RSSI across a device's rows, or None if none are Wi-Fi.
+    A device may span a wired + Wi-Fi NIC; the weakest link is what drops."""
+    vals = [v for v in (rssi_of(r) for r in rows) if v is not None]
+    return min(vals) if vals else None
+
+
 def api_devices(master):
     """Inventory as a list of JSON-ready dicts (sorted by IP)."""
     out = []
     for r in sorted(master.values(), key=lambda x: ip_key(x["IP"])):
-        d = {k: r[k] for k in FIELDS}
+        d = {k: r.get(k, "") for k in FIELDS}
         d["category"] = categorize(r)
         d["band"] = band(r["Link"])
         d["link_class"] = link_class(r["Link"])
+        rssi = rssi_of(r)
+        d["rssi"] = rssi
+        d["signal"] = signal_class(rssi)
         out.append(d)
     return out
 
@@ -997,15 +1247,16 @@ def write_xlsx(master):
 
     # --- Sheet 1: Devices (full detail, sorted by IP) ---
     ws = wb.add_worksheet("Devices")
-    cols = ["IP", "Device", "Category", "Link", "Band", "Status", "MAC", "Vendor",
-            "Hostname", "FirstSeen", "LastSeen", "Source", "Notes"]
-    widths = [14, 28, 20, 10, 10, 9, 19, 26, 24, 19, 12, 14, 24]
+    cols = ["IP", "Device", "Category", "Link", "Band", "Signal", "Status", "MAC",
+            "Vendor", "Hostname", "FirstSeen", "LastSeen", "Source", "Notes"]
+    widths = [14, 28, 20, 10, 10, 16, 9, 19, 26, 24, 19, 12, 14, 24]
     for c, (name, wdt) in enumerate(zip(cols, widths)):
         ws.set_column(c, c, wdt)
         ws.write(0, c, name, hdr)
     for i, r in enumerate(rows, start=1):
         vals = [r["IP"], r["Device"], categorize(r), link_class(r["Link"]),
-                band(r["Link"]), r["Status"], r["MAC"], r["Vendor"], r["Hostname"],
+                band(r["Link"]), rssi_label(rssi_of(r)), r["Status"], r["MAC"],
+                r["Vendor"], r["Hostname"],
                 r["FirstSeen"], r["LastSeen"], r["Source"], r["Notes"]]
         for c, v in enumerate(vals):
             ws.write(i, c, v, cell)
@@ -1018,9 +1269,9 @@ def write_xlsx(master):
         key = r["Device"] or f"(unnamed) {r['MAC']}"
         groups.setdefault(key, []).append(r)
     ws2 = wb.add_worksheet("By Device")
-    cols2 = ["Device", "Category", "Status", "Connection", "#MACs", "IP(s)", "MAC(s)",
-             "Vendor", "LastSeen", "Notes"]
-    widths2 = [28, 20, 12, 22, 7, 30, 40, 26, 12, 24]
+    cols2 = ["Device", "Category", "Status", "Signal", "Connection", "#MACs",
+             "IP(s)", "MAC(s)", "Vendor", "LastSeen", "Notes"]
+    widths2 = [28, 20, 12, 16, 22, 7, 30, 40, 26, 12, 24]
     for c, (name, wdt) in enumerate(zip(cols2, widths2)):
         ws2.set_column(c, c, wdt)
         ws2.write(0, c, name, hdr)
@@ -1032,6 +1283,7 @@ def write_xlsx(master):
         conns = sorted({band(x["Link"]) for x in grp if band(x["Link"])})
         vals = [disp, categorize(grp[0]),
                 "/".join(sorted({x["Status"] for x in grp})),
+                rssi_label(group_rssi(grp)),
                 " + ".join(conns),
                 len(grp),
                 ", ".join(sorted({x["IP"] for x in grp if x["IP"]}, key=ip_key)),
@@ -1114,12 +1366,14 @@ def write_reports(master):
     # by-device CSV
     with open(REPORT_BY_DEVICE, "w", newline="") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["Device", "Status", "IPs", "MACs", "Vendors", "Hostnames", "LastSeen", "Notes"])
+        w.writerow(["Device", "Status", "Signal", "IPs", "MACs", "Vendors",
+                    "Hostnames", "LastSeen", "Notes"])
         for name, rows in groups.items():
             disp = name if not name.startswith("(unnamed)") else ""
             w.writerow([
                 disp,
                 "/".join(sorted({r["Status"] for r in rows})),
+                rssi_label(group_rssi(rows)),
                 ", ".join(sorted({r["IP"] for r in rows if r["IP"]}, key=ip_key)),
                 ", ".join(r["MAC"] for r in rows),
                 ", ".join(sorted({r["Vendor"] for r in rows if r["Vendor"]})),
@@ -1138,12 +1392,13 @@ def write_reports(master):
         f.write(f"- Total MACs tracked: **{total}**  ·  online now: **{online}**  ·  "
                 f"named devices: **{len(named)}**  ·  unnamed MACs: **{len(unnamed)}**\n\n")
         f.write("## Named devices\n\n")
-        f.write("| Device | Status | IP(s) | MAC(s) | Vendor | Last seen | Notes |\n")
-        f.write("|---|---|---|---|---|---|---|\n")
+        f.write("| Device | Status | Signal | IP(s) | MAC(s) | Vendor | Last seen | Notes |\n")
+        f.write("|---|---|---|---|---|---|---|---|\n")
         for name, rows in named:
-            f.write("| {} | {} | {} | {} | {} | {} | {} |\n".format(
+            f.write("| {} | {} | {} | {} | {} | {} | {} | {} |\n".format(
                 name,
                 "/".join(sorted({r["Status"] for r in rows})),
+                rssi_label(group_rssi(rows)) or "—",
                 "<br>".join(sorted({r["IP"] for r in rows if r["IP"]}, key=ip_key)),
                 "<br>".join(r["MAC"] for r in rows),
                 "<br>".join(sorted({r["Vendor"] for r in rows if r["Vendor"]})),
@@ -1152,10 +1407,11 @@ def write_reports(master):
             ))
         f.write(f"\n## Unnamed MACs ({len(unnamed)}) — assign a friendly name\n\n")
         f.write("Use: `./netinv.py name \"Friendly Name\" <mac> [<mac> ...]`\n\n")
-        f.write("| Status | IP | MAC | Vendor | Hostname |\n|---|---|---|---|---|\n")
+        f.write("| Status | Signal | IP | MAC | Vendor | Hostname |\n|---|---|---|---|---|---|\n")
         for _, rows in unnamed:
             r = rows[0]
-            f.write(f"| {r['Status']} | {r['IP']} | {r['MAC']} | {r['Vendor']} | {r['Hostname']} |\n")
+            f.write(f"| {r['Status']} | {rssi_label(rssi_of(r)) or '—'} | {r['IP']} "
+                    f"| {r['MAC']} | {r['Vendor']} | {r['Hostname']} |\n")
     print(f"  wrote {REPORT_MD}\n  wrote {REPORT_BY_DEVICE}")
     write_xlsx(master)
 
@@ -1237,6 +1493,8 @@ def cmd_update(args):
         sightings += local_scan(do_sweep=not args.no_sweep)
         if not args.no_ssdp:
             sightings += ssdp_discover()
+        if not args.no_mdns:
+            sightings += mdns_discover()
 
     seen = merge(master, sightings)
     filled = enrich_vendors(master)
@@ -1293,6 +1551,8 @@ def cmd_watch(args):
         sightings += local_scan(do_sweep=not args.no_sweep)
         if not args.no_ssdp:
             sightings += ssdp_discover()
+        if not args.no_mdns:
+            sightings += mdns_discover()
         seen = merge(master, sightings)
         auto_name(master)
         save_master(master)
@@ -1530,17 +1790,34 @@ def cmd_pairs(args):
         print(f"\n  applied {applied} grouping(s)")
 
 
-def cmd_name(args):
-    master = load_master()
-    macs = [norm_mac(m) for m in args.macs]
+MAX_NAME_LEN = 64
+
+
+def apply_name(master, macs, device, *, create=True):
+    """Assign a friendly Device name to one or more MACs. Pure over `master`
+    (mutates it, returns the count changed). `device` is trimmed/capped; an
+    empty string clears the name. When create is False, unknown MACs are
+    skipped (used by the API, which only renames devices it already knows)."""
+    device = (device or "").strip()[:MAX_NAME_LEN]
     changed = 0
-    for mac in macs:
+    for raw in macs:
+        mac = norm_mac(raw)
+        if mac.count(":") != 5:
+            continue
         if mac not in master:
+            if not create:
+                continue
             master[mac] = {k: "" for k in FIELDS}
             master[mac]["MAC"] = mac
             master[mac]["Source"] = "manual"
-        master[mac]["Device"] = args.device
+        master[mac]["Device"] = device
         changed += 1
+    return changed
+
+
+def cmd_name(args):
+    master = load_master()
+    changed = apply_name(master, args.macs, args.device)
     save_master(master)
     write_reports(master)
     print(f"  set Device='{args.device}' on {changed} MAC(s)")
@@ -1655,23 +1932,184 @@ def cmd_cloud(args):
 
 
 _DASHBOARD = """<!doctype html><meta charset=utf-8><title>netinventory</title>
-<style>body{font:14px system-ui;margin:1.5rem;color:#111}h1{font-size:1.3rem}
-table{border-collapse:collapse;width:100%}th,td{padding:4px 8px;border-bottom:1px solid #eee;text-align:left}
-th{background:#1F4E78;color:#fff;position:sticky;top:0;cursor:pointer}tr:hover{background:#f6f9ff}
-.on{color:#137333}.off{color:#999}.pill{background:#eef;border-radius:8px;padding:1px 6px;font-size:12px}
-#sum{margin:.5rem 0 1rem;color:#555}input{padding:5px 8px;width:16rem;margin-bottom:.5rem}</style>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+:root{--head:#1F4E78}
+*{box-sizing:border-box}
+body{font:13px system-ui;margin:1rem;color:#111}
+h1{font-size:1.2rem;margin:.2rem 0}
+#sum{color:#555;margin:.2rem 0 .6rem}
+.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:.5rem}
+.bar input,.bar select{padding:5px 8px;font:13px system-ui;border:1px solid #cdd;border-radius:6px}
+#q{width:18rem;flex:0 1 18rem}
+.chip{border:1px solid #ccd;border-radius:14px;padding:3px 10px;cursor:pointer;background:#fff;user-select:none}
+.chip.on{background:var(--head);color:#fff;border-color:var(--head)}
+.spacer{flex:1}
+.btn{border:1px solid #ccd;border-radius:6px;padding:4px 9px;background:#fff;cursor:pointer}
+.wrap{overflow-x:auto;border:1px solid #eee;border-radius:6px}
+table{border-collapse:collapse;width:100%}
+th,td{padding:4px 8px;border-bottom:1px solid #eee;text-align:left;white-space:nowrap}
+thead th{background:var(--head);color:#fff;position:sticky;top:0;cursor:pointer;z-index:2;user-select:none}
+th .ar{font-size:10px;opacity:.95}
+th .pri{font-size:9px;background:#ffffff3d;border-radius:6px;padding:0 4px;margin-left:2px}
+tr.f th{position:sticky;top:26px;background:#eef2f8;z-index:1;padding:2px 6px}
+tr.f input,tr.f select{width:100%;min-width:70px;padding:2px 4px;font:12px system-ui;border:1px solid #cdd;border-radius:4px}
+tbody tr:hover{background:#f0f6ff}
+tr.ev td{background:#fbfcfe}
+tr.grp{cursor:pointer;font-weight:600;background:#e2eaf5!important}
+tr.grp:hover td{background:#dae4f2}
+tr.grp .roll{font-weight:400;color:#3a516b;margin-left:10px}
+.caret{display:inline-block;width:12px}
+tr.weak td{box-shadow:inset 3px 0 #c5221f}
+tr.dim td{color:#9aa}
+.pill{background:#eef;border-radius:8px;padding:1px 6px;font-size:12px}
+.edit{cursor:pointer;opacity:.35;margin-left:6px}.edit:hover{opacity:1}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.sig-good{color:#137333}.sig-fair{color:#b06000}.sig-weak{color:#c5221f;font-weight:600}
+</style>
 <h1>netinventory</h1><div id=sum>loading…</div>
-<input id=q placeholder="filter…" oninput=render()>
-<table><thead><tr><th>IP<th>Device<th>Category<th>Band<th>Status<th>Vendor<th>MAC<th>Hostname</tr></thead>
-<tbody id=t></tbody></table><script>
-let D=[];async function load(){D=await (await fetch('/api/devices')).json();
-const s=await (await fetch('/api/summary')).json();
-sum.textContent=`${s.total} devices · ${s.online} online · ${s.unnamed} unnamed`;render()}
-function render(){const q=document.getElementById('q').value.toLowerCase();
-t.innerHTML=D.filter(d=>!q||JSON.stringify(d).toLowerCase().includes(q)).map(d=>
-`<tr><td>${d.IP}</td><td>${d.Device||'<i>—</i>'}</td><td>${d.category}</td><td>${d.band}</td>
-<td class=${d.Status=='online'?'on':'off'}>${d.Status}</td><td>${d.Vendor}</td>
-<td><span class=pill>${d.MAC}</span></td><td>${d.Hostname}</td></tr>`).join('')}
+<div class=bar>
+ <input id=q placeholder="search all fields…">
+ <label>Group <select id=gb>
+  <option value="">(none)</option><option value="band">Band</option>
+  <option value="category">Category</option><option value="Status">Status</option>
+  <option value="signal">Signal</option></select></label>
+ <span class=chip id=cw>Only weak</span>
+ <span class=chip id=co>Only offline</span>
+ <span class=chip id=cu>Only unnamed</span>
+ <span class=chip id=cd>Hide defunct</span>
+ <span class=spacer></span>
+ <button class=btn id=rst>Reset</button>
+</div>
+<div class=wrap><table><thead><tr id=hr></tr><tr class=f id=fr></tr></thead><tbody id=t></tbody></table></div>
+<script>
+const WRITABLE=__WRITABLE__;
+const COLS=[
+ {k:'Status',l:'Status',t:'status'},
+ {k:'IP',l:'IP',t:'ip'},
+ {k:'Device',l:'Device',t:'text',g:d=>d.Device||d.Hostname||''},
+ {k:'category',l:'Category',t:'enum'},
+ {k:'band',l:'Band',t:'enum'},
+ {k:'signal',l:'Signal',t:'sig'},
+ {k:'Vendor',l:'Vendor',t:'text'},
+ {k:'MAC',l:'MAC',t:'mac'},
+ {k:'Hostname',l:'Host',t:'text'},
+ {k:'LastSeen',l:'Last seen',t:'text'},
+ {k:'Source',l:'Source',t:'enum'},
+];
+const SIGORD={good:0,fair:1,weak:2,'~none':3};
+const SIGLBL={good:'Good signal',fair:'Fair signal',weak:'Weak signal','~none':'Wired / no signal'};
+const ST={q:'',group:'',sorts:[{k:'IP',dir:1}],filt:{},weak:false,off:false,unnamed:false,def:false,collapsed:{},built:false};
+let D=[];
+const val=(d,c)=>c.g?c.g(d):(c.k==='signal'?d.rssi:d[c.k]);
+const ipn=ip=>(''+ (ip||'')).split('.').reduce((a,p)=>a*256+(parseInt(p,10)||0),0);
+const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+function sig(d){if(d.rssi==null)return '<span class=dim>—</span>';
+ const b={good:'▂▄▆',fair:'▂▄_',weak:'▂__'}[d.signal]||'';
+ return `<span class=sig-${d.signal} title="${d.rssi} dBm">${b} ${d.rssi}<span style=font-size:11px> dBm</span></span>`}
+function dot(s){const c=s=='online'?'#137333':(s=='defunct'?'#999':'#e08600');
+ return `<span class=dot style=background:${c}></span>`}
+function cmp1(a,b,c){
+ if(c.t=='ip')return ipn(a.IP)-ipn(b.IP);
+ const x=(''+ (val(a,c)||'')).toLowerCase(),y=(''+ (val(b,c)||'')).toLowerCase();
+ return x<y?-1:x>y?1:0}
+function cmp(a,b){
+ for(const s of ST.sorts){const c=COLS.find(x=>x.k==s.k);
+  if(c.t=='sig'){const x=a.rssi,y=b.rssi;
+   if(x==null&&y==null){}else if(x==null)return 1;else if(y==null)return -1;
+   else{const r=(x-y)*s.dir;if(r)return r}}
+  else{const r=cmp1(a,b,c)*s.dir;if(r)return r}}
+ return 0}
+function gkey(d){if(ST.group=='signal')return d.signal||'~none';
+ if(ST.group=='band')return d.band||'(none)';
+ if(ST.group=='category')return d.category||'(uncategorized)';
+ return d.Status||'(unknown)'}
+function glbl(k){return ST.group=='signal'?(SIGLBL[k]||k):k}
+function pass(d){
+ if(ST.q&&!JSON.stringify(d).toLowerCase().includes(ST.q.toLowerCase()))return false;
+ if(ST.weak&&d.signal!='weak')return false;
+ if(ST.off&&d.Status!='offline')return false;
+ if(ST.unnamed&&(''+ (d.Device||'')).trim())return false;
+ if(ST.def&&d.Status=='defunct')return false;
+ for(const k in ST.filt){const fv=ST.filt[k];if(!fv)continue;const c=COLS.find(x=>x.k==k);
+  if(c.t=='enum'||c.t=='status'){if((''+ (val(d,c)||''))!=fv)return false}
+  else if(c.t=='sig'){const tgt=fv=='~none'?'':fv;if((d.signal||'')!=tgt)return false}
+  else{if(!(''+ (val(d,c)||'')).toLowerCase().includes(fv.toLowerCase()))return false}}
+ return true}
+function cell(d,c){
+ if(c.t=='status')return dot(d.Status)+esc(d.Status);
+ if(c.t=='sig')return sig(d);
+ if(c.t=='mac')return `<span class=pill>${esc(d.MAC)}</span>`;
+ if(c.k=='Device'){const base=d.Device?esc(d.Device):`<i>${esc(d.Hostname||'—')}</i>`;
+  return base+(WRITABLE?` <span class=edit title="rename" onclick="rename('${esc(d.MAC)}')">&#9998;</span>`:'')}
+ return esc(val(d,c))}
+function rowHtml(d,ev){
+ const cls=[d.signal=='weak'?'weak':'',d.Status!='online'?'dim':'',ev?'ev':''].filter(Boolean).join(' ');
+ return `<tr class="${cls}">`+COLS.map(c=>`<td>${cell(d,c)}</td>`).join('')+'</tr>'}
+function renderHead(){
+ hr.innerHTML=COLS.map(c=>{const i=ST.sorts.findIndex(s=>s.k==c.k);const s=ST.sorts[i];
+  const ar=s?`<span class=ar>${s.dir>0?'▲':'▼'}</span>`:'';
+  const pri=(i>=0&&ST.sorts.length>1)?`<span class=pri>${i+1}</span>`:'';
+  return `<th data-k="${c.k}">${c.l}${ar}${pri}</th>`}).join('')}
+function buildFilters(){
+ const distinct=k=>[...new Set(D.map(d=>''+ (d[k]||'')).filter(Boolean))].sort();
+ fr.innerHTML=COLS.map(c=>{
+  if(c.t=='enum'||c.t=='status'){
+   const opts=(c.t=='status'?['online','offline','defunct']:distinct(c.k))
+     .map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
+   return `<th><select data-k=${c.k}><option value="">all</option>${opts}</select></th>`}
+  if(c.t=='sig'){const opts=['good','fair','weak','~none']
+    .map(v=>`<option value="${v}">${v=='~none'?'(none)':v}</option>`).join('');
+   return `<th><select data-k=${c.k}><option value="">all</option>${opts}</select></th>`}
+  return `<th><input data-k=${c.k} placeholder="filter"></th>`}).join('');
+ fr.querySelectorAll('[data-k]').forEach(el=>el.addEventListener('input',e=>{
+  ST.filt[e.target.dataset.k]=e.target.value;renderBody()}))}
+function renderBody(){
+ let rows=D.filter(pass).sort(cmp);
+ let html='',n=0;
+ if(!ST.group){html=rows.map((d)=>rowHtml(d,(n++)%2==1)).join('')}
+ else{const groups={};rows.forEach(d=>{const k=gkey(d);(groups[k]=groups[k]||[]).push(d)});
+  const keys=Object.keys(groups).sort((a,b)=>ST.group=='signal'?(SIGORD[a]-SIGORD[b]):(a<b?-1:1));
+  for(const k of keys){const g=groups[k];const on=g.filter(d=>d.Status=='online').length;
+   const rs=g.map(d=>d.rssi).filter(v=>v!=null);
+   const avg=rs.length?Math.round(rs.reduce((a,v)=>a+v,0)/rs.length):null;
+   const cid=ST.group+':'+k;const col=ST.collapsed[cid];
+   const roll=`<span class=roll>${g.length} device${g.length!=1?'s':''} · ${on} online`+
+     (avg!=null?` · avg ${avg} dBm`:'')+`</span>`;
+   html+=`<tr class=grp data-cid="${esc(cid)}"><td colspan=${COLS.length}>`+
+     `<span class=caret>${col?'▸':'▾'}</span>${esc(glbl(k))}${roll}</td></tr>`;
+   if(!col){n=0;html+=g.map(d=>rowHtml(d,(n++)%2==1)).join('')}}}
+ t.innerHTML=html||`<tr><td colspan=${COLS.length} style=color:#999;padding:12px>no devices match</td></tr>`;
+ t.querySelectorAll('tr.grp').forEach(r=>r.onclick=()=>{
+  const id=r.dataset.cid;ST.collapsed[id]=!ST.collapsed[id];renderBody()});
+ shown.textContent=rows.length}
+function render(){renderHead();renderBody()}
+let shownTotal={total:0,online:0,unnamed:0};const shown={set textContent(v){upSum(v)}};
+function upSum(v){sum.innerHTML=`<b>${v}</b> shown · ${shownTotal.total} total · `+
+  `${shownTotal.online} online · <span style="cursor:pointer;text-decoration:underline dotted" `+
+  `title="filter to unnamed" onclick="tog('unnamed')">${shownTotal.unnamed} unnamed</span>`}
+function tog(f){ST[f]=!ST[f];({weak:cw,off:co,unnamed:cu,def:cd})[f].classList.toggle('on',ST[f]);renderBody()}
+async function rename(mac){const d=D.find(x=>x.MAC==mac);if(!d)return;
+ const name=prompt('Device name for '+mac+' (blank to clear):',d.Device||'');
+ if(name==null)return;
+ try{const r=await fetch('/api/name',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({mac,name})});
+  if(!r.ok){const e=await r.json().catch(()=>({}));alert('Rename failed: '+(e.error||r.status));return}
+  const j=await r.json();d.Device=j.name;renderBody()}
+ catch(e){alert('Rename failed: '+e)}}
+function reset(){ST.q='';ST.group='';ST.sorts=[{k:'IP',dir:1}];ST.filt={};ST.weak=ST.off=ST.unnamed=ST.def=false;
+ ST.collapsed={};q.value='';gb.value='';[cw,co,cu,cd].forEach(c=>c.classList.remove('on'));
+ fr.querySelectorAll('[data-k]').forEach(el=>el.value='');render()}
+hr.addEventListener('click',e=>{const th=e.target.closest('th');if(!th)return;const k=th.dataset.k;
+ const cur=ST.sorts.find(s=>s.k==k);
+ if(e.shiftKey){if(cur)cur.dir*=-1;else ST.sorts.push({k,dir:1})}
+ else{if(ST.sorts.length==1&&cur)cur.dir*=-1;else ST.sorts=[{k,dir:1}]}render()});
+q.addEventListener('input',()=>{ST.q=q.value;renderBody()});
+gb.addEventListener('change',()=>{ST.group=gb.value;renderBody()});
+cw.onclick=()=>tog('weak');co.onclick=()=>tog('off');cu.onclick=()=>tog('unnamed');cd.onclick=()=>tog('def');rst.onclick=reset;
+async function load(){D=await (await fetch('/api/devices')).json();
+ const s=await (await fetch('/api/summary')).json();shownTotal=s;
+ if(!ST.built){buildFilters();ST.built=true}render()}
 load();setInterval(load,15000)</script>"""
 
 
@@ -1693,6 +2131,17 @@ def cmd_serve(args):
             return device_history("")  # all
         return None
 
+    allow_write = getattr(args, "allow_write", False)
+
+    def _send(self, code, body, ctype, cors=False):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if cors:  # read-only GETs are shareable; writes never are (CSRF)
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet
             pass
@@ -1700,27 +2149,54 @@ def cmd_serve(args):
         def do_GET(self):
             path = self.path.split("?")[0]
             if path in ("/", "/index.html"):
-                body = _DASHBOARD.encode()
-                ctype = "text/html; charset=utf-8"
-            else:
-                data = payload(path)
-                if data is None:
-                    self.send_error(404)
-                    return
-                body = _json.dumps(data).encode()
-                ctype = "application/json"
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(body)
+                # inject whether renaming is enabled so the UI shows edit controls
+                html = _DASHBOARD.replace("__WRITABLE__",
+                                          "true" if allow_write else "false")
+                _send(self, 200, html.encode(), "text/html; charset=utf-8", cors=True)
+                return
+            data = payload(path)
+            if data is None:
+                self.send_error(404)
+                return
+            _send(self, 200, _json.dumps(data).encode(), "application/json", cors=True)
+
+        def do_POST(self):
+            path = self.path.split("?")[0]
+            if path != "/api/name":
+                self.send_error(404)
+                return
+            if not allow_write:
+                _send(self, 403, b'{"error":"read-only; start with --allow-write"}',
+                      "application/json")
+                return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                req = _json.loads(self.rfile.read(n) or b"{}")
+                mac, name = req.get("mac", ""), req.get("name", "")
+            except (ValueError, TypeError):
+                _send(self, 400, b'{"error":"bad JSON"}', "application/json")
+                return
+            master = load_master()
+            # create=False: the UI only renames devices the scanner already knows
+            if apply_name(master, [mac], name, create=False) != 1:
+                _send(self, 404, b'{"error":"unknown MAC"}', "application/json")
+                return
+            save_master(master)
+            write_reports(master)
+            row = master[norm_mac(mac)]
+            _send(self, 200,
+                  _json.dumps({"ok": True, "mac": row["MAC"],
+                               "name": row["Device"]}).encode(),
+                  "application/json")
 
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
           f"(/, /api/devices, /api/summary, /api/alerts, /api/events)")
+    print(f"  writes: {'ENABLED (POST /api/name)' if allow_write else 'disabled (read-only)'}")
     if args.host not in ("127.0.0.1", "localhost"):
         print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
+        if allow_write:
+            print("  ! --allow-write + LAN bind: anyone on the network can rename devices")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -1787,6 +2263,7 @@ def main():
     u.add_argument("--no-sweep", action="store_true", help="skip nmap, use existing ARP cache")
     u.add_argument("--router", action="store_true", help="scrape the Xfinity gateway")
     u.add_argument("--no-ssdp", action="store_true", help="skip SSDP/UPnP name discovery")
+    u.add_argument("--no-mdns", action="store_true", help="skip mDNS/DNS-SD name discovery")
     u.add_argument("--cloud", action="store_true",
                    help="also pull names from configured smart-home clouds")
     u.add_argument("--auto-name", action="store_true",
@@ -1807,6 +2284,7 @@ def main():
     w.add_argument("--no-router", action="store_true", help="local scan only (skip gateway)")
     w.add_argument("--no-sweep", action="store_true", help="skip nmap, use existing ARP cache")
     w.add_argument("--no-ssdp", action="store_true", help="skip SSDP/UPnP name discovery")
+    w.add_argument("--no-mdns", action="store_true", help="skip mDNS/DNS-SD name discovery")
     w.add_argument("--notify", action="store_true", help="macOS notification on new device")
     w.add_argument("--once", action="store_true", help="run a single poll and exit")
     w.set_defaults(func=cmd_watch)
@@ -1871,6 +2349,9 @@ def main():
     sv = sub.add_parser("serve", help="read-only JSON API + dashboard (for a GUI/iOS app)")
     sv.add_argument("--host", default="127.0.0.1", help="bind host (default localhost)")
     sv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
+    sv.add_argument("--allow-write", action="store_true",
+                    help="enable POST /api/name so the dashboard/app can rename "
+                         "devices (default: read-only)")
     sv.set_defaults(func=cmd_serve)
 
     args = p.parse_args()
