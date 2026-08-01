@@ -2137,7 +2137,8 @@ def cmd_serve(args):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        if cors:  # read-only GETs are shareable; writes never are (CSRF)
+        if cors:  # only GET reads are cross-origin shareable; writes are
+            # same-origin-gated in do_POST (CORS headers alone don't stop CSRF)
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
@@ -2169,6 +2170,24 @@ def cmd_serve(args):
                 _send(self, 403, b'{"error":"read-only; start with --allow-write"}',
                       "application/json")
                 return
+            # CSRF defense for the state-changing write. Requiring a strict
+            # application/json body forces a CORS preflight for any cross-origin
+            # caller (which this server never approves), so a malicious page
+            # cannot slip in a CORS-"simple" text/plain POST. As a second gate,
+            # a present Origin must match our own host.
+            ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                _send(self, 415,
+                      b'{"error":"Content-Type must be application/json"}',
+                      "application/json")
+                return
+            origin = self.headers.get("Origin")
+            if origin:
+                from urllib.parse import urlparse
+                if urlparse(origin).netloc != self.headers.get("Host", ""):
+                    _send(self, 403, b'{"error":"cross-origin write rejected"}',
+                          "application/json")
+                    return
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 req = _json.loads(self.rfile.read(n) or b"{}")
