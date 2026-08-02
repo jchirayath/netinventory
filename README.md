@@ -1,4 +1,10 @@
-# netinventory
+<p align="center">
+  <img src="assets/brand/netinventory-icon.png" alt="netinventory" width="112" height="112">
+</p>
+
+<h1 align="center">netinventory</h1>
+
+<p align="center"><em>Every device on your network, named and accounted for.</em></p>
 
 Home network device inventory — a **macOS scanner engine** plus a **macOS/iOS
 companion app**. MAC-keyed and DHCP-resilient, with router/SSDP/cloud discovery,
@@ -7,8 +13,17 @@ active fingerprinting, and a Wi-Fi neighbor classifier.
 ```
 netinventory/
 ├── engine/   → Python scanner engine + CLI (does all the scanning; runs on a Mac)
-└── app/      → Flutter macOS/iOS companion (a viewer over the engine's API)
+├── app/      → Flutter macOS/iOS companion (a viewer over the engine's API)
+└── assets/   → brand mark + app screenshots
 ```
+
+<p align="center">
+  <img src="assets/screenshots/app-devices.png" alt="netinventory — device list" width="820">
+</p>
+<p align="center">
+  <sub>The companion app. Every screenshot in this repo uses fictional demo
+  devices (RFC 7042 documentation MACs) — never a real scan.</sub>
+</p>
 
 ## Architecture
 
@@ -47,6 +62,20 @@ flutter run -d macos          # or a connected iPhone
 ```
 App docs: [`app/README.md`](app/README.md). Uses Apple Developer team
 `VKUYJ3BS76`, bundle `com.aspl.net.netinventory`.
+
+## Brand
+
+The mark is a scanner hub with three discovered nodes over a sweep, drawn as
+vector geometry rather than shipped as art:
+
+| | |
+|---|---|
+| `assets/brand/netinventory-icon.png` | 1024px master, dark tile |
+| `assets/brand/netinventory-logo.svg` | flat mark, transparent |
+| `app/lib/widgets.dart` → `BrandMark` | the same mark as a `CustomPainter`, so the in-app logo stays crisp at any size and needs no raster asset |
+
+App icons (7 macOS sizes, 15 iOS) are generated from that geometry — see
+[`app/README.md`](app/README.md#icons) for how to regenerate them after a change.
 
 ## Privacy
 
