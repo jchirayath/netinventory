@@ -29,6 +29,7 @@ import datetime as dt
 import http.cookiejar
 import os
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -216,15 +217,32 @@ def local_scan(do_sweep=True):
 def arp_table():
     """Return {ip: MAC} for LAN hosts in the system ARP cache."""
     table = {}
+    # `arp` lives in /usr/sbin on Debian/Raspberry Pi OS, which is NOT on a
+    # non-login shell's PATH — so a bare "arp" raises FileNotFoundError, the
+    # except below swallows it, and the scan reports "0 hosts" as though the
+    # network were empty. Look the binary up explicitly instead of trusting PATH.
+    arp_bin = shutil.which("arp") or next(
+        (p for p in ("/usr/sbin/arp", "/sbin/arp", "/usr/bin/arp") if os.path.exists(p)), None
+    )
+    if not arp_bin:
+        print("  ! arp not found (looked on PATH, /usr/sbin, /sbin, /usr/bin)")
+        return table
     try:
-        arp = subprocess.run(["arp", "-an"], capture_output=True, text=True, timeout=15).stdout
+        arp = subprocess.run([arp_bin, "-an"], capture_output=True, text=True, timeout=15).stdout
     except Exception as e:  # noqa: BLE001
         print(f"  ! arp failed: {e}")
         return table
     for line in arp.splitlines():
-        # ? (10.0.0.42) at aa:bb:cc:00:11:22 on en0 ifscope [ethernet]
+        # Two output formats, and they differ in a way that matters:
+        #   BSD/macOS    ? (10.0.0.42) at aa:bb:cc:00:11:22 on en0 ifscope [ethernet]
+        #   GNU net-tools ? (10.0.0.42) at aa:bb:cc:00:11:22 [ether] on wlan0
+        # The Linux form puts "[ether]" between the MAC and "on", so the older
+        # pattern `at (...) on` matched nothing at all on Linux — every scan
+        # silently returned an empty table. Anchor on the MAC's shape instead of
+        # on the word that follows it. The {11,17} bound keeps "<incomplete>"
+        # out without needing a separate check.
         m_ip = re.search(r"\((\d+\.\d+\.\d+\.\d+)\)", line)
-        m_mac = re.search(r"at ([0-9a-fA-F:]+) on", line)
+        m_mac = re.search(r"at ([0-9a-fA-F:]{11,17})\b", line)
         if not (m_ip and m_mac):
             continue
         ip = m_ip.group(1)
