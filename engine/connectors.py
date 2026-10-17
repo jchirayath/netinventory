@@ -311,9 +311,13 @@ def blink_login_interactive():
                 if not code:
                     print("  aborted (no code).")
                     return
-                await blink.auth.complete_2fa_login(code)
-            await blink.setup_post_verify()
+                # send_2fa_code finishes the OAuth flow *and* the setup start()
+                # skipped (urls, homescreen, cameras); blinkpy >= 0.25.
+                if not await blink.send_2fa_code(code):
+                    print("  ! blink: code rejected or setup failed; run blink-login again")
+                    return
             await blink.save(token_path)
+            os.chmod(token_path, 0o600)          # a login token: owner-only
             cams = list(blink.cameras.items())
             print(f"  success — token cached, {len(cams)} camera(s):")
             for name, cam in cams:
@@ -337,7 +341,7 @@ def discover_blink(c):
         import asyncio
         from aiohttp import ClientSession
         from blinkpy.blinkpy import Blink
-        from blinkpy.auth import Auth
+        from blinkpy.auth import Auth, BlinkTwoFARequiredError
         from blinkpy.helpers.util import json_load
     except ImportError:
         print("  ! blink: `pip install blinkpy aiohttp` first")
@@ -349,20 +353,25 @@ def discover_blink(c):
         async with ClientSession() as session:
             blink = Blink(session=session)
             if os.path.exists(token_path):
-                blink.auth = Auth(await json_load(token_path), session=session)
+                blink.auth = Auth(await json_load(token_path), session=session,
+                                  no_prompt=True)
             else:
                 blink.auth = Auth({"username": c["email"], "password": c["password"]},
                                   no_prompt=True, session=session)
-            await blink.start()
-            if getattr(blink, "key_required", False):
-                if not code:
-                    print("  ! blink: 2FA required — Blink just sent a code to your "
-                          "email/phone. Re-run with NETINV_BLINK_2FA=<code>")
-                    return None
-                await blink.auth.send_auth_key(blink, code)
-                await blink.setup_post_verify()
             try:
-                blink.save(token_path)        # cache token -> no 2FA next time
+                ok = await blink.start()
+            except BlinkTwoFARequiredError:
+                if not code:
+                    print("  ! blink: 2FA required. Run `netinv blink-login` in a "
+                          "terminal (or re-run with NETINV_BLINK_2FA=<code>)")
+                    return None
+                ok = await blink.send_2fa_code(code)
+            if not ok:
+                print("  ! blink: login or setup failed; run `netinv blink-login`")
+                return None
+            try:
+                await blink.save(token_path)  # refreshed token -> no 2FA next time
+                os.chmod(token_path, 0o600)
             except Exception:  # noqa: BLE001
                 pass
             out = []
