@@ -192,6 +192,24 @@ class TestMacPushPlan(unittest.TestCase):
                          [("10.0.0.1", "Garage", "Garage Lights")])
 
 
+class TestHaPushPlan(unittest.TestCase):
+    def test_name_and_area_only_when_chosen_and_different(self):
+        master = [{"MAC": "AA:00:00:00:00:01", "Device": "Kasa Smart Switch (HS200) 2"},
+                  {"MAC": "AA:00:00:00:00:02", "Device": "Casita"},
+                  {"MAC": "AA:00:00:00:00:03", "Device": "Roku"}]
+        home_rows = [row(Device="Kasa Smart Switch (HS200) 2", Name="Garage Lights", Room="Garage"),
+                     row(Device="Casita", Name="", Room="Kitchen"),
+                     row(Device="Roku", Name="Office Roku", Room="Office")]
+        areas = {"k1": "Kitchen", "o1": "Office"}
+        devices = [{"id": "d1", "name": "Garage", "mac": "aa:00:00:00:00:01", "area_id": ""},
+                   {"id": "d2", "name": "Casita", "mac": "AA:00:00:00:00:02", "area_id": "k1"},
+                   {"id": "d3", "name": "Office Roku", "mac": "AA:00:00:00:00:03", "area_id": "o1"},
+                   {"id": "d4", "name": "Zigbee Bulb", "mac": "", "area_id": ""}]
+        self.assertEqual(home.ha_push_plan(devices, areas, master, home_rows),
+                         [{"id": "d1", "old": "Garage", "name": "Garage Lights",
+                           "old_area": "", "area": "Garage", "area_id": None}])
+
+
 class TestBoard(unittest.TestCase):
     MASTER = [
         {"Device": "Kitchen Plug", "Vendor": "TP-Link", "Status": "offline"},

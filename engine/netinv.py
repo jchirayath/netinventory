@@ -1175,13 +1175,32 @@ def suggest_pairs(master):
             continue
         by_host.setdefault(h.lower(), []).append(r)
 
-    out = []
+    out, grouped = [], set()
     for rows in by_host.values():
         macs = {r["MAC"] for r in rows}
         devs = {r["Device"] for r in rows}
         already = len(devs) == 1 and "" not in devs   # all share one real name
         if len(macs) >= 2 and not already:
             out.append(sorted(rows, key=lambda r: ip_key(r["IP"])))
+            grouped |= macs
+
+    # A router that sees a name twice suffixes the second ('homeassistant-29').
+    # On its own that also describes three HS200 switches (HS200, HS200-47,
+    # HS200-80), so it counts only for one OUI on *different* link types: a
+    # box on both Ethernet and Wi-Fi.
+    by_base = {}
+    for host, rows in by_host.items():
+        base = re.sub(r"-\d{1,3}$", "", host)
+        by_base.setdefault(base, []).extend(r for r in rows if r["MAC"] not in grouped)
+    for rows in by_base.values():
+        by_oui = {}
+        for r in rows:
+            by_oui.setdefault(r["MAC"][:8], []).append(r)
+        for grp in by_oui.values():
+            links = {link_class(r["Link"]) for r in grp} - {""}
+            devs = {r["Device"] for r in grp}
+            if len(grp) >= 2 and len(links) >= 2 and not (len(devs) == 1 and "" not in devs):
+                out.append(sorted(grp, key=lambda r: ip_key(r["IP"])))
     return out
 
 
@@ -1936,6 +1955,9 @@ def cmd_home(args):
               f"added {len(added)} room(s) to {ROOMS_CSV} (set each Floor)")
         print("  To rename a room, keep the app's name in Aliases so devices still map.")
         return
+    if args.action == "push" and args.source == "ha":
+        _push_ha(args, master, rows)
+        return
     if args.action == "push":
         import connectors
         if args.source == "kasa":       # local: match by MAC, rename by IP
@@ -1987,6 +2009,65 @@ def cmd_home(args):
     print(f"  {len(rows)} device(s), {len(rooms)} room(s): "
           f"{len(errors)} error(s), {len(warnings)} warning(s)")
     if errors:
+        sys.exit(1)
+
+
+def _push_ha(args, master, rows):
+    """`home push --to ha`: set each matched device's name and area in Home
+    Assistant (and so in Google/Alexa/Apple Home through HA's integrations)."""
+    import connectors
+    import home
+    c = connectors.creds("ha")
+    if not c:
+        print("  ha is not configured; run: netinv set-cloud ha")
+        sys.exit(1)
+    try:
+        devices, areas = connectors.ha_registry(c)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! ha: {e}")
+        sys.exit(1)
+    plan = home.ha_push_plan(devices, areas, master.values(), rows)
+    if args.device:
+        plan = [p for p in plan if args.device in (p["old"], p["name"])]
+    missing = sorted({p["area"] for p in plan if p["area"] and not p["area_id"]})
+    if missing and not args.create_areas:
+        print(f"  no HA area yet for: {', '.join(missing)} "
+              "(add --create-areas to create them; those area changes are skipped)")
+    if missing and args.create_areas and not args.dry_run:
+        made = connectors.ha_call(c, [{"type": "config/area_registry/create", "name": a}
+                                      for a in missing])
+        new_ids = {m["name"].lower(): m["area_id"] for m in made}
+        for p in plan:
+            if p["area"] and not p["area_id"]:
+                p["area_id"] = new_ids.get(p["area"].lower())
+        print(f"  created {len(made)} HA area(s): {', '.join(missing)}")
+    done = failed = 0
+    for p in plan:
+        change = {}
+        if p["name"]:
+            change["name_by_user"] = p["name"]
+        if p["area"] and (p["area_id"] or (args.create_areas and args.dry_run)):
+            change["area_id"] = p["area_id"]
+        if not change:
+            continue
+        what = ", ".join(([f"name '{p['old']}' -> '{p['name']}'"] if "name_by_user" in change else [])
+                         + ([f"area '{p['old_area'] or '-'}' -> '{p['area']}'"]
+                            if "area_id" in change else []))
+        if args.dry_run:
+            print(f"  would set {what}")
+            done += 1
+            continue
+        try:
+            connectors.ha_call(c, [{"type": "config/device_registry/update",
+                                    "device_id": p["id"], **change}])
+            print(f"  ok   {what}")
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  FAIL {what}: {e}")
+            failed += 1
+    print(f"  ha: {done} {'to change' if args.dry_run else 'changed'}, {failed} failed; "
+          f"{len(devices)} HA devices, {sum(1 for d in devices if d['mac'])} with a MAC")
+    if failed:
         sys.exit(1)
 
 
@@ -2711,8 +2792,11 @@ def main():
                          "draft: add unclassified devices to home.csv; "
                          "check: validate rooms.csv + home.csv; "
                          "push: rename devices in an app to netinventory's names")
-    hm.add_argument("--from", "--to", dest="source", choices=["tuya", "kasa"], default="tuya",
-                    help="app for rooms (--from tuya) or push (--to tuya|kasa); default tuya")
+    hm.add_argument("--from", "--to", dest="source", choices=["tuya", "kasa", "ha"],
+                    default="tuya",
+                    help="app for rooms (--from tuya) or push (--to tuya|kasa|ha); default tuya")
+    hm.add_argument("--create-areas", action="store_true",
+                    help="push --to ha: create HA areas for rooms it does not have")
     hm.add_argument("--device", help="push: only this device (old or new name)")
     hm.add_argument("--dry-run", action="store_true", help="push: show, change nothing")
     hm.set_defaults(func=cmd_home)

@@ -54,6 +54,10 @@ PROVIDERS = {
         ("password", True,  "Apple ID app-specific password"),
     ],
     "kasa": [],   # local LAN protocol, no account needed
+    "ha": [
+        ("url",   False, "Home Assistant URL (e.g. http://192.168.1.204:8123)"),
+        ("token", True,  "Home Assistant long-lived access token"),
+    ],
 }
 
 
@@ -530,7 +534,74 @@ def discover_kasa(_c):
             for d in kasa_discover() if d["alias"]]
 
 
+# --------------------------------------------------------------------------- #
+# Home Assistant — the websocket API (the only one that edits the device and
+# area registries). Needs aiohttp, which blink already uses.
+# --------------------------------------------------------------------------- #
+def ha_call(c, commands, timeout=15):
+    """Run [{"type": ..., ...}] websocket commands in order; return their
+    results. Raises RuntimeError on auth failure or a failed command."""
+    import asyncio
+    try:
+        import aiohttp
+    except ImportError:
+        raise RuntimeError("`pip install aiohttp` first")
+    url = c["url"].rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise RuntimeError(f"url must start with http:// or https:// (got {url!r})")
+    ws_url = "ws" + url[4:] + "/api/websocket"
+
+    async def run():
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
+            async with s.ws_connect(ws_url, max_msg_size=32 * 1024 * 1024) as ws:
+                await ws.receive_json()                               # auth_required
+                await ws.send_json({"type": "auth", "access_token": c["token"]})
+                if (await ws.receive_json()).get("type") != "auth_ok":
+                    raise RuntimeError("Home Assistant rejected the token")
+                out = []
+                for i, cmd in enumerate(commands, start=1):
+                    await ws.send_json({"id": i, **cmd})
+                    while True:                                       # skip event messages
+                        msg = await ws.receive_json()
+                        if msg.get("id") == i and msg.get("type") == "result":
+                            break
+                    if not msg.get("success"):
+                        raise RuntimeError(f"{cmd['type']}: {msg.get('error')}")
+                    out.append(msg.get("result"))
+                return out
+    return asyncio.run(run())
+
+
+def ha_registry(c):
+    """(devices, areas) from Home Assistant: each device as {id, name, mac,
+    area_id, model}; areas as {area_id: name}. mac is '' for devices with no
+    network MAC connection (Zigbee, cloud-only, ...)."""
+    devs, areas = ha_call(c, [{"type": "config/device_registry/list"},
+                              {"type": "config/area_registry/list"}])
+    out = []
+    for d in devs or []:
+        macs = [_norm_mac(v) for k, v in d.get("connections") or [] if k == "mac"]
+        out.append({"id": d["id"], "name": d.get("name_by_user") or d.get("name") or "",
+                    "mac": macs[0] if macs else "", "area_id": d.get("area_id") or "",
+                    "model": d.get("model") or ""})
+    return out, {a["area_id"]: a["name"] for a in areas or []}
+
+
+def discover_ha(c):
+    """Home Assistant device names, by MAC where HA knows one."""
+    try:
+        devs, _ = ha_registry(c)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! ha: {e}")
+        return []
+    # Only devices with a MAC: HA also lists hundreds of entity-only and Zigbee
+    # devices that would flood cloud_devices.csv with no way to match them.
+    return [_item("ha", d["name"], mac=d["mac"], model=d["model"])
+            for d in devs if d["name"] and d["mac"]]
+
+
 DISCOVERERS = {
+    "ha": discover_ha,
     "kasa": discover_kasa,
     "tuya": discover_tuya,
     "wyze": discover_wyze,

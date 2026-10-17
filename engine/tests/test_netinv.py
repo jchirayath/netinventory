@@ -465,6 +465,27 @@ class TestApplyName(unittest.TestCase):
         self.assertEqual(netinv.apply_name(m, ["not-a-mac"], "X"), 0)
 
 
+class TestPairs(unittest.TestCase):
+    def _m(self, *rows):
+        out = {}
+        for mac, host, link, dev in rows:
+            out[mac] = dict({k: "" for k in netinv.FIELDS}, MAC=mac, Hostname=host,
+                            Link=link, Device=dev, IP="10.0.0.1")
+        return out
+
+    def test_router_suffix_on_two_links_is_one_box(self):
+        m = self._m(("B8:27:EB:AB:43:0E", "homeassistant", "Ethernet", "Home Assistant"),
+                    ("B8:27:EB:FE:16:5B", "homeassistant-29", "Wi-Fi 2.4 GHz", "Home Assistant 2"))
+        self.assertEqual([sorted(r["MAC"] for r in g) for g in netinv.suggest_pairs(m)],
+                         [["B8:27:EB:AB:43:0E", "B8:27:EB:FE:16:5B"]])
+
+    def test_router_suffix_on_one_link_stays_separate(self):
+        m = self._m(("68:FF:7B:00:00:01", "HS200", "Wi-Fi 2.4 GHz", "Switch 1"),
+                    ("68:FF:7B:00:00:09", "HS200-47", "Wi-Fi 2.4 GHz", "Switch 2"),
+                    ("68:FF:7B:00:00:20", "HS200-80", "Wi-Fi 2.4 GHz", "Switch 3"))
+        self.assertEqual(netinv.suggest_pairs(m), [])
+
+
 class TestConnectors(unittest.TestCase):
     def test_tuya_id_embeds_mac_for_hex_id(self):
         # all-hex WiFi id: trailing 12 hex are the MAC

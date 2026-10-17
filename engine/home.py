@@ -359,6 +359,30 @@ def mac_push_plan(found, master_rows, home):
     return plan
 
 
+def ha_push_plan(devices, areas, master_rows, home):
+    """Home Assistant changes, matched by MAC: [{id, old, name, area_id,
+    old_area, area}] where name (home.csv Name) or area (home.csv Room) differ
+    from HA. Only chosen values are pushed: no Name, no rename; no Room, no
+    area change. area_id is None when HA has no area of that name yet.
+    devices: [{id, name, mac, area_id}]; areas: {area_id: name}."""
+    by_mac = {r.get("MAC", "").upper(): r.get("Device", "").strip() for r in master_rows}
+    rows = {h["Device"]: h for h in home if h["Device"]}
+    area_ids = {n.lower(): i for i, n in areas.items()}
+    plan = []
+    for d in devices:
+        h = rows.get(by_mac.get(d["mac"].upper(), "")) if d["mac"] else None
+        if not h:
+            continue
+        name = h["Name"] if h["Name"] and h["Name"] != d["name"] else None
+        room = h["Room"] if h["Room"] and h["Room"] != TODO else ""
+        area = room if room and room.lower() != areas.get(d["area_id"], "").lower() else None
+        if name or area:
+            plan.append({"id": d["id"], "old": d["name"], "name": name,
+                         "old_area": areas.get(d["area_id"], ""), "area": area,
+                         "area_id": area_ids.get(area.lower()) if area else None})
+    return plan
+
+
 def add_room(rooms, room):
     """Append a room (Floor TODO) unless it, or an alias, already exists.
     Returns the canonical Room name."""
