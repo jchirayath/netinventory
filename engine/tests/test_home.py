@@ -168,12 +168,28 @@ class TestPushPlan(unittest.TestCase):
                      {"App": "tuya", "Device": "Patio Light", "Room": "", "Id": "c"},
                      {"App": "tuya", "Device": "No Id", "Room": "", "Id": ""},
                      {"App": "tuya", "Device": "Gone", "Room": "", "Id": "z"}]
-        home_rows = [row(Device="Blinds", Name="Family Room Blinds"),
-                     row(Device="Patio Light", Name="")]
-        app_names = {"a": "Kitchen", "b": "Blinds", "c": "Patio Light "}
+        home_rows = [row(Device="Kitchen Kettle", Name="Kitchen Kettle"),
+                     row(Device="Blinds", Name="Family Room Blinds"),
+                     row(Device="Patio Light", Name="")]       # no chosen Name: left alone
+        app_names = {"a": "Kitchen", "b": "Blinds", "c": "Patio Lamp"}
         self.assertEqual(home.push_plan("tuya", app_rooms, home_rows, app_names),
                          [("a", "Kitchen", "Kitchen Kettle"),
                           ("b", "Blinds", "Family Room Blinds")])
+
+
+class TestMacPushPlan(unittest.TestCase):
+    def test_matches_by_mac_and_prefers_home_name(self):
+        master = [{"MAC": "AA:00:00:00:00:01", "Device": "Kasa Smart Switch (HS200) 2"},
+                  {"MAC": "AA:00:00:00:00:02", "Device": "Casita"},
+                  {"MAC": "AA:00:00:00:00:03", "Device": ""}]
+        home_rows = [row(Device="Kasa Smart Switch (HS200) 2", Name="Garage Lights"),
+                     row(Device="Casita", Name="")]
+        found = [{"ip": "10.0.0.1", "mac": "aa:00:00:00:00:01", "alias": "Garage"},
+                 {"ip": "10.0.0.2", "mac": "AA:00:00:00:00:02", "alias": "Casita Plug"},
+                 {"ip": "10.0.0.3", "mac": "AA:00:00:00:00:03", "alias": "Unnamed"},
+                 {"ip": "10.0.0.4", "mac": "AA:00:00:00:00:09", "alias": "Unknown"}]
+        self.assertEqual(home.mac_push_plan(found, master, home_rows),
+                         [("10.0.0.1", "Garage", "Garage Lights")])
 
 
 class TestBoard(unittest.TestCase):

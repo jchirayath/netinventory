@@ -53,6 +53,7 @@ PROVIDERS = {
         ("apple_id", False, "Apple ID (email)"),
         ("password", True,  "Apple ID app-specific password"),
     ],
+    "kasa": [],   # local LAN protocol, no account needed
 }
 
 
@@ -91,7 +92,7 @@ def creds(provider):
 
 
 def configured_providers():
-    return [p for p in PROVIDERS if creds(p)]
+    return [p for p in PROVIDERS if creds(p) is not None]
 
 
 # --------------------------------------------------------------------------- #
@@ -429,7 +430,98 @@ def discover_apple(c):
         return []
 
 
+# --------------------------------------------------------------------------- #
+# Kasa (TP-Link) — the local protocol on port 9999, no cloud or account. JSON
+# is XOR-"encrypted" with a rolling key (171); TCP adds a 4-byte length prefix.
+# Older Kasa (HS100/HS103/HS200/KP405...) speaks it; newer KLAP-only firmware
+# does not answer and is simply not found.
+# --------------------------------------------------------------------------- #
+KASA_PORT = 9999
+KASA_MAX_ALIAS = 31        # longer aliases are refused by the device
+
+
+def _kasa_xor(data, encrypt):
+    key, out = 171, bytearray()
+    for b in data:
+        out.append(key ^ b)
+        key = out[-1] if encrypt else b
+    return bytes(out)
+
+
+def kasa_discover(timeout=3, broadcast="255.255.255.255"):
+    """[{ip, mac, alias, model}] for every Kasa device answering a UDP
+    get_sysinfo broadcast."""
+    import socket
+    import time
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.settimeout(0.5)
+    found = {}
+    try:
+        msg = _kasa_xor(json.dumps({"system": {"get_sysinfo": {}}}).encode(), True)
+        # UDP broadcast is lossy: re-send through the window, spaced apart.
+        sends = [i * timeout / 4 for i in range(4)]
+        start = time.monotonic()
+        end = start + timeout
+        while time.monotonic() < end:
+            while sends and time.monotonic() - start >= sends[0]:
+                sends.pop(0)
+                s.sendto(msg, (broadcast, KASA_PORT))
+            try:
+                data, (ip, _port) = s.recvfrom(8192)
+            except socket.timeout:
+                continue
+            if ip in found:
+                continue
+            try:
+                info = json.loads(_kasa_xor(data, False))["system"]["get_sysinfo"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not isinstance(info, dict):
+                continue
+            found[ip] = {"ip": ip, "mac": _norm_mac(info.get("mac") or info.get("mic_mac") or ""),
+                         "alias": str(info.get("alias") or "").strip(),
+                         "model": str(info.get("model") or "").strip()}
+    finally:
+        s.close()
+    return sorted(found.values(), key=lambda d: d["ip"])
+
+
+def kasa_rename(ip, alias, timeout=4, port=KASA_PORT):
+    """Set a Kasa device's app name over TCP. Returns (ok, message)."""
+    import socket
+    import struct
+    if len(alias) > KASA_MAX_ALIAS:
+        return False, f"longer than {KASA_MAX_ALIAS} characters"
+    body = _kasa_xor(json.dumps({"system": {"set_dev_alias": {"alias": alias}}}).encode(), True)
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.sendall(struct.pack(">I", len(body)) + body)
+            head = s.recv(4)
+            if len(head) < 4:
+                return False, "no reply"
+            want, buf = min(struct.unpack(">I", head)[0], 65536), b""
+            while len(buf) < want:
+                chunk = s.recv(want - len(buf))
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(_kasa_xor(buf, False))["system"]["set_dev_alias"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return False, str(e)
+    if isinstance(reply, dict) and reply.get("err_code") == 0:
+        return True, "renamed"
+    return False, str(reply)
+
+
+def discover_kasa(_c):
+    """Kasa app names (aliases) by MAC, straight from the devices on the LAN."""
+    return [_item("kasa", d["alias"], mac=d["mac"], ip=d["ip"], model=d["model"])
+            for d in kasa_discover() if d["alias"]]
+
+
 DISCOVERERS = {
+    "kasa": discover_kasa,
     "tuya": discover_tuya,
     "wyze": discover_wyze,
     "blink": discover_blink,
@@ -445,7 +537,7 @@ def discover(providers=None):
     items = []
     for p in providers:
         c = creds(p)
-        if not c:
+        if c is None:
             print(f"  ! {p}: not configured (run ./netinv.py set-cloud {p})")
             continue
         got = DISCOVERERS[p](c)

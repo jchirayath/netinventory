@@ -477,6 +477,45 @@ class TestConnectors(unittest.TestCase):
     def test_norm_mac(self):
         self.assertEqual(connectors._norm_mac("aa:bb:cc:0:0:1"), "AA:BB:CC:00:00:01")
 
+    def test_kasa_xor_round_trip_and_known_bytes(self):
+        enc = connectors._kasa_xor(b'{"a":1}', True)
+        self.assertEqual(enc[:2], bytes([171 ^ ord("{"), (171 ^ ord("{")) ^ ord('"')]))
+        self.assertEqual(connectors._kasa_xor(enc, False), b'{"a":1}')
+
+    def test_kasa_needs_no_credentials(self):
+        self.assertEqual(connectors.creds("kasa"), {})
+
+    def test_kasa_rename_over_tcp(self):
+        import json
+        import socket
+        import struct
+        import threading
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        got = {}
+
+        def device():
+            conn, _ = srv.accept()
+            with conn:
+                n = struct.unpack(">I", conn.recv(4))[0]
+                got.update(json.loads(connectors._kasa_xor(conn.recv(n), False)))
+                body = connectors._kasa_xor(
+                    b'{"system":{"set_dev_alias":{"err_code":0}}}', True)
+                conn.sendall(struct.pack(">I", len(body)) + body)
+
+        t = threading.Thread(target=device, daemon=True)
+        t.start()
+        port = srv.getsockname()[1]
+        try:
+            self.assertEqual(connectors.kasa_rename("127.0.0.1", "Garage Lights", port=port),
+                             (True, "renamed"))
+        finally:
+            t.join(2)
+            srv.close()
+        self.assertEqual(got, {"system": {"set_dev_alias": {"alias": "Garage Lights"}}})
+        self.assertFalse(connectors.kasa_rename("127.0.0.1", "x" * 32, port=port)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

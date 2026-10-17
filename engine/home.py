@@ -330,16 +330,32 @@ def rename(home, master_rows, app_rooms, key, new):
 
 def push_plan(app, app_rooms, home, app_names):
     """[(id, app name, wanted name)] for each device linked in app_rooms.csv
-    whose name in the app differs from netinventory's: the home.csv Name if
-    set, else the Device. app_names is {id: current name in the app}."""
-    names = {h["Device"]: h["Name"] for h in home if h["Device"]}
+    whose name in the app differs from its home.csv Name. Only a Name the
+    user chose is pushed, never a fallback: a generic Device name such as
+    'Kasa Smart Switch (HS200) 2' must not overwrite a good app name.
+    app_names is {id: current name in the app}."""
+    names = {h["Device"]: h["Name"] for h in home if h["Device"] and h["Name"]}
     plan = []
     for a in app_rooms:
-        if a["App"] != app or not a["Id"] or not a["Device"] or a["Id"] not in app_names:
+        if a["App"] != app or not a["Id"] or a["Id"] not in app_names:
             continue
-        want = names.get(a["Device"]) or a["Device"]
-        if want != app_names[a["Id"]].strip():
+        want = names.get(a["Device"])
+        if want and want != app_names[a["Id"]].strip():
             plan.append((a["Id"], app_names[a["Id"]], want))
+    return plan
+
+
+def mac_push_plan(found, master_rows, home):
+    """[(ip, app name, wanted name)] for LAN devices found by MAC (e.g. Kasa)
+    whose app name differs from their home.csv Name (only a chosen Name is
+    pushed; see push_plan). found is [{ip, mac, alias}]."""
+    by_mac = {r.get("MAC", "").upper(): r.get("Device", "").strip() for r in master_rows}
+    names = {h["Device"]: h["Name"] for h in home if h["Device"] and h["Name"]}
+    plan = []
+    for d in found:
+        want = names.get(by_mac.get(d["mac"].upper(), ""))
+        if want and want != d["alias"]:
+            plan.append((d["ip"], d["alias"], want))
     return plan
 
 

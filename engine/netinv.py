@@ -1911,6 +1911,9 @@ def cmd_home(args):
     rows = home.load_home(HOME_CSV)
     if args.action == "rooms":
         import connectors
+        if args.source != "tuya":
+            print(f"  {args.source} has no rooms to import; rooms come from tuya")
+            sys.exit(1)
         c = connectors.creds(args.source)
         if not c:
             print(f"  {args.source} is not configured; run: netinv set-cloud {args.source}")
@@ -1935,23 +1938,28 @@ def cmd_home(args):
         return
     if args.action == "push":
         import connectors
-        c = connectors.creds(args.source)
-        if not c:
-            print(f"  {args.source} is not configured; run: netinv set-cloud {args.source}")
-            sys.exit(1)
-        app_rooms = home.load_app_rooms(APP_ROOMS_CSV)
-        if not any(a["Id"] for a in app_rooms):
-            print(f"  no {args.source} device ids yet; run: netinv home rooms --from {args.source}")
-            sys.exit(1)
-        plan = home.push_plan(args.source, app_rooms, rows, connectors.tuya_names(c))
+        if args.source == "kasa":       # local: match by MAC, rename by IP
+            plan = home.mac_push_plan(connectors.kasa_discover(), master.values(), rows)
+            rename = lambda target, name: connectors.kasa_rename(target, name)  # noqa: E731
+        else:
+            c = connectors.creds(args.source)
+            if not c:
+                print(f"  {args.source} is not configured; run: netinv set-cloud {args.source}")
+                sys.exit(1)
+            app_rooms = home.load_app_rooms(APP_ROOMS_CSV)
+            if not any(a["Id"] for a in app_rooms):
+                print(f"  no {args.source} device ids yet; run: netinv home rooms --from {args.source}")
+                sys.exit(1)
+            plan = home.push_plan(args.source, app_rooms, rows, connectors.tuya_names(c))
+            rename = lambda target, name: connectors.tuya_rename(c, target, name)  # noqa: E731
         if args.device:
             plan = [p for p in plan if args.device in (p[1], p[2])]
         failed = 0
-        for dev_id, old, new in plan:
+        for target, old, new in plan:
             if args.dry_run:
                 print(f"  would rename '{old}' -> '{new}'")
                 continue
-            ok, msg = connectors.tuya_rename(c, dev_id, new)
+            ok, msg = rename(target, new)
             failed += not ok
             print(f"  {'ok  ' if ok else 'FAIL'} '{old}' -> '{new}'" + ("" if ok else f": {msg}"))
         verb = "to rename" if args.dry_run else "renamed"
@@ -2057,7 +2065,9 @@ def cloud_merge(master, items):
         row = master[mac]
         if it["ip"]:
             row["IP"] = it["ip"]
-        if name_quality(it["name"]) > name_quality(row["Hostname"]):
+        # >=: a name the user typed in an app ('Garage') beats an equally
+        # scored network hostname ('HS200-47').
+        if it["name"] and name_quality(it["name"]) >= name_quality(row["Hostname"]):
             row["Hostname"] = it["name"]
         if not row["Device"] and it["name"]:        # adopt the app's name
             row["Device"] = it["name"]
@@ -2701,8 +2711,8 @@ def main():
                          "draft: add unclassified devices to home.csv; "
                          "check: validate rooms.csv + home.csv; "
                          "push: rename devices in an app to netinventory's names")
-    hm.add_argument("--from", "--to", dest="source", choices=["tuya"], default="tuya",
-                    help="app for rooms (--from) or push (--to); default tuya")
+    hm.add_argument("--from", "--to", dest="source", choices=["tuya", "kasa"], default="tuya",
+                    help="app for rooms (--from tuya) or push (--to tuya|kasa); default tuya")
     hm.add_argument("--device", help="push: only this device (old or new name)")
     hm.add_argument("--dry-run", action="store_true", help="push: show, change nothing")
     hm.set_defaults(func=cmd_home)
