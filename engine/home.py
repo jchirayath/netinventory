@@ -105,9 +105,13 @@ def load_home(path):
     return _read(path, HOME_FIELDS)
 
 
+def load_app_rooms(path):
+    return _read(path, APP_ROOM_FIELDS)
+
+
 def load_device_rooms(path):
     """{device name: app room} from app_rooms.csv."""
-    return {r["Device"]: r["Room"] for r in _read(path, APP_ROOM_FIELDS) if r["Device"]}
+    return {r["Device"]: r["Room"] for r in load_app_rooms(path) if r["Device"]}
 
 
 def split_list(value):
@@ -277,6 +281,45 @@ def set_room(home, master_rows, key, room):
     row = new_row(match, room or TODO)
     home.append(row)
     return row
+
+
+def rename(home, master_rows, app_rooms, key, new):
+    """Give one device a new name everywhere netinventory keeps it: its
+    devices.csv Device (all MACs), its home.csv Device and Name, and its
+    app_rooms.csv row. Mutates the lists; returns (old Device, new id) or
+    raises ValueError with a message for the user."""
+    new = " ".join(new.split())
+    if not new:
+        raise ValueError("name required")
+    old = key[5:] if key.startswith("name:") else key
+    is_device = not key.startswith("name:")
+    if is_device and not any(r.get("Device", "").strip() == old for r in master_rows) \
+            and not any(h["Device"] == old for h in home):
+        raise ValueError("unknown device")
+    if new.lower() != old.lower():
+        taken = {r.get("Device", "").strip().lower() for r in master_rows} \
+            | {h["Device"].lower() for h in home} | {h["Name"].lower() for h in home}
+        if new.lower() in taken:
+            raise ValueError(f"'{new}' is already used by another device")
+    if is_device:
+        for r in master_rows:
+            if r.get("Device", "").strip() == old:
+                r["Device"] = new
+        for a in app_rooms:
+            if a["Device"] == old:
+                a["Device"] = new
+    row = next((h for h in home if _key(h) == key), None)
+    if row is None and is_device:
+        match = next((r for r in master_rows if r.get("Device", "").strip() == new), None)
+        row = new_row(match, TODO) if match else None
+        if row:
+            home.append(row)
+    if row is None:
+        raise ValueError("unknown device")
+    if is_device:
+        row["Device"] = new
+    row["Name"] = new
+    return old, (new if is_device else "name:" + new)
 
 
 def add_room(rooms, room):

@@ -116,6 +116,8 @@ for a device HA cannot control.
    For rooms, `netinv serve --allow-write` and open `/rooms`: every named
    device (cameras, hubs and computers included) is a card; drag it onto a
    room, or right-click > Move to. Unplaced devices sit in Unassigned.
+   Right-click > Rename… sets one name in `devices.csv`, `home.csv` (Device and
+   Name) and `app_rooms.csv` at once, and lists any rule above it breaks.
 5. `netinv home check`: validate against the rules above. Fix until it passes.
 6. Push to each app (Home Assistant first), then re-check drift after any
    change made inside an app.

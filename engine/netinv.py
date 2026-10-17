@@ -2273,6 +2273,7 @@ h1{font-size:1.2rem;margin:.2rem 0}
 .dev:hover{border-color:#9db4d3}
 .dev.saving{opacity:.5}
 .dev .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev .ren{width:100%;font:13px system-ui;padding:2px 4px;border:1px solid #9db4d3;border-radius:4px}
 .dev .sub{display:block;font-size:11px;color:#6b7a8c;overflow:hidden;text-overflow:ellipsis}
 .dev .ty{font-size:11px;color:#3a516b;background:#eef2f8;border-radius:8px;padding:0 6px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
@@ -2349,13 +2350,31 @@ g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
 g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!WRITABLE)return;
  e.preventDefault();const d=B.devices.find(x=>x.id==el.dataset.id);
- menu.innerHTML=`<div class=hd>Move ${esc(label(d))} to</div>`+['',...B.rooms].map(r=>
+ menu.innerHTML=`<div data-act=rename>Rename…</div><div class=hd>Move ${esc(label(d))} to</div>`+['',...B.rooms].map(r=>
   `<div data-room="${esc(r)}" class="${r==d.room?'cur':''}">${r?esc(r):'Unassigned'}</div>`).join('');
  menu.dataset.id=d.id;menu.style.display='block';
  const w=menu.offsetWidth,h=menu.offsetHeight;
  menu.style.left=Math.min(e.clientX,innerWidth-w-8)+'px';menu.style.top=Math.min(e.clientY,innerHeight-h-8)+'px'});
-menu.addEventListener('click',e=>{const it=e.target.closest('[data-room]');if(!it)return;
+menu.addEventListener('click',e=>{
+ if(e.target.closest('[data-act=rename]')){menu.style.display='none';startRename(menu.dataset.id);return}
+ const it=e.target.closest('[data-room]');if(!it)return;
  menu.style.display='none';move(menu.dataset.id,it.dataset.room)});
+// Rename in place on the card: Enter saves, Escape or leaving the field cancels.
+let editing=false;
+function startRename(id){const d=B.devices.find(x=>x.id==id);
+ const el=[...g.querySelectorAll('.dev')].find(x=>x.dataset.id==id);if(!d||!el)return;
+ editing=true;el.draggable=false;const nm=el.querySelector('.nm');
+ nm.innerHTML=`<input class=ren value="${esc(label(d))}" maxlength=60>`;
+ const inp=nm.querySelector('input');inp.focus();inp.select();let done=false;
+ const finish=async save=>{if(done)return;done=true;const name=inp.value.trim();
+  if(!save||!name||name==label(d)){editing=false;render();return}
+  try{const j=await post('/api/rename',{id,name});
+   Object.assign(d,{id:j.id,name:j.name,device:d.device?j.name:d.device});
+   if(j.warnings.length)say(`Renamed to '${j.name}'. Not to the naming standard yet: `+j.warnings.join('; '))}
+  catch(e){say('Rename failed: '+e.message)}
+  editing=false;render()};
+ inp.addEventListener('keydown',e=>{if(e.key=='Enter')finish(true);if(e.key=='Escape')finish(false)});
+ inp.addEventListener('blur',()=>finish(false))}
 document.addEventListener('click',e=>{if(!menu.contains(e.target))menu.style.display='none'});
 document.addEventListener('keydown',e=>{if(e.key=='Escape')menu.style.display='none'});
 // Inline input and message, not prompt()/alert(): embedded browsers (e.g. VS
@@ -2369,7 +2388,7 @@ addf.addEventListener('submit',async e=>{e.preventDefault();const name=newroom.v
  catch(e){say('Add room failed: '+e.message)}});
 q.addEventListener('input',()=>{Q=q.value.toLowerCase();render()});
 if(!WRITABLE){ro.style.display='block';addf.style.display='none'}
-async function load(){if(dragId!=null||menu.style.display=='block')return;
+async function load(){if(dragId!=null||editing||menu.style.display=='block')return;
  B=await (await fetch('/api/board')).json();render()}
 load();setInterval(load,15000)</script>"""
 
@@ -2431,7 +2450,7 @@ def cmd_serve(args):
 
         def do_POST(self):
             path = self.path.split("?")[0]
-            if path not in ("/api/name", "/api/room", "/api/room-add"):
+            if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename"):
                 self.send_error(404)
                 return
             if not allow_write:
@@ -2467,8 +2486,35 @@ def cmd_serve(args):
             with write_lock:   # one read-modify-write of the CSVs at a time
                 if path == "/api/name":
                     self._name(req)
+                elif path == "/api/rename":
+                    self._rename(req)
                 else:
                     self._room(path, req)
+
+        def _rename(self, req):
+            """Board rename: one friendly name for devices.csv, home.csv and
+            app_rooms.csv. Naming-rule problems come back as warnings."""
+            import home
+            master = load_master()
+            rows = home.load_home(HOME_CSV)
+            app = home.load_app_rooms(APP_ROOMS_CSV)
+            try:
+                old, new_id = home.rename(rows, list(master.values()), app,
+                                          str(req.get("id", "")), str(req.get("name", "")))
+            except ValueError as e:
+                _send(self, 400, _json.dumps({"error": str(e)}).encode(), "application/json")
+                return
+            save_master(master)
+            write_reports(master)
+            home.write_csv(HOME_CSV, home.HOME_FIELDS, rows)
+            if app:
+                home.write_csv(APP_ROOMS_CSV, home.APP_ROOM_FIELDS, app)
+            row = next(h for h in rows if (h["Device"] or "name:" + h["Name"]) == new_id)
+            rooms = home.load_rooms(ROOMS_CSV)
+            warnings = home.name_problems(row["Name"], row["Room"], home.room_words(rooms))
+            _send(self, 200, _json.dumps({"ok": True, "id": new_id, "name": row["Name"],
+                                          "old": old, "warnings": warnings}).encode(),
+                  "application/json")
 
         def _room(self, path, req):
             import home

@@ -204,6 +204,32 @@ class TestBoard(unittest.TestCase):
         self.assertEqual((added["Room"], len(rows)), ("Kitchen", 2))
         self.assertIsNone(home.set_room(rows, self.MASTER, "Nope", "Kitchen"))
 
+    def test_rename_everywhere(self):
+        master = [dict(r) for r in self.MASTER]
+        rows = [row(Device="Kitchen Plug", Name="")]
+        app = [{"App": "tuya", "Device": "Kitchen Plug", "Room": "Kitchen"}]
+        old, new_id = home.rename(rows, master, app, "Kitchen Plug", "  Kitchen  Kettle ")
+        self.assertEqual((old, new_id), ("Kitchen Plug", "Kitchen Kettle"))
+        self.assertEqual([r["Device"] for r in master[:2]], ["Kitchen Kettle"] * 2)  # every MAC
+        self.assertEqual((rows[0]["Device"], rows[0]["Name"]), ("Kitchen Kettle", "Kitchen Kettle"))
+        self.assertEqual(app[0]["Device"], "Kitchen Kettle")
+
+    def test_rename_adds_home_row_and_rejects_taken_names(self):
+        master = [dict(r) for r in self.MASTER]
+        rows = []
+        home.rename(rows, master, [], "Blink Camera", "Driveway Camera")
+        self.assertEqual((rows[0]["Device"], rows[0]["Type"]), ("Driveway Camera", "camera"))
+        with self.assertRaisesRegex(ValueError, "already used"):
+            home.rename(rows, master, [], "Kitchen Plug", "driveway camera")
+        with self.assertRaisesRegex(ValueError, "unknown device"):
+            home.rename(rows, master, [], "Nope", "Anything")
+        home.rename(rows, master, [], "Driveway Camera", "Driveway camera")   # case-only change
+
+    def test_rename_device_with_no_network_presence(self):
+        rows = [row(Device="", Name="Kitchen Ceiling Light")]
+        _, new_id = home.rename(rows, [], [], "name:Kitchen Ceiling Light", "Kitchen Pendant")
+        self.assertEqual((new_id, rows[0]["Name"]), ("name:Kitchen Pendant", "Kitchen Pendant"))
+
     def test_add_room_dedupes_by_alias(self):
         rooms = [dict(r) for r in ROOMS]
         self.assertEqual(home.add_room(rooms, "den"), "Family Room")
