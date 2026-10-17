@@ -203,6 +203,10 @@ class TestBoard(unittest.TestCase):
         added = home.set_room(rows, self.MASTER, "Alex's MacBook", "Kitchen")
         self.assertEqual((added["Room"], len(rows)), ("Kitchen", 2))
         self.assertIsNone(home.set_room(rows, self.MASTER, "Nope", "Kitchen"))
+        master = self.MASTER + [{"Device": "", "Vendor": "Unknown"}]
+        for key in ("", "name:"):
+            self.assertIsNone(home.set_room(rows, master, key, "Kitchen"))
+        self.assertEqual(len(rows), 2)
 
     def test_rename_everywhere(self):
         master = [dict(r) for r in self.MASTER]
@@ -224,6 +228,16 @@ class TestBoard(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown device"):
             home.rename(rows, master, [], "Nope", "Anything")
         home.rename(rows, master, [], "Driveway Camera", "Driveway camera")   # case-only change
+
+    def test_rename_blank_key_touches_nothing(self):
+        master = [dict(r) for r in self.MASTER]
+        rows = [row(Device="", Name="Kitchen Ceiling Light")]
+        for key in ("", "  ", "name:", "name: "):
+            with self.assertRaisesRegex(ValueError, "unknown device"):
+                home.rename(rows, master, [], key, "Oops")
+        self.assertEqual([r["Device"] for r in master], [r["Device"] for r in self.MASTER])
+        with self.assertRaisesRegex(ValueError, "60"):
+            home.rename(rows, master, [], "Kitchen Plug", "x" * 61)
 
     def test_rename_device_with_no_network_presence(self):
         rows = [row(Device="", Name="Kitchen Ceiling Light")]

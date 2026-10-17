@@ -271,6 +271,8 @@ def board(master_rows, rooms, home):
 def set_room(home, master_rows, key, room):
     """Move one device to `room` ('' = unassigned). A device not yet in
     home.csv gets a drafted row. Returns the row, or None if key is unknown."""
+    if not key.strip() or key.startswith("name:") and not key[5:].strip():
+        return None
     for h in home:
         if _key(h) == key:
             h["Room"] = room or TODO
@@ -291,8 +293,12 @@ def rename(home, master_rows, app_rooms, key, new):
     new = " ".join(new.split())
     if not new:
         raise ValueError("name required")
+    if len(new) > 60:
+        raise ValueError("name is longer than 60 characters")
     old = key[5:] if key.startswith("name:") else key
     is_device = not key.startswith("name:")
+    if not old.strip():   # a blank key would match every unnamed device
+        raise ValueError("unknown device")
     if is_device and not any(r.get("Device", "").strip() == old for r in master_rows) \
             and not any(h["Device"] == old for h in home):
         raise ValueError("unknown device")
