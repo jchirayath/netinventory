@@ -1,0 +1,8 @@
+Device;Room;Type;Name;Description;Native;Expose
+Living Room TV;Living Room;tv;Living Room TV;Example Corp 65-inch TV;smartthings;ha, google, alexa
+Example Smart Switch 2;Kitchen;switch;Kitchen Ceiling Light;Example HS200 wall switch, 4 recessed cans;kasa;ha, google, alexa, apple
+Example Plug;Family Room;plug;Family Room Lamp;Example HS103 plug, floor lamp by the sofa;kasa;ha, google, alexa, apple
+Example Thermostat;Landing;thermostat;Landing Thermostat;Example smart thermostat, upstairs zone;ecobee;ha, google, alexa, apple
+Example Garage Opener;Garage;garage_door;Garage Door Left;Example opener, left bay;myq;ha, google
+Example Camera 3;Driveway;camera;Driveway Camera;Example outdoor camera;blink;ha, alexa
+Example Hub;Garage;hub;Garage Hub;Example Zigbee hub;smartthings;ha

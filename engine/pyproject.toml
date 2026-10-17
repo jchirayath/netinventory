@@ -37,7 +37,7 @@ Repository = "https://github.com/jchirayath/netinventory"
 netinv = "netinv:main"
 
 [tool.setuptools]
-py-modules = ["netinv", "connectors"]
+py-modules = ["netinv", "connectors", "home"]
 
 # Ship the bundled OUI database alongside the modules.
 [tool.setuptools.package-data]

@@ -55,6 +55,12 @@ cd engine && python3 -m venv .venv
 ```
 Full engine docs: [`engine/README.md`](engine/README.md).
 
+**Rooms and names for every smart-home app:** [`docs/home-standard.md`](docs/home-standard.md)
+is the one standard for which room each device is in, what type it is, and the
+name it has in Home Assistant, SmartThings, Google Home, Alexa, Apple Home and
+Smart Life. `netinv home draft` seeds the registry from `devices.csv`;
+`netinv home check` validates it.
+
 **App (macOS/iOS):**
 ```bash
 cd app

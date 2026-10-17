@@ -7,6 +7,8 @@ wifi_scan.csv
 cloud_devices.csv
 events.csv
 home_ssids.txt
+rooms.csv
+home.csv
 
 # Cached/scraped pages and any raw captures
 *.html

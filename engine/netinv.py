@@ -51,6 +51,8 @@ REPORT_XLSX = os.path.join(DATA_DIR, "inventory.xlsx")
 HOME_SSIDS_FILE = os.path.join(DATA_DIR, "home_ssids.txt")
 WIFI_SCAN_OUT = os.path.join(DATA_DIR, "wifi_scan.csv")
 EVENTS_LOG = os.path.join(DATA_DIR, "events.csv")
+ROOMS_CSV = os.path.join(DATA_DIR, "rooms.csv")      # docs/home-standard.md
+HOME_CSV = os.path.join(DATA_DIR, "home.csv")
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 def _load_config():
@@ -1841,6 +1843,33 @@ def cmd_name(args):
     print(f"  set Device='{args.device}' on {changed} MAC(s)")
 
 
+def cmd_home(args):
+    import home
+    master = load_master()
+    rooms = home.load_rooms(ROOMS_CSV)
+    rows = home.load_home(HOME_CSV)
+    if args.action == "draft":
+        if not rooms:
+            rooms = home.starter_rooms()
+            home.write_csv(ROOMS_CSV, home.ROOM_FIELDS, rooms)
+            print(f"  wrote {len(rooms)} starter rooms to {ROOMS_CSV} (set each Floor)")
+        new = home.draft(master.values(), rooms, rows)
+        home.write_csv(HOME_CSV, home.HOME_FIELDS, rows + new)
+        todo = sum(1 for r in new if home.TODO in (r["Room"], r["Type"]))
+        print(f"  added {len(new)} device(s) to {HOME_CSV}; {todo} need a room or type")
+        return
+    names = {r["Device"] for r in master.values() if r["Device"]}
+    errors, warnings = home.check(rooms, rows, names)
+    for w in warnings:
+        print(f"  warn  {w}")
+    for e in errors:
+        print(f"  error {e}")
+    print(f"  {len(rows)} device(s), {len(rooms)} room(s): "
+          f"{len(errors)} error(s), {len(warnings)} warning(s)")
+    if errors:
+        sys.exit(1)
+
+
 def cmd_report(args):
     master = load_master()
     enrich_vendors(master)
@@ -2330,6 +2359,13 @@ def main():
     n.add_argument("device")
     n.add_argument("macs", nargs="+")
     n.set_defaults(func=cmd_name)
+
+    hm = sub.add_parser("home", help="rooms, types and canonical names "
+                                     "(docs/home-standard.md)")
+    hm.add_argument("action", choices=["draft", "check"],
+                    help="draft: add unclassified devices to home.csv; "
+                         "check: validate rooms.csv + home.csv")
+    hm.set_defaults(func=cmd_home)
 
     r = sub.add_parser("report", help="rebuild reports from devices.csv")
     r.set_defaults(func=cmd_report)
