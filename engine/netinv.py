@@ -2290,9 +2290,13 @@ h1{font-size:1.2rem;margin:.2rem 0}
 <div class=bar>
  <input id=q placeholder="filter devices…">
  <span class=spacer></span>
- <button class=btn id=add>+ Room</button>
+ <form id=addf style="display:flex;gap:6px;margin:0">
+  <input id=newroom placeholder="new room name" maxlength=40>
+  <button class=btn id=add type=submit>+ Room</button>
+ </form>
  <a class=btn href="/">Devices</a>
 </div>
+<div id=msg class=ro style=display:none></div>
 <div class=grid id=g></div>
 <div id=menu></div>
 <script>
@@ -2326,16 +2330,22 @@ async function move(id,room){
  const d=B.devices.find(x=>x.id==id);if(!d||d.room==room)return;
  const was=d.room;d.room=room;render();
  try{await post('/api/room',{id,room})}
- catch(e){d.room=was;render();alert('Move failed: '+e.message)}}
+ catch(e){d.room=was;render();say('Move failed: '+e.message)}}
 let dragId=null;
 g.addEventListener('dragstart',e=>{const el=e.target.closest('.dev');if(!el)return;
  dragId=el.dataset.id;e.dataTransfer.setData('text/plain',dragId);e.dataTransfer.effectAllowed='move'});
-g.addEventListener('dragover',e=>{const rm=e.target.closest('.room');if(!rm||dragId==null)return;
- e.preventDefault();g.querySelectorAll('.over').forEach(x=>x!=rm&&x.classList.remove('over'));rm.classList.add('over')});
+// The device id travels in dataTransfer, so the drop works even when the
+// browser fires dragend first (dragId is only a "drag in progress" flag).
+const isDev=e=>[...e.dataTransfer.types].includes('text/plain');
+const dropOn=(e,rm)=>{e.preventDefault();e.dataTransfer.dropEffect='move';
+ g.querySelectorAll('.over').forEach(x=>x!=rm&&x.classList.remove('over'));rm.classList.add('over')};
+g.addEventListener('dragenter',e=>{const rm=e.target.closest('.room');if(rm&&isDev(e))dropOn(e,rm)});
+g.addEventListener('dragover',e=>{const rm=e.target.closest('.room');if(rm&&isDev(e))dropOn(e,rm)});
 g.addEventListener('dragleave',e=>{const rm=e.target.closest('.room');
  if(rm&&!rm.contains(e.relatedTarget))rm.classList.remove('over')});
-g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm||dragId==null)return;
- e.preventDefault();rm.classList.remove('over');const id=dragId;dragId=null;move(id,rm.dataset.room)});
+g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
+ e.preventDefault();rm.classList.remove('over');const id=e.dataTransfer.getData('text/plain')||dragId;
+ dragId=null;if(id)move(id,rm.dataset.room)});
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
 g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!WRITABLE)return;
  e.preventDefault();const d=B.devices.find(x=>x.id==el.dataset.id);
@@ -2348,11 +2358,17 @@ menu.addEventListener('click',e=>{const it=e.target.closest('[data-room]');if(!i
  menu.style.display='none';move(menu.dataset.id,it.dataset.room)});
 document.addEventListener('click',e=>{if(!menu.contains(e.target))menu.style.display='none'});
 document.addEventListener('keydown',e=>{if(e.key=='Escape')menu.style.display='none'});
-add.onclick=async()=>{const name=prompt('New room name:');if(!name||!name.trim())return;
- try{const j=await post('/api/room-add',{room:name});if(!B.rooms.includes(j.room))B.rooms.push(j.room);render()}
- catch(e){alert('Add room failed: '+e.message)}};
+// Inline input and message, not prompt()/alert(): embedded browsers (e.g. VS
+// Code's Simple Browser) silently block those dialogs.
+let msgT;function say(t){msg.textContent=t;msg.style.display='block';
+ clearTimeout(msgT);msgT=setTimeout(()=>msg.style.display='none',6000)}
+addf.addEventListener('submit',async e=>{e.preventDefault();const name=newroom.value.trim();
+ if(!name){newroom.focus();return}
+ try{const j=await post('/api/room-add',{room:name});newroom.value='';
+  if(B.rooms.includes(j.room))say(`'${j.room}' already exists`);else{B.rooms.push(j.room);render()}}
+ catch(e){say('Add room failed: '+e.message)}});
 q.addEventListener('input',()=>{Q=q.value.toLowerCase();render()});
-if(!WRITABLE){ro.style.display='block';add.style.display='none'}
+if(!WRITABLE){ro.style.display='block';addf.style.display='none'}
 async function load(){if(dragId!=null||menu.style.display=='block')return;
  B=await (await fetch('/api/board')).json();render()}
 load();setInterval(load,15000)</script>"""
