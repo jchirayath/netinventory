@@ -2050,9 +2050,9 @@ def _push_ha(args, master, rows):
             change["area_id"] = p["area_id"]
         if not change:
             continue
-        what = ", ".join(([f"name '{p['old']}' -> '{p['name']}'"] if "name_by_user" in change else [])
-                         + ([f"area '{p['old_area'] or '-'}' -> '{p['area']}'"]
-                            if "area_id" in change else []))
+        what = f"'{p['old']}': " + ", ".join(
+            ([f"name -> '{p['name']}'"] if "name_by_user" in change else [])
+            + ([f"area '{p['old_area'] or '-'}' -> '{p['area']}'"] if "area_id" in change else []))
         if args.dry_run:
             print(f"  would set {what}")
             done += 1
