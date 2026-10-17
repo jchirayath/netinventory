@@ -2169,6 +2169,11 @@ def cloud_merge(master, items):
 def cmd_cloud(args):
     import connectors
     providers = args.providers or connectors.configured_providers()
+    unknown = [p for p in providers if p not in connectors.DISCOVERERS]
+    if unknown:
+        print(f"  unknown provider(s): {', '.join(unknown)}. "
+              f"Options: {', '.join(connectors.DISCOVERERS)}")
+        sys.exit(2)
     if not providers:
         print("  no cloud connectors configured. Run: ./netinv.py set-cloud <provider>")
         return
