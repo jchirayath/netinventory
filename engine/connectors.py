@@ -580,6 +580,8 @@ def ha_registry(c):
                               {"type": "config/area_registry/list"}])
     out = []
     for d in devs or []:
+        if d.get("entry_type") == "service":       # Sun, Forecast, Backup...: not devices
+            continue
         macs = [_norm_mac(v) for k, v in d.get("connections") or [] if k == "mac"]
         out.append({"id": d["id"], "name": d.get("name_by_user") or d.get("name") or "",
                     "mac": macs[0] if macs else "", "area_id": d.get("area_id") or "",

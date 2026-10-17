@@ -210,6 +210,41 @@ class TestHaPushPlan(unittest.TestCase):
                            "old_area": "", "area": "Garage", "area_id": None}])
 
 
+class TestHaAreaAliases(unittest.TestCase):
+    def test_alias_named_area_counts_as_the_room(self):
+        master = [{"MAC": "AA:00:00:00:00:01", "Device": "Desk Lamp"},
+                  {"MAC": "AA:00:00:00:00:02", "Device": "Desk Fan"}]
+        rows = [row(Device="Desk Lamp", Name="", Room="Family Room"),
+                row(Device="Desk Fan", Name="", Room="Family Room")]
+        areas = {"den": "Den", "lr": "Living Room"}           # 'Den' is Family Room's alias
+        devices = [{"id": "a", "name": "Desk Lamp", "mac": "AA:00:00:00:00:01", "area_id": "den"},
+                   {"id": "b", "name": "Desk Fan", "mac": "AA:00:00:00:00:02", "area_id": "lr"}]
+        plan = home.ha_push_plan(devices, areas, master, rows, ROOMS)
+        self.assertEqual([(p["id"], p["area"], p["area_id"]) for p in plan],
+                         [("b", "Family Room", "den")])     # no change for a; b goes to Den
+
+
+class TestHaMatch(unittest.TestCase):
+    def test_mac_then_unique_name_or_discovered_name(self):
+        master = [{"MAC": "AA:00:00:00:00:01", "Device": "Kasa Smart Switch (HS200) 2",
+                   "Hostname": "Garage"},
+                  {"MAC": "AA:00:00:00:00:02", "Device": "Family Room TV (Chromecast)",
+                   "Hostname": "Family Room TV"},
+                  {"MAC": "AA:00:00:00:00:03", "Device": "Study Lamp", "Hostname": "Study"},
+                  {"MAC": "AA:00:00:00:00:04", "Device": "Study Fan", "Hostname": "study"},
+                  {"MAC": "AA:00:00:00:00:05", "Device": "", "Hostname": "Unnamed"}]
+        devices = [{"id": "kasa", "name": "Garage", "mac": "aa:00:00:00:00:01"},
+                   {"id": "st", "name": "garage", "mac": ""},             # SmartThings mirror
+                   {"id": "cast", "name": "Family  Room TV", "mac": ""},
+                   {"id": "amb", "name": "Study", "mac": ""},             # two devices: skip
+                   {"id": "none", "name": "Unnamed", "mac": ""},
+                   {"id": "x", "name": "Garage", "mac": "AA:00:00:00:00:99"}]  # MAC wins
+        self.assertEqual(home.ha_match(devices, master),
+                         {"kasa": "Kasa Smart Switch (HS200) 2",
+                          "st": "Kasa Smart Switch (HS200) 2",
+                          "cast": "Family Room TV (Chromecast)"})
+
+
 class TestBoard(unittest.TestCase):
     MASTER = [
         {"Device": "Kitchen Plug", "Vendor": "TP-Link", "Status": "offline"},

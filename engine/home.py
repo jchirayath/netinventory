@@ -359,27 +359,58 @@ def mac_push_plan(found, master_rows, home):
     return plan
 
 
-def ha_push_plan(devices, areas, master_rows, home):
-    """Home Assistant changes, matched by MAC: [{id, old, name, area_id,
-    old_area, area}] where name (home.csv Name) or area (home.csv Room) differ
-    from HA. Only chosen values are pushed: no Name, no rename; no Room, no
-    area change. area_id is None when HA has no area of that name yet.
-    devices: [{id, name, mac, area_id}]; areas: {area_id: name}."""
-    by_mac = {r.get("MAC", "").upper(): r.get("Device", "").strip() for r in master_rows}
+def ha_match(devices, master_rows):
+    """{HA device id: devices.csv Device}. By MAC where HA has one; otherwise
+    by name: the HA name equals (ignoring case) one device's Device or its
+    discovered Hostname, such as the Kasa app name a SmartThings mirror of a
+    Kasa plug also carries. A name that fits two devices is skipped."""
+    by_mac, by_name = {}, {}
+    for r in master_rows:
+        dev = r.get("Device", "").strip()
+        if not dev:
+            continue
+        by_mac[r.get("MAC", "").upper()] = dev
+        for n in (dev, r.get("Hostname", "").strip()):
+            if n:
+                by_name.setdefault(" ".join(n.lower().split()), set()).add(dev)
+    out = {}
+    for d in devices:
+        if d["mac"]:
+            dev = by_mac.get(d["mac"].upper())
+        else:
+            hits = by_name.get(" ".join(d["name"].lower().split()), set())
+            dev = next(iter(hits)) if len(hits) == 1 else None
+        if dev:
+            out[d["id"]] = dev
+    return out
+
+
+def ha_push_plan(devices, areas, master_rows, home, rooms=()):
+    """Home Assistant changes: [{id, old, name, area_id, old_area, area}]
+    where name (home.csv Name) or area (home.csv Room) differ from HA, for
+    devices ha_match() links. Only chosen values are pushed: no Name, no
+    rename; no Room, no area change. An HA area named after one of the room's
+    rooms.csv Aliases counts as that room ('Study' for Office). area_id is
+    None when HA has no area for the room yet.
+    devices: [{id, name, mac, area_id}]; areas: {id: name}."""
+    match = ha_match(devices, master_rows)
     rows = {h["Device"]: h for h in home if h["Device"]}
     area_ids = {n.lower(): i for i, n in areas.items()}
+    aliases = {r["Room"].lower(): [a.lower() for a in split_list(r["Aliases"])] for r in rooms}
     plan = []
     for d in devices:
-        h = rows.get(by_mac.get(d["mac"].upper(), "")) if d["mac"] else None
+        h = rows.get(match.get(d["id"], ""))
         if not h:
             continue
         name = h["Name"] if h["Name"] and h["Name"] != d["name"] else None
         room = h["Room"] if h["Room"] and h["Room"] != TODO else ""
-        area = room if room and room.lower() != areas.get(d["area_id"], "").lower() else None
+        known = [room.lower()] + aliases.get(room.lower(), []) if room else []
+        area = room if room and areas.get(d["area_id"], "").lower() not in known else None
+        area_id = next((area_ids[k] for k in known if k in area_ids), None) if area else None
         if name or area:
             plan.append({"id": d["id"], "old": d["name"], "name": name,
                          "old_area": areas.get(d["area_id"], ""), "area": area,
-                         "area_id": area_ids.get(area.lower()) if area else None})
+                         "area_id": area_id})
     return plan
 
 

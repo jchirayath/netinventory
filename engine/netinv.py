@@ -2026,7 +2026,7 @@ def _push_ha(args, master, rows):
     except Exception as e:  # noqa: BLE001
         print(f"  ! ha: {e}")
         sys.exit(1)
-    plan = home.ha_push_plan(devices, areas, master.values(), rows)
+    plan = home.ha_push_plan(devices, areas, master.values(), rows, home.load_rooms(ROOMS_CSV))
     if args.device:
         plan = [p for p in plan if args.device in (p["old"], p["name"])]
     missing = sorted({p["area"] for p in plan if p["area"] and not p["area_id"]})
@@ -2065,8 +2065,11 @@ def _push_ha(args, master, rows):
         except Exception as e:  # noqa: BLE001
             print(f"  FAIL {what}: {e}")
             failed += 1
+    matched = home.ha_match(devices, master.values())
+    by_mac = sum(1 for d in devices if d["id"] in matched and d["mac"])
     print(f"  ha: {done} {'to change' if args.dry_run else 'changed'}, {failed} failed; "
-          f"{len(devices)} HA devices, {sum(1 for d in devices if d['mac'])} with a MAC")
+          f"{len(matched)} of {len(devices)} HA devices matched "
+          f"({by_mac} by MAC, {len(matched) - by_mac} by name)")
     if failed:
         sys.exit(1)
 
