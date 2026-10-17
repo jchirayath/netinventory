@@ -407,7 +407,7 @@ def _parse_mdns(buf, a_recs, srv, txt, instances, ports=None):
         elif rtype == 33 and rdlen >= 7:                    # SRV -> target host
             tgt_labels, _ = _dns_read_name(buf, off + 6)
             srv[low] = ".".join(tgt_labels).lower()
-            if ports is not None:
+            if ports is not None and off + 6 <= len(buf):   # truncated packet: no port
                 ports[low] = struct.unpack(">H", buf[off + 4:off + 6])[0]
             if name_labels:
                 instances.setdefault(low, name_labels[0])
@@ -455,7 +455,10 @@ def mdns_discover(timeout=3):
             except socket.timeout:
                 break
             if is_lan_ip(addr[0]):
-                _parse_mdns(data, a_recs, srv, txt, instances, ports)
+                try:
+                    _parse_mdns(data, a_recs, srv, txt, instances, ports)
+                except (struct.error, IndexError, ValueError):
+                    pass                     # one malformed packet must not end the scan
     except OSError as e:
         print(f"  ! mDNS failed: {e}")
         return []
@@ -513,15 +516,23 @@ def _spotify_names(targets, timeout=2):
     import json as _json
     from concurrent.futures import ThreadPoolExecutor
 
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **kw):   # a speaker never redirects; refuse
+            return None                         # so a reply can't point us off-LAN
+    opener = urllib.request.build_opener(_NoRedirect)
+
     def one(item):
         inst, (ip, port, cpath) = item
-        if not ip or not port or not is_lan_ip(ip):
+        if not ip or not is_lan_ip(ip) or not 0 < (port or 0) < 65536 \
+                or not re.fullmatch(r"/?[A-Za-z0-9_\-/]*", cpath or "") or ".." in cpath:
             return inst, None
         url = f"http://{ip}:{port}/{cpath.lstrip('/')}?action=getInfo"
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as r:
+            with opener.open(url, timeout=timeout) as r:
                 info = _json.loads(r.read(65536))
         except Exception:  # noqa: BLE001 — a silent speaker just keeps its label
+            return inst, None
+        if not isinstance(info, dict):
             return inst, None
         model = " ".join(str(info.get("modelDisplayName") or "").replace("_", " ").split())
         brand = " ".join(str(info.get("brandDisplayName") or "").split())

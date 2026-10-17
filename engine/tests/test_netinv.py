@@ -342,6 +342,12 @@ class TestMdns(unittest.TestCase):
         netinv._parse_mdns(self._resp(), a, srv, txt, inst, ports)
         self.assertEqual(ports["deadbeef1234@living room._airplay._tcp.local"], 7000)
 
+    def test_truncated_srv_does_not_raise(self):
+        st = self._struct
+        buf = st.pack(">HHHHHH", 0, 0x8400, 0, 1, 0, 0) + netinv._dns_encode_name("x.local")
+        buf += st.pack(">HHIH", 33, 1, 120, 8) + b"\x00\x00"      # claims 8 bytes, has 2
+        netinv._parse_mdns(buf, {}, {}, {}, {}, {})
+
     def test_spotify_generic_labels_are_junk(self):
         for n in ("SpotifyConnect", "SpotifyConnect #4", "SpotifyConnect (2)",
                   "StreamSpotifyConnect"):
@@ -356,7 +362,8 @@ class TestMdns(unittest.TestCase):
                           "modelDisplayName": "Echo_Dot_with_clock"},
                    "/b": {"remoteName": "Onkyo  TX-NR676", "brandDisplayName": "ONKYO",
                           "modelDisplayName": "TX-NR676"},
-                   "/c": {"remoteName": "", "brandDisplayName": "", "modelDisplayName": ""}}
+                   "/c": {"remoteName": "", "brandDisplayName": "", "modelDisplayName": ""},
+                   "/d": ["not", "a", "dict"]}
 
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -373,7 +380,9 @@ class TestMdns(unittest.TestCase):
         port = srv.server_address[1]
         try:
             with mock.patch.object(netinv, "is_lan_ip", return_value=True):
-                got = netinv._spotify_names({k: ("127.0.0.1", port, k) for k in replies})
+                targets = {k: ("127.0.0.1", port, k) for k in replies}
+                targets["/e"] = ("127.0.0.1", port, "/x?y=../z")     # unsafe path: skipped
+                got = netinv._spotify_names(targets)
         finally:
             srv.shutdown()
             srv.server_close()
