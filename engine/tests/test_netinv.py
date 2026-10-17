@@ -482,6 +482,45 @@ class TestConnectors(unittest.TestCase):
         self.assertEqual(enc[:2], bytes([171 ^ ord("{"), (171 ^ ord("{")) ^ ord('"')]))
         self.assertEqual(connectors._kasa_xor(enc, False), b'{"a":1}')
 
+    def test_kasa_discover_drops_spoofed_and_wrong_port_replies(self):
+        import json
+        import socket as _s
+
+        def reply(alias, mac):
+            return connectors._kasa_xor(json.dumps(
+                {"system": {"get_sysinfo": {"alias": alias, "mac": mac}}}).encode(), True)
+
+        packets = [(reply("Garage", "AA:00:00:00:00:01"), ("10.0.0.1", 9999)),
+                   (reply("Evil", "AA:00:00:00:00:02"), ("10.0.0.9", 9999)),  # MAC not its own
+                   (reply("Port", "AA:00:00:00:00:03"), ("10.0.0.3", 5555))]  # wrong port
+
+        class FakeSock:
+            def __init__(self, *a):
+                self.q = list(packets)
+
+            def setsockopt(self, *a):
+                pass
+
+            def settimeout(self, *a):
+                pass
+
+            def sendto(self, *a):
+                pass
+
+            def recvfrom(self, n):
+                if self.q:
+                    return self.q.pop(0)
+                raise _s.timeout
+
+            def close(self):
+                pass
+
+        arp = {"10.0.0.1": "AA:00:00:00:00:01", "10.0.0.9": "AA:00:00:00:00:99",
+               "10.0.0.3": "AA:00:00:00:00:03"}
+        with mock.patch("socket.socket", FakeSock), mock.patch("builtins.print"):
+            got = connectors.kasa_discover(timeout=0.2, arp=arp)
+        self.assertEqual([d["alias"] for d in got], ["Garage"])
+
     def test_kasa_needs_no_credentials(self):
         self.assertEqual(connectors.creds("kasa"), {})
 

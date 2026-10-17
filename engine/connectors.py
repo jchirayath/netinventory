@@ -448,9 +448,11 @@ def _kasa_xor(data, encrypt):
     return bytes(out)
 
 
-def kasa_discover(timeout=3, broadcast="255.255.255.255"):
+def kasa_discover(timeout=3, broadcast="255.255.255.255", arp=None):
     """[{ip, mac, alias, model}] for every Kasa device answering a UDP
-    get_sysinfo broadcast."""
+    get_sysinfo broadcast. Any LAN host can answer and claim any MAC, so a
+    reply counts only from port 9999 and when its MAC matches the sender's
+    ARP entry (arp: {ip: MAC}, looked up if not given)."""
     import socket
     import time
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -468,10 +470,10 @@ def kasa_discover(timeout=3, broadcast="255.255.255.255"):
                 sends.pop(0)
                 s.sendto(msg, (broadcast, KASA_PORT))
             try:
-                data, (ip, _port) = s.recvfrom(8192)
+                data, (ip, port) = s.recvfrom(8192)
             except socket.timeout:
                 continue
-            if ip in found:
+            if ip in found or port != KASA_PORT:
                 continue
             try:
                 info = json.loads(_kasa_xor(data, False))["system"]["get_sysinfo"]
@@ -484,7 +486,15 @@ def kasa_discover(timeout=3, broadcast="255.255.255.255"):
                          "model": str(info.get("model") or "").strip()}
     finally:
         s.close()
-    return sorted(found.values(), key=lambda d: d["ip"])
+    if arp is None:
+        arp = _resolve_arp(set(found))
+    ok, dropped = [], []
+    for d in sorted(found.values(), key=lambda d: d["ip"]):
+        (ok if d["mac"] and arp.get(d["ip"]) == d["mac"] else dropped).append(d)
+    for d in dropped:
+        print(f"  ! kasa: ignoring {d['ip']}: claims MAC {d['mac'] or '?'}, "
+              f"ARP says {arp.get(d['ip']) or 'nothing'}")
+    return ok
 
 
 def kasa_rename(ip, alias, timeout=4, port=KASA_PORT):
