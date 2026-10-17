@@ -9,6 +9,7 @@ import os
 import re
 
 ROOM_FIELDS = ["Room", "Floor", "Aliases"]
+APP_ROOM_FIELDS = ["App", "Device", "Room"]     # app_rooms.csv, from `home rooms`
 HOME_FIELDS = ["Device", "Room", "Type", "Name", "Description", "Native", "Expose"]
 
 TYPES = ["light", "switch", "plug", "fan", "blind", "garage_door", "lock",
@@ -104,6 +105,11 @@ def load_home(path):
     return _read(path, HOME_FIELDS)
 
 
+def load_device_rooms(path):
+    """{device name: app room} from app_rooms.csv."""
+    return {r["Device"]: r["Room"] for r in _read(path, APP_ROOM_FIELDS) if r["Device"]}
+
+
 def split_list(value):
     return [v.strip() for v in value.split(",") if v.strip()]
 
@@ -134,6 +140,32 @@ def guess_room(device_name, rooms):
     return TODO
 
 
+def clean_room(name):
+    return " ".join(name.split())
+
+
+def merge_rooms(rooms, app_rooms):
+    """Add each app room name that rooms.csv does not already know (as a Room
+    or an alias) with Floor TODO. Existing rows are never changed; repeated
+    app names, such as two 'Closet' rooms, become one row. Returns the new rows."""
+    words = room_words(rooms)
+    added = []
+    for name in map(clean_room, app_rooms):
+        if name and name.lower() not in words:
+            row = {"Room": name, "Floor": TODO, "Aliases": ""}
+            added.append(row)
+            words[name.lower()] = name
+    rooms.extend(added)
+    return added
+
+
+def app_room(device_name, device_rooms, rooms):
+    """The rooms.csv Room for a device's room in a vendor app, or TODO. The
+    app's room name may be a Room or one of its aliases."""
+    name = clean_room(device_rooms.get(device_name, "")).lower()
+    return room_words(rooms).get(name, TODO) if name else TODO
+
+
 def guess_type(row):
     """(type, native) from the device's name, hostname and vendor."""
     hay = " ".join([row.get("Device", ""), row.get("Hostname", ""),
@@ -156,9 +188,12 @@ def default_expose(typ):
     return "ha, google, alexa, apple"
 
 
-def draft(master_rows, rooms, home):
+def draft(master_rows, rooms, home, device_rooms=None):
     """New home.csv rows for every named, controllable device in devices.csv
-    that home.csv does not already list. Existing rows are never changed."""
+    that home.csv does not already list. Existing rows are never changed.
+    A room in the device's name wins; device_rooms ({device name: app room})
+    is the fallback, since apps file unsorted devices under a default room."""
+    device_rooms = device_rooms or {}
     known = {h["Device"] for h in home if h["Device"]}
     out, seen = [], set()
     for r in master_rows:
@@ -167,7 +202,10 @@ def draft(master_rows, rooms, home):
             continue
         seen.add(dev)
         typ, native = guess_type(r)
-        out.append({"Device": dev, "Room": guess_room(dev, rooms), "Type": typ,
+        room = guess_room(dev, rooms)
+        if room == TODO:
+            room = app_room(dev, device_rooms, rooms)
+        out.append({"Device": dev, "Room": room, "Type": typ,
                     "Name": "", "Description": " ".join(
                         x for x in [r.get("Vendor", ""), dev] if x),
                     "Native": native, "Expose": default_expose(typ)})

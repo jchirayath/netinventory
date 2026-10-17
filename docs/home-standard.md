@@ -103,9 +103,16 @@ for a device HA cannot control.
 ## The process
 
 1. `netinv update --scan --cloud`: find devices and name them in `devices.csv`.
-2. `netinv home draft`: add every named but unclassified device to `home.csv`
-   with a guessed room and type (`TODO` where it cannot guess).
-3. Edit `rooms.csv` and `home.csv` in a spreadsheet: fix rooms, write names.
-4. `netinv home check`: validate against the rules above. Fix until it passes.
-5. Push to each app (Home Assistant first), then re-check drift after any
+2. `netinv home rooms --from tuya` (optional): add the Smart Life app's rooms to
+   `rooms.csv` (new rows only, Floor `TODO`) and record which room each Tuya
+   device is in (`app_rooms.csv`, git-ignored). When renaming an imported room,
+   keep the app's name in `Aliases` so its devices still map. Alexa and Google
+   have no API for their rooms; add those by hand.
+3. `netinv home draft`: add every named but unclassified device to `home.csv`
+   with a guessed room and type (`TODO` where it cannot guess). A room in the
+   device's name wins; otherwise its Tuya room is used. (Smart Life files
+   unsorted devices under its first room, so treat Tuya rooms as a hint.)
+4. Edit `rooms.csv` and `home.csv` in a spreadsheet: fix rooms, write names.
+5. `netinv home check`: validate against the rules above. Fix until it passes.
+6. Push to each app (Home Assistant first), then re-check drift after any
    change made inside an app.

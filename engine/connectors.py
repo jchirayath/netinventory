@@ -149,6 +149,26 @@ def discover_tuya(c):
     return out
 
 
+def tuya_rooms(c):
+    """{room name: [device names]} from the Tuya/SmartLife app's homes and
+    rooms. Rooms with no devices are kept (empty list)."""
+    import tinytuya
+    cloud = tinytuya.Cloud(apiRegion=c["region"], apiKey=c["access_id"],
+                           apiSecret=c["access_secret"])
+    devs = cloud.getdevices(True).get("result", [])
+    out = {}
+    for home_id in sorted({d.get("owner_id") for d in devs if d.get("owner_id")}):
+        resp = cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms")
+        if not resp.get("success"):
+            print(f"  ! tuya: rooms for home {home_id}: {resp.get('msg', resp)}")
+            continue
+        for room in resp["result"].get("rooms", []):
+            rd = cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms/{room['room_id']}/devices")
+            names = [d.get("name", "") for d in (rd.get("result") or []) if d.get("name")]
+            out.setdefault(room.get("name", ""), []).extend(names)
+    return out
+
+
 def _mac_from_tuya_id(s):
     """An all-hex Tuya WiFi device id embeds the MAC as its trailing 12 hex.
     Cloud 'eb...' UUIDs contain letters and embed no MAC -> return ''."""

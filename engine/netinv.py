@@ -53,6 +53,7 @@ WIFI_SCAN_OUT = os.path.join(DATA_DIR, "wifi_scan.csv")
 EVENTS_LOG = os.path.join(DATA_DIR, "events.csv")
 ROOMS_CSV = os.path.join(DATA_DIR, "rooms.csv")      # docs/home-standard.md
 HOME_CSV = os.path.join(DATA_DIR, "home.csv")
+APP_ROOMS_CSV = os.path.join(DATA_DIR, "app_rooms.csv")  # written by `home rooms`
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 def _load_config():
@@ -1848,12 +1849,33 @@ def cmd_home(args):
     master = load_master()
     rooms = home.load_rooms(ROOMS_CSV)
     rows = home.load_home(HOME_CSV)
+    if args.action == "rooms":
+        import connectors
+        c = connectors.creds(args.source)
+        if not c:
+            print(f"  {args.source} is not configured; run: netinv set-cloud {args.source}")
+            sys.exit(1)
+        app = connectors.tuya_rooms(c)
+        if not rooms:
+            rooms = home.starter_rooms()
+        added = home.merge_rooms(rooms, app)
+        home.write_csv(ROOMS_CSV, home.ROOM_FIELDS, rooms)
+        links = [{"App": args.source, "Device": d, "Room": home.clean_room(r)}
+                 for r, devs in app.items() for d in devs]
+        home.write_csv(APP_ROOMS_CSV, home.APP_ROOM_FIELDS, links)
+        for r in added:
+            print(f"  + {r['Room']}")
+        print(f"  {args.source}: {len(app)} room(s), {len(links)} device(s); "
+              f"added {len(added)} room(s) to {ROOMS_CSV} (set each Floor)")
+        print("  To rename a room, keep the app's name in Aliases so devices still map.")
+        return
     if args.action == "draft":
         if not rooms:
             rooms = home.starter_rooms()
             home.write_csv(ROOMS_CSV, home.ROOM_FIELDS, rooms)
             print(f"  wrote {len(rooms)} starter rooms to {ROOMS_CSV} (set each Floor)")
-        new = home.draft(master.values(), rooms, rows)
+        new = home.draft(master.values(), rooms, rows,
+                         home.load_device_rooms(APP_ROOMS_CSV))
         home.write_csv(HOME_CSV, home.HOME_FIELDS, rows + new)
         todo = sum(1 for r in new if home.TODO in (r["Room"], r["Type"]))
         print(f"  added {len(new)} device(s) to {HOME_CSV}; {todo} need a room or type")
@@ -2362,9 +2384,12 @@ def main():
 
     hm = sub.add_parser("home", help="rooms, types and canonical names "
                                      "(docs/home-standard.md)")
-    hm.add_argument("action", choices=["draft", "check"],
-                    help="draft: add unclassified devices to home.csv; "
+    hm.add_argument("action", choices=["rooms", "draft", "check"],
+                    help="rooms: import rooms from an app into rooms.csv; "
+                         "draft: add unclassified devices to home.csv; "
                          "check: validate rooms.csv + home.csv")
+    hm.add_argument("--from", dest="source", choices=["tuya"], default="tuya",
+                    help="app to import rooms from (rooms only; default tuya)")
     hm.set_defaults(func=cmd_home)
 
     r = sub.add_parser("report", help="rebuild reports from devices.csv")

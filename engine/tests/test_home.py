@@ -139,5 +139,27 @@ class TestDraft(unittest.TestCase):
         self.assertEqual(len(d), 4)
 
 
+class TestAppRooms(unittest.TestCase):
+    def test_merge_adds_only_new_rooms_once(self):
+        rooms = [dict(r) for r in ROOMS]
+        before = [dict(r) for r in rooms]
+        added = home.merge_rooms(rooms, ["Living Room", "den", "Bedroom ", "Closet",
+                                         "Closet", "  Guest   Room "])
+        self.assertEqual([r["Room"] for r in added], ["Bedroom", "Closet", "Guest Room"])
+        self.assertTrue(all(r["Floor"] == "TODO" for r in added))
+        self.assertEqual(rooms[:len(before)], before)      # existing rows untouched
+
+    def test_draft_name_room_wins_then_app_room(self):
+        master = [{"Device": "Kitchen", "Vendor": "Tuya Smart"},
+                  {"Device": "Blinds", "Vendor": "Tuya Smart"},
+                  {"Device": "Flood sensor", "Vendor": "Tuya Smart"}]
+        device_rooms = {"Kitchen": "Living Room", "Blinds": "Den ",
+                        "Flood sensor": "Attic"}
+        d = {r["Device"]: r["Room"] for r in home.draft(master, ROOMS, [], device_rooms)}
+        self.assertEqual(d["Kitchen"], "Kitchen")         # the name names a room
+        self.assertEqual(d["Blinds"], "Family Room")      # app room, via alias
+        self.assertEqual(d["Flood sensor"], "TODO")       # app room not in rooms.csv
+
+
 if __name__ == "__main__":
     unittest.main()

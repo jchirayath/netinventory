@@ -9,6 +9,7 @@ events.csv
 home_ssids.txt
 rooms.csv
 home.csv
+app_rooms.csv
 
 # Cached/scraped pages and any raw captures
 *.html
