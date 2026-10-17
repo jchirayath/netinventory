@@ -5,6 +5,7 @@ treated as global-OUI for the addressing-bit tests."""
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import netinv  # noqa: E402
@@ -335,6 +336,59 @@ class TestMdns(unittest.TestCase):
         self.assertEqual(srv.get(key), "appletv.local")
         self.assertEqual(txt[key]["md"], "AppleTV6,2")
         self.assertEqual(txt[key]["fn"], "Living Room TV")
+
+    def test_parse_collects_srv_port(self):
+        a, srv, txt, inst, ports = {}, {}, {}, {}, {}
+        netinv._parse_mdns(self._resp(), a, srv, txt, inst, ports)
+        self.assertEqual(ports["deadbeef1234@living room._airplay._tcp.local"], 7000)
+
+    def test_spotify_generic_labels_are_junk(self):
+        for n in ("SpotifyConnect", "SpotifyConnect #4", "SpotifyConnect (2)",
+                  "StreamSpotifyConnect"):
+            self.assertEqual(netinv.name_quality(n), 1, n)
+        self.assertEqual(netinv.name_quality("Amazon Echo Dot with clock"), 3)
+
+    def test_spotify_getinfo_name_or_brand_model(self):
+        import http.server
+        import json
+        import threading
+        replies = {"/a": {"remoteName": "", "brandDisplayName": "Amazon",
+                          "modelDisplayName": "Echo_Dot_with_clock"},
+                   "/b": {"remoteName": "Onkyo  TX-NR676", "brandDisplayName": "ONKYO",
+                          "modelDisplayName": "TX-NR676"},
+                   "/c": {"remoteName": "", "brandDisplayName": "", "modelDisplayName": ""}}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = json.dumps(replies[self.path.split("?")[0]]).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        port = srv.server_address[1]
+        try:
+            with mock.patch.object(netinv, "is_lan_ip", return_value=True):
+                got = netinv._spotify_names({k: ("127.0.0.1", port, k) for k in replies})
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(got, {"/a": ("Amazon Echo Dot with clock", "Echo Dot with clock"),
+                               "/b": ("Onkyo TX-NR676", "TX-NR676")})
+
+    def test_auto_name_numbers_look_alikes(self):
+        m = {}
+        for i, (dev, host) in enumerate([("Amazon Echo Dot", "x"), ("", "Amazon Echo Dot"),
+                                         ("", "Amazon Echo Dot"), ("Mine", "Amazon Echo Show")]):
+            mac = f"AA:BB:CC:00:00:0{i}"
+            m[mac] = dict({k: "" for k in netinv.FIELDS}, MAC=mac, Device=dev, Hostname=host)
+        self.assertEqual(netinv.auto_name(m), 2)
+        self.assertEqual([r["Device"] for r in m.values()],
+                         ["Amazon Echo Dot", "Amazon Echo Dot 2", "Amazon Echo Dot 3", "Mine"])
 
     def test_clean_model_rejects_numeric_metadata(self):
         self.assertEqual(netinv._clean_model("0,1,2"), "")   # _raop metadata list

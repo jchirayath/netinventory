@@ -227,12 +227,22 @@ def _key(h):
 def board(master_rows, rooms, home):
     """Every device for the room board: each home.csv row plus every named
     device in devices.csv that home.csv does not list yet (unassigned)."""
-    status, first = {}, {}
+    status, first, seen_as = {}, {}, {}
     for r in master_rows:
         dev = r.get("Device", "").strip()
-        if dev and status.get(dev) != "online":
+        if not dev:
+            continue
+        first.setdefault(dev, r)
+        if status.get(dev) != "online":
             status[dev] = r.get("Status", "")
-            first.setdefault(dev, r)
+        # The discovered name (e.g. 'Amazon Echo Show') tells look-alike
+        # Device names apart; prefer a human one with a space, then any.
+        host = r.get("Hostname", "").strip()
+        if not host or re.fullmatch(r"[0-9a-f:]{12,17}", host.lower()):
+            continue
+        prev = seen_as.get(dev)
+        if prev is None or (" " in host and " " not in prev[0]):
+            seen_as[dev] = (host, r.get("IP", ""))
     room_set = {r["Room"].lower(): r["Room"] for r in rooms}
     devices, seen = [], set()
     for h in home:
@@ -240,15 +250,17 @@ def board(master_rows, rooms, home):
         if not key or key in seen:
             continue
         seen.add(key)
+        host, ip = seen_as.get(h["Device"], ("", ""))
         devices.append({"id": key, "device": h["Device"], "name": h["Name"],
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
-                        "status": status.get(h["Device"], "")})
+                        "status": status.get(h["Device"], ""), "seen_as": host, "ip": ip})
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)
+            host, ip = seen_as.get(dev, ("", ""))
             devices.append({"id": dev, "device": dev, "name": "",
                             "type": guess_type(first[dev])[0],
-                            "room": "", "status": status[dev]})
+                            "room": "", "status": status[dev], "seen_as": host, "ip": ip})
     return {"rooms": [r["Room"] for r in rooms], "devices": devices}
 
 

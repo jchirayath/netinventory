@@ -378,8 +378,9 @@ def _dns_read_name(buf, off):
     return labels, next_off
 
 
-def _parse_mdns(buf, a_recs, srv, txt, instances):
-    """Accumulate A / PTR / SRV / TXT records from one mDNS response packet."""
+def _parse_mdns(buf, a_recs, srv, txt, instances, ports=None):
+    """Accumulate A / PTR / SRV / TXT records from one mDNS response packet.
+    `ports`, if given, collects each SRV record's port."""
     if len(buf) < 12:
         return
     qd, an, ns, ar = struct.unpack(">HHHH", buf[4:12])
@@ -406,6 +407,8 @@ def _parse_mdns(buf, a_recs, srv, txt, instances):
         elif rtype == 33 and rdlen >= 7:                    # SRV -> target host
             tgt_labels, _ = _dns_read_name(buf, off + 6)
             srv[low] = ".".join(tgt_labels).lower()
+            if ports is not None:
+                ports[low] = struct.unpack(">H", buf[off + 4:off + 6])[0]
             if name_labels:
                 instances.setdefault(low, name_labels[0])
         elif rtype == 16:                                   # TXT key=value pairs
@@ -432,7 +435,7 @@ def mdns_discover(timeout=3):
     Room Apple TV') and TXT 'fn='/'md=' give friendly-name/model — all excellent
     discovered data, and unlike OUI they survive MAC randomization. IP -> MAC
     via the ARP table."""
-    a_recs, srv, txt, instances = {}, {}, {}, {}
+    a_recs, srv, txt, instances, ports = {}, {}, {}, {}, {}
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -452,7 +455,7 @@ def mdns_discover(timeout=3):
             except socket.timeout:
                 break
             if is_lan_ip(addr[0]):
-                _parse_mdns(data, a_recs, srv, txt, instances)
+                _parse_mdns(data, a_recs, srv, txt, instances, ports)
     except OSError as e:
         print(f"  ! mDNS failed: {e}")
         return []
@@ -463,6 +466,9 @@ def mdns_discover(timeout=3):
             pass
 
     ip2mac = arp_table()
+    spotify = _spotify_names({
+        inst: (a_recs.get(srv.get(inst)), ports.get(inst), txt.get(inst, {}).get("cpath", "/"))
+        for inst in instances if inst.endswith("._spotify-connect._tcp.local")})
     out, seen_ip = [], set()
     # 1) service instances -> friendly name + model, resolved to an IP via SRV/A
     for inst_low, label in instances.items():
@@ -470,7 +476,9 @@ def mdns_discover(timeout=3):
         ip = a_recs.get(host) if host else None
         if not ip:
             continue
-        t = txt.get(inst_low, {})
+        t = dict(txt.get(inst_low, {}))
+        if inst_low in spotify:                  # getInfo name beats 'SpotifyConnect #4'
+            t["fn"], t["md"] = spotify[inst_low]
         name = t.get("fn") or t.get("n") or label            # fn= beats a UUID label
         # AirPlay/RAOP instances are 'DEADBEEF1234@Living Room' -> keep the label.
         name = re.sub(r"^[0-9A-Fa-f]{6,}@", "", name).strip()
@@ -495,6 +503,38 @@ def mdns_discover(timeout=3):
             seen_ip.add(ip)
     print(f"  mDNS discovered {len(out)} named devices")
     return out
+
+
+def _spotify_names(targets, timeout=2):
+    """{instance: (name, model)} from each Spotify Connect speaker's zeroconf
+    getInfo. targets is {instance: (ip, port, cpath)}. Speakers that report
+    their own name (receivers, TVs) give it; Echos leave remoteName blank, so
+    the brand + model ('Amazon Echo Dot with clock') stands in."""
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(item):
+        inst, (ip, port, cpath) = item
+        if not ip or not port or not is_lan_ip(ip):
+            return inst, None
+        url = f"http://{ip}:{port}/{cpath.lstrip('/')}?action=getInfo"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                info = _json.loads(r.read(65536))
+        except Exception:  # noqa: BLE001 — a silent speaker just keeps its label
+            return inst, None
+        model = " ".join(str(info.get("modelDisplayName") or "").replace("_", " ").split())
+        brand = " ".join(str(info.get("brandDisplayName") or "").split())
+        brand = brand[:1].upper() + brand[1:]
+        name = " ".join(str(info.get("remoteName") or "").split())
+        if not name and model:
+            name = model if model.lower().startswith(brand.lower()) else f"{brand} {model}".strip()
+        return inst, ((name, model) if name else None)
+
+    if not targets:
+        return {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return {k: v for k, v in pool.map(one, targets.items()) if v}
 
 
 def _clean_model(s):
@@ -695,7 +735,8 @@ def name_quality(name):
     low = n.lower()
     if re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", low) \
             or re.fullmatch(r"[0-9a-f]{12}", low) \
-            or low.startswith(("wlan0", "lwip", "espressif")):
+            or low.startswith(("wlan0", "lwip", "espressif")) \
+            or re.fullmatch(r"(stream)?spotifyconnect( ?[#(]\d+\)?)?", low):
         return 1
     if " " in n or "-" in n and re.search(r"[A-Za-z]{3,}\s|\s[A-Za-z]{3,}", n):
         return 3
@@ -1489,13 +1530,21 @@ def get_router_creds():
 
 def auto_name(master):
     """Fill blank Device names from a high-quality discovered Hostname. Never
-    overwrites a name you've set. Returns the number of devices auto-named."""
+    overwrites a name you've set. Returns the number of devices auto-named.
+    A name already taken gets a number ('Amazon Echo Dot 2'): one Device name
+    is one physical device, so three Dots must not merge into one."""
+    taken = {r["Device"].lower() for r in master.values() if r["Device"]}
     n = 0
     for row in master.values():
         if row["Device"]:
             continue
         if name_quality(row["Hostname"]) >= 3:
-            row["Device"] = row["Hostname"]
+            name, i = row["Hostname"], 1
+            while name.lower() in taken:
+                i += 1
+                name = f"{row['Hostname']} {i}"
+            row["Device"] = name
+            taken.add(name.lower())
             n += 1
     return n
 
@@ -2213,6 +2262,7 @@ h1{font-size:1.2rem;margin:.2rem 0}
 .dev:hover{border-color:#9db4d3}
 .dev.saving{opacity:.5}
 .dev .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev .sub{display:block;font-size:11px;color:#6b7a8c;overflow:hidden;text-overflow:ellipsis}
 .dev .ty{font-size:11px;color:#3a516b;background:#eef2f8;border-radius:8px;padding:0 6px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
 .empty{color:#9aa;padding:4px 4px 8px}
@@ -2242,11 +2292,13 @@ const label=d=>d.name||d.device||d.id;
 const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
 function card(d){
  const ty=d.type&&d.type!='TODO'?`<span class=ty>${esc(d.type.replace('_',' '))}</span>`:'';
- const tip=d.name&&d.device&&d.name!=d.device?` title="${esc(d.device)}"`:'';
- return `<div class=dev draggable=${WRITABLE} data-id="${esc(d.id)}"${tip}>`+
-  `<span class=dot style=background:${color(d.status)}></span><span class=nm>${esc(label(d))}</span>${ty}</div>`}
+ const tip=[d.name&&d.device&&d.name!=d.device?d.device:'',d.seen_as,d.ip].filter(Boolean).join(' · ');
+ const sub=d.seen_as&&d.seen_as.toLowerCase()!=label(d).toLowerCase()?`<span class=sub>${esc(d.seen_as)}</span>`:'';
+ return `<div class=dev draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+
+  `<span class=dot style=background:${color(d.status)}></span>`+
+  `<span class=nm>${esc(label(d))}${sub}</span>${ty}</div>`}
 function render(){
- const shown=B.devices.filter(d=>!Q||(label(d)+' '+d.device+' '+d.type).toLowerCase().includes(Q));
+ const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.ip].join(' ').toLowerCase().includes(Q));
  const by={'':[]};B.rooms.forEach(r=>by[r]=[]);
  shown.forEach(d=>(by[d.room]||by['']).push(d));
  Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));

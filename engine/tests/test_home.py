@@ -183,6 +183,13 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(d["Blink Camera"]["type"], "camera")
         self.assertEqual(b["rooms"][0], "Living Room")
 
+    def test_seen_as_prefers_a_human_discovered_name(self):
+        master = [{"Device": "Amazon Echo 2", "Hostname": "amazon-7646e5494", "IP": "10.0.0.2"},
+                  {"Device": "Amazon Echo 2", "Hostname": "Amazon Echo Show", "IP": "10.0.0.3"},
+                  {"Device": "Amazon Echo 2", "Hostname": "aa:bb:cc:dd:ee:ff", "IP": ""}]
+        d = home.board(master, ROOMS, [])["devices"][0]
+        self.assertEqual((d["seen_as"], d["ip"]), ("Amazon Echo Show", "10.0.0.3"))
+
     def test_room_not_in_rooms_csv_is_unassigned(self):
         b = home.board([], ROOMS, [row(Device="Plug", Room="Attic")])
         self.assertEqual(b["devices"][0]["room"], "")

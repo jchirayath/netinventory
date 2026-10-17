@@ -71,7 +71,10 @@ overwritten by a refresh.
    Because it keys on advertised names, not the OUI, it identifies devices that use a
    **randomized MAC** (modern iOS/Android/macOS), which OUI lookup can't. A discovered
    model fills an *empty* Vendor only — it never overrides a real OUI manufacturer.
-   Skip with `--no-mdns`.
+   Spotify Connect speakers are also asked for their zeroconf `getInfo`: receivers and
+   TVs report their own name, and Echos (which hide their Alexa name) report a model,
+   so `SpotifyConnect #4` becomes `Amazon Echo Dot`. `--auto-name` numbers look-alikes
+   (`Amazon Echo Dot 2`). Skip with `--no-mdns`.
 4. **Router** — scrapes the gateway's connected-devices page for DHCP hostnames,
    wired/wireless link type, and authoritative online/offline status. The
    authenticated session cookie is cached (`router_cookies.txt`) and reused, so
