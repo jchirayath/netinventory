@@ -2048,6 +2048,7 @@ tr.dim td{color:#9aa}
  <span class=chip id=cu>Only unnamed</span>
  <span class=chip id=cd>Hide defunct</span>
  <span class=spacer></span>
+ <a class=btn href="/rooms" style="text-decoration:none;color:inherit">Rooms</a>
  <button class=btn id=rst>Reset</button>
 </div>
 <div class=wrap><table><thead><tr id=hr></tr><tr class=f id=fr></tr></thead><tbody id=t></tbody></table></div>
@@ -2182,6 +2183,118 @@ async function load(){D=await (await fetch('/api/devices')).json();
 load();setInterval(load,15000)</script>"""
 
 
+# Room board: drag a device onto a room (or right-click > Move to) to set its
+# Room in home.csv. Same look as _DASHBOARD; writes need --allow-write.
+_ROOMS_PAGE = """<!doctype html><meta charset=utf-8><title>netinventory rooms</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+:root{--head:#1F4E78}
+*{box-sizing:border-box}
+body{font:13px system-ui;margin:1rem;color:#111;background:#fff}
+h1{font-size:1.2rem;margin:.2rem 0}
+#sum{color:#555;margin:.2rem 0 .6rem}
+.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:.7rem}
+.bar input{padding:5px 8px;font:13px system-ui;border:1px solid #cdd;border-radius:6px}
+#q{width:18rem;flex:0 1 18rem}
+.spacer{flex:1}
+.btn{border:1px solid #ccd;border-radius:6px;padding:4px 9px;background:#fff;cursor:pointer;
+ font:13px system-ui;color:inherit;text-decoration:none}
+.ro{background:#fff4e5;border:1px solid #f0c48a;border-radius:6px;padding:6px 10px;margin-bottom:.7rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;align-items:start}
+.room{border:1px solid #dde3ec;border-radius:8px;background:#f7f9fc;min-height:90px}
+.room h2{font-size:13px;margin:0;padding:6px 10px;background:var(--head);color:#fff;
+ border-radius:7px 7px 0 0;display:flex;justify-content:space-between}
+.room h2 .n{font-weight:400;opacity:.8}
+.room.unassigned h2{background:#8a5a00}
+.room.over{outline:2px dashed var(--head);outline-offset:-2px;background:#e6eef9}
+.list{padding:6px;display:flex;flex-direction:column;gap:4px}
+.dev{background:#fff;border:1px solid #e3e7ee;border-radius:6px;padding:4px 8px;cursor:grab;
+ display:flex;align-items:center;gap:6px;user-select:none}
+.dev:hover{border-color:#9db4d3}
+.dev.saving{opacity:.5}
+.dev .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev .ty{font-size:11px;color:#3a516b;background:#eef2f8;border-radius:8px;padding:0 6px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.empty{color:#9aa;padding:4px 4px 8px}
+#menu{position:fixed;display:none;background:#fff;border:1px solid #ccd;border-radius:6px;
+ box-shadow:0 4px 14px #0002;padding:4px 0;z-index:10;max-height:70vh;overflow:auto;min-width:170px}
+#menu div{padding:4px 12px;cursor:pointer;white-space:nowrap}
+#menu div:hover{background:#f0f6ff}
+#menu .hd{color:#777;cursor:default;font-size:11px}#menu .hd:hover{background:none}
+#menu .cur{font-weight:600}
+</style>
+<h1>Rooms</h1><div id=sum>loading…</div>
+<div id=ro class=ro style=display:none>Read-only: start with
+ <code>netinv serve --allow-write</code> to move devices.</div>
+<div class=bar>
+ <input id=q placeholder="filter devices…">
+ <span class=spacer></span>
+ <button class=btn id=add>+ Room</button>
+ <a class=btn href="/">Devices</a>
+</div>
+<div class=grid id=g></div>
+<div id=menu></div>
+<script>
+const WRITABLE=__WRITABLE__;
+let B={rooms:[],devices:[]},Q='';
+const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const label=d=>d.name||d.device||d.id;
+const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
+function card(d){
+ const ty=d.type&&d.type!='TODO'?`<span class=ty>${esc(d.type.replace('_',' '))}</span>`:'';
+ const tip=d.name&&d.device&&d.name!=d.device?` title="${esc(d.device)}"`:'';
+ return `<div class=dev draggable=${WRITABLE} data-id="${esc(d.id)}"${tip}>`+
+  `<span class=dot style=background:${color(d.status)}></span><span class=nm>${esc(label(d))}</span>${ty}</div>`}
+function render(){
+ const shown=B.devices.filter(d=>!Q||(label(d)+' '+d.device+' '+d.type).toLowerCase().includes(Q));
+ const by={'':[]};B.rooms.forEach(r=>by[r]=[]);
+ shown.forEach(d=>(by[d.room]||by['']).push(d));
+ Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));
+ g.innerHTML=['',...B.rooms].map(r=>`<div class="room${r?'':' unassigned'}" data-room="${esc(r)}">`+
+  `<h2><span>${r?esc(r):'Unassigned'}</span><span class=n>${by[r].length}</span></h2>`+
+  `<div class=list>${by[r].map(card).join('')||'<div class=empty>drop devices here</div>'}</div></div>`).join('');
+ const un=B.devices.filter(d=>!d.room).length;
+ sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned`}
+async function post(path,body){
+ const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const j=await r.json().catch(()=>({}));
+ if(!r.ok)throw new Error(j.error||r.status);return j}
+async function move(id,room){
+ const d=B.devices.find(x=>x.id==id);if(!d||d.room==room)return;
+ const was=d.room;d.room=room;render();
+ try{await post('/api/room',{id,room})}
+ catch(e){d.room=was;render();alert('Move failed: '+e.message)}}
+let dragId=null;
+g.addEventListener('dragstart',e=>{const el=e.target.closest('.dev');if(!el)return;
+ dragId=el.dataset.id;e.dataTransfer.setData('text/plain',dragId);e.dataTransfer.effectAllowed='move'});
+g.addEventListener('dragover',e=>{const rm=e.target.closest('.room');if(!rm||dragId==null)return;
+ e.preventDefault();g.querySelectorAll('.over').forEach(x=>x!=rm&&x.classList.remove('over'));rm.classList.add('over')});
+g.addEventListener('dragleave',e=>{const rm=e.target.closest('.room');
+ if(rm&&!rm.contains(e.relatedTarget))rm.classList.remove('over')});
+g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm||dragId==null)return;
+ e.preventDefault();rm.classList.remove('over');const id=dragId;dragId=null;move(id,rm.dataset.room)});
+g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
+g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!WRITABLE)return;
+ e.preventDefault();const d=B.devices.find(x=>x.id==el.dataset.id);
+ menu.innerHTML=`<div class=hd>Move ${esc(label(d))} to</div>`+['',...B.rooms].map(r=>
+  `<div data-room="${esc(r)}" class="${r==d.room?'cur':''}">${r?esc(r):'Unassigned'}</div>`).join('');
+ menu.dataset.id=d.id;menu.style.display='block';
+ const w=menu.offsetWidth,h=menu.offsetHeight;
+ menu.style.left=Math.min(e.clientX,innerWidth-w-8)+'px';menu.style.top=Math.min(e.clientY,innerHeight-h-8)+'px'});
+menu.addEventListener('click',e=>{const it=e.target.closest('[data-room]');if(!it)return;
+ menu.style.display='none';move(menu.dataset.id,it.dataset.room)});
+document.addEventListener('click',e=>{if(!menu.contains(e.target))menu.style.display='none'});
+document.addEventListener('keydown',e=>{if(e.key=='Escape')menu.style.display='none'});
+add.onclick=async()=>{const name=prompt('New room name:');if(!name||!name.trim())return;
+ try{const j=await post('/api/room-add',{room:name});if(!B.rooms.includes(j.room))B.rooms.push(j.room);render()}
+ catch(e){alert('Add room failed: '+e.message)}};
+q.addEventListener('input',()=>{Q=q.value.toLowerCase();render()});
+if(!WRITABLE){ro.style.display='block';add.style.display='none'}
+async function load(){if(dragId!=null||menu.style.display=='block')return;
+ B=await (await fetch('/api/board')).json();render()}
+load();setInterval(load,15000)</script>"""
+
+
 def cmd_serve(args):
     """Read-only JSON API + a tiny dashboard for a GUI/iOS companion to consume."""
     import http.server
@@ -2198,9 +2311,15 @@ def cmd_serve(args):
             return evaluate_alerts(master)
         if path == "/api/events":
             return device_history("")  # all
+        if path == "/api/board":
+            import home
+            return home.board(list(master.values()), home.load_rooms(ROOMS_CSV),
+                              home.load_home(HOME_CSV))
         return None
 
     allow_write = getattr(args, "allow_write", False)
+    import threading
+    write_lock = threading.Lock()
 
     def _send(self, code, body, ctype, cors=False):
         self.send_response(code)
@@ -2218,10 +2337,11 @@ def cmd_serve(args):
 
         def do_GET(self):
             path = self.path.split("?")[0]
-            if path in ("/", "/index.html"):
-                # inject whether renaming is enabled so the UI shows edit controls
-                html = _DASHBOARD.replace("__WRITABLE__",
-                                          "true" if allow_write else "false")
+            page = {"/": _DASHBOARD, "/index.html": _DASHBOARD,
+                    "/rooms": _ROOMS_PAGE}.get(path)
+            if page:
+                # inject whether writes are enabled so the UI shows edit controls
+                html = page.replace("__WRITABLE__", "true" if allow_write else "false")
                 _send(self, 200, html.encode(), "text/html; charset=utf-8", cors=True)
                 return
             data = payload(path)
@@ -2232,7 +2352,7 @@ def cmd_serve(args):
 
         def do_POST(self):
             path = self.path.split("?")[0]
-            if path != "/api/name":
+            if path not in ("/api/name", "/api/room", "/api/room-add"):
                 self.send_error(404)
                 return
             if not allow_write:
@@ -2260,10 +2380,47 @@ def cmd_serve(args):
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 req = _json.loads(self.rfile.read(n) or b"{}")
-                mac, name = req.get("mac", ""), req.get("name", "")
+                if not isinstance(req, dict):
+                    raise ValueError
             except (ValueError, TypeError):
                 _send(self, 400, b'{"error":"bad JSON"}', "application/json")
                 return
+            with write_lock:   # one read-modify-write of the CSVs at a time
+                if path == "/api/name":
+                    self._name(req)
+                else:
+                    self._room(path, req)
+
+        def _room(self, path, req):
+            import home
+            rooms = home.load_rooms(ROOMS_CSV)
+            room = home.clean_room(str(req.get("room", "")))
+            if path == "/api/room-add":
+                if not room:
+                    _send(self, 400, b'{"error":"room name required"}', "application/json")
+                    return
+                room = home.add_room(rooms, room)
+                home.write_csv(ROOMS_CSV, home.ROOM_FIELDS, rooms)
+                _send(self, 200, _json.dumps({"ok": True, "room": room}).encode(),
+                      "application/json")
+                return
+            canon = {r["Room"].lower(): r["Room"] for r in rooms}
+            if room and room.lower() not in canon:
+                _send(self, 400, b'{"error":"unknown room"}', "application/json")
+                return
+            room = canon.get(room.lower(), "")
+            rows = home.load_home(HOME_CSV)
+            row = home.set_room(rows, list(load_master().values()),
+                                str(req.get("id", "")), room)
+            if row is None:
+                _send(self, 404, b'{"error":"unknown device"}', "application/json")
+                return
+            home.write_csv(HOME_CSV, home.HOME_FIELDS, rows)
+            _send(self, 200, _json.dumps({"ok": True, "room": room}).encode(),
+                  "application/json")
+
+        def _name(self, req):
+            mac, name = req.get("mac", ""), req.get("name", "")
             master = load_master()
             # create=False: the UI only renames devices the scanner already knows
             if apply_name(master, [mac], name, create=False) != 1:
@@ -2279,8 +2436,8 @@ def cmd_serve(args):
 
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
-          f"(/, /api/devices, /api/summary, /api/alerts, /api/events)")
-    print(f"  writes: {'ENABLED (POST /api/name)' if allow_write else 'disabled (read-only)'}")
+          f"(/, /rooms, /api/devices, /api/summary, /api/alerts, /api/events, /api/board)")
+    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add)' if allow_write else 'disabled (read-only)'}")
     if args.host not in ("127.0.0.1", "localhost"):
         print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
         if allow_write:
@@ -2448,8 +2605,9 @@ def main():
     sv.add_argument("--host", default="127.0.0.1", help="bind host (default localhost)")
     sv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
     sv.add_argument("--allow-write", action="store_true",
-                    help="enable POST /api/name so the dashboard/app can rename "
-                         "devices (default: read-only)")
+                    help="enable POST /api/name and /api/room so the dashboard/app "
+                         "can rename devices and move them between rooms "
+                         "(default: read-only)")
     sv.set_defaults(func=cmd_serve)
 
     args = p.parse_args()

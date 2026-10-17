@@ -113,6 +113,9 @@ for a device HA cannot control.
    device's name wins; otherwise its Tuya room is used. (Smart Life files
    unsorted devices under its first room, so treat Tuya rooms as a hint.)
 4. Edit `rooms.csv` and `home.csv` in a spreadsheet: fix rooms, write names.
+   For rooms, `netinv serve --allow-write` and open `/rooms`: every named
+   device (cameras, hubs and computers included) is a card; drag it onto a
+   room, or right-click > Move to. Unplaced devices sit in Unassigned.
 5. `netinv home check`: validate against the rules above. Fix until it passes.
 6. Push to each app (Home Assistant first), then re-check drift after any
    change made inside an app.

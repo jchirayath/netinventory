@@ -201,16 +201,81 @@ def draft(master_rows, rooms, home, device_rooms=None):
         if not dev or dev in known or dev in seen or _SKIP.search(dev):
             continue
         seen.add(dev)
-        typ, native = guess_type(r)
         room = guess_room(dev, rooms)
         if room == TODO:
             room = app_room(dev, device_rooms, rooms)
-        out.append({"Device": dev, "Room": room, "Type": typ,
-                    "Name": "", "Description": " ".join(
-                        x for x in [r.get("Vendor", ""), dev] if x),
-                    "Native": native, "Expose": default_expose(typ)})
+        out.append(new_row(r, room))
     # Known rooms first, grouped by room then type, so the sheet reads in order.
     return sorted(out, key=lambda r: (r["Room"] == TODO, r["Room"], r["Type"], r["Device"]))
+
+
+def new_row(master_row, room):
+    """A home.csv row for one devices.csv row, with a guessed type."""
+    dev = master_row.get("Device", "").strip()
+    typ, native = guess_type(master_row)
+    return {"Device": dev, "Room": room, "Type": typ, "Name": "",
+            "Description": " ".join(x for x in [master_row.get("Vendor", ""), dev] if x),
+            "Native": native, "Expose": default_expose(typ)}
+
+
+def _key(h):
+    """A home.csv row's id: its Device, or its Name for devices with no
+    network presence (e.g. Zigbee bulbs)."""
+    return h["Device"] or ("name:" + h["Name"] if h["Name"] else "")
+
+
+def board(master_rows, rooms, home):
+    """Every device for the room board: each home.csv row plus every named
+    device in devices.csv that home.csv does not list yet (unassigned)."""
+    status, first = {}, {}
+    for r in master_rows:
+        dev = r.get("Device", "").strip()
+        if dev and status.get(dev) != "online":
+            status[dev] = r.get("Status", "")
+            first.setdefault(dev, r)
+    room_set = {r["Room"].lower(): r["Room"] for r in rooms}
+    devices, seen = [], set()
+    for h in home:
+        key = _key(h)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        devices.append({"id": key, "device": h["Device"], "name": h["Name"],
+                        "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
+                        "status": status.get(h["Device"], "")})
+    for dev in sorted(status):
+        if dev not in seen:
+            seen.add(dev)
+            devices.append({"id": dev, "device": dev, "name": "",
+                            "type": guess_type(first[dev])[0],
+                            "room": "", "status": status[dev]})
+    return {"rooms": [r["Room"] for r in rooms], "devices": devices}
+
+
+def set_room(home, master_rows, key, room):
+    """Move one device to `room` ('' = unassigned). A device not yet in
+    home.csv gets a drafted row. Returns the row, or None if key is unknown."""
+    for h in home:
+        if _key(h) == key:
+            h["Room"] = room or TODO
+            return h
+    match = next((r for r in master_rows if r.get("Device", "").strip() == key), None)
+    if not match:
+        return None
+    row = new_row(match, room or TODO)
+    home.append(row)
+    return row
+
+
+def add_room(rooms, room):
+    """Append a room (Floor TODO) unless it, or an alias, already exists.
+    Returns the canonical Room name."""
+    room = clean_room(room)
+    existing = room_words(rooms).get(room.lower())
+    if existing:
+        return existing
+    rooms.append({"Room": room, "Floor": TODO, "Aliases": ""})
+    return room
 
 
 def check(rooms, home, master_names=None):

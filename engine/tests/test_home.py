@@ -161,5 +161,48 @@ class TestAppRooms(unittest.TestCase):
         self.assertEqual(d["Flood sensor"], "TODO")       # app room not in rooms.csv
 
 
+class TestBoard(unittest.TestCase):
+    MASTER = [
+        {"Device": "Kitchen Plug", "Vendor": "TP-Link", "Status": "offline"},
+        {"Device": "Kitchen Plug", "Vendor": "TP-Link", "Status": "online"},
+        {"Device": "Blink Camera", "Vendor": "Immedia", "Status": "online"},
+        {"Device": "Alex's MacBook", "Vendor": "Apple", "Status": "online"},
+        {"Device": "", "Vendor": "Unknown", "Status": "online"},
+    ]
+
+    def test_every_named_device_appears_once(self):
+        home_rows = [row(Device="Kitchen Plug", Room="kitchen"),
+                     row(Device="", Name="Kitchen Ceiling Light")]
+        b = home.board(self.MASTER, ROOMS, home_rows)
+        d = {x["id"]: x for x in b["devices"]}
+        self.assertEqual(sorted(d), ["Alex's MacBook", "Blink Camera", "Kitchen Plug",
+                                     "name:Kitchen Ceiling Light"])
+        self.assertEqual(d["Kitchen Plug"]["room"], "Kitchen")     # canonical case
+        self.assertEqual(d["Kitchen Plug"]["status"], "online")    # any MAC online
+        self.assertEqual(d["Blink Camera"]["room"], "")            # not in home.csv
+        self.assertEqual(d["Blink Camera"]["type"], "camera")
+        self.assertEqual(b["rooms"][0], "Living Room")
+
+    def test_room_not_in_rooms_csv_is_unassigned(self):
+        b = home.board([], ROOMS, [row(Device="Plug", Room="Attic")])
+        self.assertEqual(b["devices"][0]["room"], "")
+
+    def test_set_room_updates_or_adds(self):
+        rows = [row(Device="Kitchen Plug")]
+        home.set_room(rows, self.MASTER, "Kitchen Plug", "Garage")
+        self.assertEqual(rows[0]["Room"], "Garage")
+        home.set_room(rows, self.MASTER, "Kitchen Plug", "")
+        self.assertEqual(rows[0]["Room"], "TODO")
+        added = home.set_room(rows, self.MASTER, "Alex's MacBook", "Kitchen")
+        self.assertEqual((added["Room"], len(rows)), ("Kitchen", 2))
+        self.assertIsNone(home.set_room(rows, self.MASTER, "Nope", "Kitchen"))
+
+    def test_add_room_dedupes_by_alias(self):
+        rooms = [dict(r) for r in ROOMS]
+        self.assertEqual(home.add_room(rooms, "den"), "Family Room")
+        self.assertEqual(home.add_room(rooms, " Attic  Room"), "Attic Room")
+        self.assertEqual(rooms[-1], {"Room": "Attic Room", "Floor": "TODO", "Aliases": ""})
+
+
 if __name__ == "__main__":
     unittest.main()
