@@ -1920,14 +1920,44 @@ def cmd_home(args):
             rooms = home.starter_rooms()
         added = home.merge_rooms(rooms, app)
         home.write_csv(ROOMS_CSV, home.ROOM_FIELDS, rooms)
-        links = [{"App": args.source, "Device": d, "Room": home.clean_room(r)}
-                 for r, devs in app.items() for d in devs]
+        # Keep netinventory's name for a device already linked (it may have
+        # been renamed on the board but not pushed yet); new ones take the app's.
+        known = {a["Id"]: a["Device"] for a in home.load_app_rooms(APP_ROOMS_CSV) if a["Id"]}
+        links = [{"App": args.source, "Device": known.get(i, d.strip()),
+                  "Room": home.clean_room(r), "Id": i}
+                 for r, devs in app.items() for d, i in devs]
         home.write_csv(APP_ROOMS_CSV, home.APP_ROOM_FIELDS, links)
         for r in added:
             print(f"  + {r['Room']}")
-        print(f"  {args.source}: {len(app)} room(s), {len(links)} device(s); "
+        print(f"  {args.source}: {len([r for r in app if r])} room(s), {len(links)} device(s); "
               f"added {len(added)} room(s) to {ROOMS_CSV} (set each Floor)")
         print("  To rename a room, keep the app's name in Aliases so devices still map.")
+        return
+    if args.action == "push":
+        import connectors
+        c = connectors.creds(args.source)
+        if not c:
+            print(f"  {args.source} is not configured; run: netinv set-cloud {args.source}")
+            sys.exit(1)
+        app_rooms = home.load_app_rooms(APP_ROOMS_CSV)
+        if not any(a["Id"] for a in app_rooms):
+            print(f"  no {args.source} device ids yet; run: netinv home rooms --from {args.source}")
+            sys.exit(1)
+        plan = home.push_plan(args.source, app_rooms, rows, connectors.tuya_names(c))
+        if args.device:
+            plan = [p for p in plan if args.device in (p[1], p[2])]
+        failed = 0
+        for dev_id, old, new in plan:
+            if args.dry_run:
+                print(f"  would rename '{old}' -> '{new}'")
+                continue
+            ok, msg = connectors.tuya_rename(c, dev_id, new)
+            failed += not ok
+            print(f"  {'ok  ' if ok else 'FAIL'} '{old}' -> '{new}'" + ("" if ok else f": {msg}"))
+        verb = "to rename" if args.dry_run else "renamed"
+        print(f"  {args.source}: {len(plan) - failed} {verb}, {failed} failed")
+        if failed:
+            sys.exit(1)
         return
     if args.action == "draft":
         if not rooms:
@@ -2666,12 +2696,15 @@ def main():
 
     hm = sub.add_parser("home", help="rooms, types and canonical names "
                                      "(docs/home-standard.md)")
-    hm.add_argument("action", choices=["rooms", "draft", "check"],
+    hm.add_argument("action", choices=["rooms", "draft", "check", "push"],
                     help="rooms: import rooms from an app into rooms.csv; "
                          "draft: add unclassified devices to home.csv; "
-                         "check: validate rooms.csv + home.csv")
-    hm.add_argument("--from", dest="source", choices=["tuya"], default="tuya",
-                    help="app to import rooms from (rooms only; default tuya)")
+                         "check: validate rooms.csv + home.csv; "
+                         "push: rename devices in an app to netinventory's names")
+    hm.add_argument("--from", "--to", dest="source", choices=["tuya"], default="tuya",
+                    help="app for rooms (--from) or push (--to); default tuya")
+    hm.add_argument("--device", help="push: only this device (old or new name)")
+    hm.add_argument("--dry-run", action="store_true", help="push: show, change nothing")
     hm.set_defaults(func=cmd_home)
 
     r = sub.add_parser("report", help="rebuild reports from devices.csv")

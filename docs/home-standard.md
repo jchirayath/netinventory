@@ -93,7 +93,7 @@ exposed to voice apps (`netinv home check` enforces it).
 | Google Home | Room | Name | Devices exposed through HA: sent by HA's Google Assistant integration, with the HA area as the room. Native Google/Nest devices: by hand, from the checklist |
 | Alexa | Group | Name | Name comes through HA's Alexa skill. Groups are always set by hand, from the checklist |
 | Apple Home | Room | Name | Name comes through HA's HomeKit Bridge. The room is chosen when pairing, from the checklist |
-| Smart Life (Tuya) | Room | Name | The Smart Life app, from the checklist (the Tuya cloud API can read names but its room API is limited) |
+| Smart Life (Tuya) | Room | Name | Name: `netinv home push --to tuya`. Room: the Smart Life app, from the checklist (the room API is read-only here) |
 
 Rule: **expose a device to Google, Alexa and Apple through Home Assistant
 where it can be, not through the vendor's own skill as well.** Linking both
@@ -120,4 +120,8 @@ for a device HA cannot control.
    Name) and `app_rooms.csv` at once, and lists any rule above it breaks.
 5. `netinv home check`: validate against the rules above. Fix until it passes.
 6. Push to each app (Home Assistant first), then re-check drift after any
-   change made inside an app.
+   change made inside an app. Smart Life: `netinv home push --to tuya
+   --dry-run` lists every device whose app name differs from netinventory's
+   (the home.csv Name, else the Device); drop `--dry-run` to rename them, or
+   add `--device "<name>"` for one. Devices are matched by their Tuya id,
+   recorded by `home rooms`, so re-run that first if `app_rooms.csv` predates ids.

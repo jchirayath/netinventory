@@ -161,6 +161,21 @@ class TestAppRooms(unittest.TestCase):
         self.assertEqual(d["Flood sensor"], "TODO")       # app room not in rooms.csv
 
 
+class TestPushPlan(unittest.TestCase):
+    def test_renames_only_linked_devices_whose_name_differs(self):
+        app_rooms = [{"App": "tuya", "Device": "Kitchen Kettle", "Room": "", "Id": "a"},
+                     {"App": "tuya", "Device": "Blinds", "Room": "", "Id": "b"},
+                     {"App": "tuya", "Device": "Patio Light", "Room": "", "Id": "c"},
+                     {"App": "tuya", "Device": "No Id", "Room": "", "Id": ""},
+                     {"App": "tuya", "Device": "Gone", "Room": "", "Id": "z"}]
+        home_rows = [row(Device="Blinds", Name="Family Room Blinds"),
+                     row(Device="Patio Light", Name="")]
+        app_names = {"a": "Kitchen", "b": "Blinds", "c": "Patio Light "}
+        self.assertEqual(home.push_plan("tuya", app_rooms, home_rows, app_names),
+                         [("a", "Kitchen", "Kitchen Kettle"),
+                          ("b", "Blinds", "Family Room Blinds")])
+
+
 class TestBoard(unittest.TestCase):
     MASTER = [
         {"Device": "Kitchen Plug", "Vendor": "TP-Link", "Status": "offline"},

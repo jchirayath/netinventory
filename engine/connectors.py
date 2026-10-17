@@ -149,14 +149,19 @@ def discover_tuya(c):
     return out
 
 
-def tuya_rooms(c):
-    """{room name: [device names]} from the Tuya/SmartLife app's homes and
-    rooms. Rooms with no devices are kept (empty list)."""
+def _tuya_cloud(c):
     import tinytuya
-    cloud = tinytuya.Cloud(apiRegion=c["region"], apiKey=c["access_id"],
-                           apiSecret=c["access_secret"])
+    return tinytuya.Cloud(apiRegion=c["region"], apiKey=c["access_id"],
+                          apiSecret=c["access_secret"])
+
+
+def tuya_rooms(c):
+    """{room name: [(device name, device id)]} from the Tuya/SmartLife app's
+    homes and rooms. Rooms with no devices are kept (empty list); devices in
+    no room are listed under ''. The id is what `home push` renames by."""
+    cloud = _tuya_cloud(c)
     devs = cloud.getdevices(True).get("result", [])
-    out = {}
+    out, placed = {}, set()
     for home_id in sorted({d.get("owner_id") for d in devs if d.get("owner_id")}):
         resp = cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms")
         if not resp.get("success"):
@@ -164,9 +169,31 @@ def tuya_rooms(c):
             continue
         for room in resp["result"].get("rooms", []):
             rd = cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms/{room['room_id']}/devices")
-            names = [d.get("name", "") for d in (rd.get("result") or []) if d.get("name")]
-            out.setdefault(room.get("name", ""), []).extend(names)
+            items = [(d["name"], d["id"]) for d in (rd.get("result") or [])
+                     if d.get("name") and d.get("id")]
+            placed.update(i for _, i in items)
+            out.setdefault(room.get("name", ""), []).extend(items)
+    unplaced = [(d["name"], d["id"]) for d in devs
+                if d.get("name") and d.get("id") and d["id"] not in placed]
+    if unplaced:
+        out.setdefault("", []).extend(unplaced)
     return out
+
+
+def tuya_names(c):
+    """{device id: current app name} for every Tuya/SmartLife device."""
+    return {d["id"]: d.get("name", "") for d in _tuya_cloud(c).getdevices(True).get("result", [])
+            if d.get("id")}
+
+
+def tuya_rename(c, device_id, name):
+    """Rename one device in the SmartLife app. Returns (ok, message)."""
+    resp = _tuya_cloud(c).cloudrequest(f"/v1.0/devices/{device_id}", action="PUT",
+                                       post={"name": name})
+    if isinstance(resp, dict) and resp.get("success"):
+        return True, "renamed"
+    msg = resp.get("msg", resp) if isinstance(resp, dict) else resp
+    return False, str(msg)
 
 
 def _mac_from_tuya_id(s):

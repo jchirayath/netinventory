@@ -9,7 +9,7 @@ import os
 import re
 
 ROOM_FIELDS = ["Room", "Floor", "Aliases"]
-APP_ROOM_FIELDS = ["App", "Device", "Room"]     # app_rooms.csv, from `home rooms`
+APP_ROOM_FIELDS = ["App", "Device", "Room", "Id"]   # app_rooms.csv, from `home rooms`
 HOME_FIELDS = ["Device", "Room", "Type", "Name", "Description", "Native", "Expose"]
 
 TYPES = ["light", "switch", "plug", "fan", "blind", "garage_door", "lock",
@@ -326,6 +326,21 @@ def rename(home, master_rows, app_rooms, key, new):
         row["Device"] = new
     row["Name"] = new
     return old, (new if is_device else "name:" + new)
+
+
+def push_plan(app, app_rooms, home, app_names):
+    """[(id, app name, wanted name)] for each device linked in app_rooms.csv
+    whose name in the app differs from netinventory's: the home.csv Name if
+    set, else the Device. app_names is {id: current name in the app}."""
+    names = {h["Device"]: h["Name"] for h in home if h["Device"]}
+    plan = []
+    for a in app_rooms:
+        if a["App"] != app or not a["Id"] or not a["Device"] or a["Id"] not in app_names:
+            continue
+        want = names.get(a["Device"]) or a["Device"]
+        if want != app_names[a["Id"]].strip():
+            plan.append((a["Id"], app_names[a["Id"]], want))
+    return plan
 
 
 def add_room(rooms, room):
