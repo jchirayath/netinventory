@@ -274,6 +274,18 @@ class TestBoard(unittest.TestCase):
         d = home.board(master, ROOMS, [])["devices"][0]
         self.assertEqual((d["seen_as"], d["ip"]), ("Amazon Echo Show", "10.0.0.3"))
 
+    def test_every_mac_and_the_live_ip(self):
+        master = [{"Device": "TV", "MAC": "AA:00:00:00:00:01", "IP": "10.0.0.9",
+                   "Hostname": "Living Room TV", "Status": "offline"},
+                  {"Device": "TV", "MAC": "AA:00:00:00:00:02", "IP": "10.0.0.4",
+                   "Status": "online"},
+                  {"Device": "TV", "MAC": "AA:00:00:00:00:01", "IP": "", "Status": ""},
+                  {"Device": "Plug", "MAC": "AA:00:00:00:00:03", "IP": "10.0.0.5"}]
+        d = {x["id"]: x for x in home.board(master, ROOMS, [])["devices"]}
+        self.assertEqual(d["TV"]["macs"], ["AA:00:00:00:00:01", "AA:00:00:00:00:02"])
+        self.assertEqual(d["TV"]["ip"], "10.0.0.4")        # online MAC, not the stale one
+        self.assertEqual(d["Plug"]["ip"], "10.0.0.5")      # no hostname still has an IP
+
     def test_room_not_in_rooms_csv_is_unassigned(self):
         b = home.board([], ROOMS, [row(Device="Plug", Room="Attic")])
         self.assertEqual(b["devices"][0]["room"], "")

@@ -232,6 +232,7 @@ def board(master_rows, rooms, home):
     """Every device for the room board: each home.csv row plus every named
     device in devices.csv that home.csv does not list yet (unassigned)."""
     status, first, seen_as = {}, {}, {}
+    macs, live_ip, any_ip = {}, {}, {}
     for r in master_rows:
         dev = r.get("Device", "").strip()
         if not dev:
@@ -239,6 +240,15 @@ def board(master_rows, rooms, home):
         first.setdefault(dev, r)
         if status.get(dev) != "online":
             status[dev] = r.get("Status", "")
+        # Every MAC (wired + Wi-Fi); the IP of an online MAC beats a stale one.
+        mac = r.get("MAC", "").strip()
+        if mac and mac not in macs.setdefault(dev, []):
+            macs[dev].append(mac)
+        ip = r.get("IP", "").strip()
+        if ip:
+            any_ip.setdefault(dev, ip)
+            if r.get("Status") == "online":
+                live_ip.setdefault(dev, ip)
         # The discovered name (e.g. 'Amazon Echo Show') tells look-alike
         # Device names apart; prefer a human one with a space, then any.
         host = r.get("Hostname", "").strip()
@@ -248,23 +258,27 @@ def board(master_rows, rooms, home):
         if prev is None or (" " in host and " " not in prev[0]):
             seen_as[dev] = (host, r.get("IP", ""))
     room_set = {r["Room"].lower(): r["Room"] for r in rooms}
+
+    def net(dev):
+        host, ip = seen_as.get(dev, ("", ""))
+        return {"seen_as": host, "ip": live_ip.get(dev) or ip or any_ip.get(dev, ""),
+                "macs": macs.get(dev, [])}
+
     devices, seen = [], set()
     for h in home:
         key = _key(h)
         if not key or key in seen:
             continue
         seen.add(key)
-        host, ip = seen_as.get(h["Device"], ("", ""))
         devices.append({"id": key, "device": h["Device"], "name": h["Name"],
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
-                        "status": status.get(h["Device"], ""), "seen_as": host, "ip": ip})
+                        "status": status.get(h["Device"], ""), **net(h["Device"])})
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)
-            host, ip = seen_as.get(dev, ("", ""))
             devices.append({"id": dev, "device": dev, "name": "",
                             "type": guess_type(first[dev])[0],
-                            "room": "", "status": status[dev], "seen_as": host, "ip": ip})
+                            "room": "", "status": status[dev], **net(dev)})
     return {"rooms": [r["Room"] for r in rooms], "devices": devices}
 
 

@@ -2404,7 +2404,11 @@ h1{font-size:1.2rem;margin:.2rem 0}
 .dev .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dev .ren{width:100%;font:13px system-ui;padding:2px 4px;border:1px solid #9db4d3;border-radius:4px}
 .dev .sub{display:block;font-size:11px;color:#6b7a8c;overflow:hidden;text-overflow:ellipsis}
-.dev .ty{font-size:11px;color:#3a516b;background:#eef2f8;border-radius:8px;padding:0 6px}
+.dev .net{display:block;font:10.5px ui-monospace,Menlo,monospace;color:#8593a3;
+ white-space:normal}
+.dev .ty{font-size:11px;color:#3a516b;background:#eef2f8;border-radius:8px;padding:0 6px;
+ align-self:flex-start;white-space:nowrap}
+.dev .ty.todo{color:#a3acb8;background:#f3f4f6}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
 .empty{color:#9aa;padding:4px 4px 8px}
 #menu{position:fixed;display:none;background:#fff;border:1px solid #ccd;border-radius:6px;
@@ -2436,14 +2440,17 @@ const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').rep
 const label=d=>d.name||d.device||d.id;
 const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
 function card(d){
- const ty=d.type&&d.type!='TODO'?`<span class=ty>${esc(d.type.replace('_',' '))}</span>`:'';
- const tip=[d.name&&d.device&&d.name!=d.device?d.device:'',d.seen_as,d.ip].filter(Boolean).join(' · ');
+ const todo=!d.type||d.type=='TODO';
+ const ty=`<span class="ty${todo?' todo':''}">${todo?'TODO':esc(d.type.replace('_',' '))}</span>`;
+ const tip=[d.name&&d.device&&d.name!=d.device?d.device:'',d.seen_as,d.ip,...d.macs].filter(Boolean).join(' · ');
  const sub=d.seen_as&&d.seen_as.toLowerCase()!=label(d).toLowerCase()?`<span class=sub>${esc(d.seen_as)}</span>`:'';
+ const nw=[d.ip,...d.macs].filter(Boolean);
+ const net=nw.length?`<span class=net>${nw.map(esc).join(' · ')}</span>`:'';
  return `<div class=dev draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+
   `<span class=dot style=background:${color(d.status)}></span>`+
-  `<span class=nm>${esc(label(d))}${sub}</span>${ty}</div>`}
+  `<span class=nm>${esc(label(d))}${sub}${net}</span>${ty}</div>`}
 function render(){
- const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.ip].join(' ').toLowerCase().includes(Q));
+ const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.ip,...d.macs].join(' ').toLowerCase().includes(Q));
  const by={'':[]};B.rooms.forEach(r=>by[r]=[]);
  shown.forEach(d=>(by[d.room]||by['']).push(d));
  Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));
