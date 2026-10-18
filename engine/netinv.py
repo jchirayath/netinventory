@@ -2100,29 +2100,36 @@ def _push_tuya_rooms(args, master, rows):
         print(f"  {'would create' if args.dry_run else 'creating as needed'} "
               f"Smart Life room(s): {', '.join(new_rooms)}")
     tr = None if args.dry_run else connectors.TuyaRooms(c)
-    checked = failed = 0
+    # One call per room with all its devices: the API replaces a room's list.
+    groups = {}
     for p in plan:
-        target = p["app_room"] or p["to"]
-        what = f"'{p['name']}': room '{p['from'] or '-'}' -> '{target}'"
+        groups.setdefault(p["app_room"] or p["to"], []).append(p)
+    checked = failed = 0
+    for n, (target, ps) in enumerate(groups.items()):
+        whats = [f"'{p['name']}': room '{p['from'] or '-'}' -> '{target}'" for p in ps]
         if args.dry_run:
-            print(f"  would set {what}")
+            for w in whats:
+                print(f"  would set {w}")
             continue
-        ok, msg = tr.move(p["id"], target)
-        # Once: make sure a move takes the device out of its old room rather
+        ok, msg = tr.move([p["id"] for p in ps], target)
+        # Once: make sure a move takes a device out of its old room rather
         # than adding it to a second one; stop if it does not.
-        if ok and p["from"] and not checked:
+        moved_from = [p for p in ps if p["from"]]
+        if ok and moved_from and not checked:
             checked = 1
+            p = moved_from[0]
             home_id = tr.home_of[p["id"]]
             old_id = tr.rooms(home_id, fresh=True).get(p["from"].strip())
             if old_id and p["id"] in tr.room_devices(home_id, old_id):
-                print(f"  STOP {what}: still in '{p['from']}' too; not moving the rest")
+                print(f"  STOP '{p['name']}': still in '{p['from']}' too; not moving the rest")
                 sys.exit(1)
-        failed += not ok
-        print(f"  {'ok  ' if ok else 'FAIL'} {what}" + ("" if ok else f": {msg}"))
+        failed += 0 if ok else len(ps)
+        for w in whats:
+            print(f"  {'ok  ' if ok else 'FAIL'} {w}" + ("" if ok else f": {msg}"))
         if not ok and "quota" in msg.lower():
             # The Tuya cloud project's plan is out of quota: every further
             # call fails the same way. Rerun once it is extended.
-            left = len(plan) - plan.index(p) - 1
+            left = sum(len(g) for g in list(groups.values())[n + 1:])
             failed += left
             print(f"  stopping: Tuya project quota; {left} more not tried. Extend the IoT Core "
                   "plan (iot.tuya.com > Cloud > your project > Service API), then rerun.")

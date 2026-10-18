@@ -570,6 +570,27 @@ class TestConnectors(unittest.TestCase):
         self.assertEqual(got, [("Study", "E8:9F:80:1E:9F:FA", ""), ("Leak", "", ""),
                                ("Plug", "", "HS103(US)")])
 
+    def test_tuya_room_move_keeps_what_the_room_already_holds(self):
+        rooms = {"r1": {"keep"}}                  # room_id -> device ids
+
+        class Cloud:                               # Tuya's call REPLACES the room's list
+            def getdevices(self, _v):
+                return {"result": [{"id": i, "owner_id": "h"} for i in ("keep", "new", "new2")]}
+
+            def cloudrequest(self, url, action="GET", post=None):
+                if url.endswith("/rooms"):
+                    return {"success": True, "result": {"rooms": [{"name": "Casita", "room_id": "r1"}]}}
+                rid = url.split("/rooms/")[1].split("/")[0]
+                if action == "POST":
+                    rooms[rid] = set(post["device_ids"].split(","))
+                    return {"success": True}
+                return {"success": True, "result": [{"id": i} for i in rooms[rid]]}
+        with mock.patch.object(connectors, "_tuya_cloud", return_value=Cloud()):
+            tr = connectors.TuyaRooms({})
+            self.assertEqual(tr.move(["new"], "Casita"), (True, "moved"))
+            self.assertEqual(tr.move(["new2"], "Casita "), (True, "moved"))
+        self.assertEqual(rooms["r1"], {"keep", "new", "new2"})
+
     def test_govee_lan_scan_drops_an_id_two_hosts_claim(self):
         import socket as so
         pkt = lambda did: json.dumps({"msg": {"data": {"device": did, "sku": "H6159"}}}).encode()  # noqa: E731

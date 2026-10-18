@@ -214,12 +214,15 @@ class TuyaRooms:
         r = self.cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms/{room_id}/devices")
         return {x.get("id") for x in (r.get("result") or [])}
 
-    def move(self, device_id, room):
-        """Put the device in `room`, creating the room first if the device's
-        home has none by that name. Returns (ok, message)."""
-        home_id = self.home_of.get(device_id)
-        if not home_id:
-            return False, "unknown device"
+    def move(self, device_ids, room):
+        """Put the devices (one home's) in `room`, creating the room first if
+        the home has none by that name. Tuya's room-devices call REPLACES the
+        room's device list, so this sends what the room holds now plus the
+        new devices in one call. Returns (ok, message)."""
+        homes = {self.home_of.get(i) for i in device_ids}
+        if None in homes or len(homes) != 1:
+            return False, "unknown device or devices in different homes"
+        home_id = homes.pop()
         if room.strip() not in self.rooms(home_id):
             r = self.cloud.cloudrequest(f"/v1.0/homes/{home_id}/room", action="POST",
                                         post={"name": room.strip()})
@@ -229,9 +232,17 @@ class TuyaRooms:
         room_id = self.rooms(home_id).get(room.strip())
         if not room_id:
             return False, "room not found after create"
+        keep = self.room_devices(home_id, room_id)
+        ids = sorted(keep | set(device_ids))
         r = self.cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms/{room_id}/devices",
-                                    action="POST", post={"device_ids": device_id})
-        return (True, "moved") if r.get("success") else (False, str(r.get("msg", r)))
+                                    action="POST", post={"device_ids": ",".join(ids)})
+        if not r.get("success"):
+            return False, str(r.get("msg", r))
+        now = self.room_devices(home_id, room_id)
+        lost = keep - now
+        if lost or not set(device_ids) <= now:
+            return False, f"room holds {len(now)} of {len(ids)} after the update"
+        return True, "moved"
 
 
 def tuya_names(c):
