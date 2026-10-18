@@ -282,13 +282,27 @@ def board(master_rows, rooms, home):
             devices.append({"id": dev, "device": dev, "name": "",
                             "type": guess_type(first[dev])[0],
                             "room": "", "status": status[dev], **net(dev)})
+    # Unnamed MACs the scan still sees, so nothing online is missing; the
+    # board asks for a name before one can go in a room.
+    for r in master_rows:
+        mac = r.get("MAC", "").strip()
+        if r.get("Device", "").strip() or not mac or r.get("Status") == "defunct":
+            continue
+        host = r.get("Hostname", "").strip()
+        if re.fullmatch(r"[0-9a-f:]{12,17}", host.lower()):
+            host = ""
+        devices.append({"id": "mac:" + mac, "device": "", "name": "",
+                        "type": guess_type(r)[0], "room": "", "status": r.get("Status", ""),
+                        "seen_as": host, "ip": r.get("IP", "").strip(), "macs": [mac],
+                        "vendor": r.get("Vendor", "").strip(), "unnamed": True})
     return {"rooms": [r["Room"] for r in rooms], "devices": devices}
 
 
 def set_room(home, master_rows, key, room):
     """Move one device to `room` ('' = unassigned). A device not yet in
     home.csv gets a drafted row. Returns the row, or None if key is unknown."""
-    if not key.strip() or key.startswith("name:") and not key[5:].strip():
+    if not key.strip() or key.startswith("name:") and not key[5:].strip() \
+            or key.startswith("mac:"):     # unnamed: the board names it first
         return None
     for h in home:
         if _key(h) == key:
@@ -312,6 +326,21 @@ def rename(home, master_rows, app_rooms, key, new):
         raise ValueError("name required")
     if len(new) > 60:
         raise ValueError("name is longer than 60 characters")
+    if key.startswith("mac:"):
+        # An unnamed MAC on the board: naming it makes it a regular device.
+        r = next((r for r in master_rows if r.get("MAC", "") == key[4:]
+                  and not r.get("Device", "").strip()), None)
+        if r is None:
+            raise ValueError("unknown device")
+        taken = {x.get("Device", "").strip().lower() for x in master_rows} \
+            | {h["Device"].lower() for h in home} | {h["Name"].lower() for h in home}
+        if new.lower() in taken:
+            raise ValueError(f"'{new}' is already used by another device")
+        r["Device"] = new
+        row = new_row(r, TODO)
+        row["Name"] = new
+        home.append(row)
+        return "", new
     old = key[5:] if key.startswith("name:") else key
     is_device = not key.startswith("name:")
     if not old.strip():   # a blank key would match every unnamed device

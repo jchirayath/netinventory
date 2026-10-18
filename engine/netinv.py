@@ -2404,6 +2404,8 @@ h1{font-size:1.2rem;margin:.2rem 0}
 .dev .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dev .ren{width:100%;font:13px system-ui;padding:2px 4px;border:1px solid #9db4d3;border-radius:4px}
 .dev .sub{display:block;font-size:11px;color:#6b7a8c;overflow:hidden;text-overflow:ellipsis}
+.dev.unnamed{border-style:dashed;background:#fbfcfd}
+.dev.unnamed .nm{font-style:italic;color:#56606c}
 .dev .net{display:block;font:10.5px ui-monospace,Menlo,monospace;color:#8593a3;
  white-space:normal}
 .dev .ty{font-size:11px;color:#3a516b;background:#eef2f8;border-radius:8px;padding:0 6px;
@@ -2437,34 +2439,36 @@ h1{font-size:1.2rem;margin:.2rem 0}
 const WRITABLE=__WRITABLE__;
 let B={rooms:[],devices:[]},Q='';
 const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-const label=d=>d.name||d.device||d.id;
+const label=d=>d.name||d.device||d.seen_as||d.vendor||'Unknown device';
 const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
 function card(d){
  const todo=!d.type||d.type=='TODO';
  const ty=`<span class="ty${todo?' todo':''}">${todo?'TODO':esc(d.type.replace('_',' '))}</span>`;
- const tip=[d.name&&d.device&&d.name!=d.device?d.device:'',d.seen_as,d.ip,...d.macs].filter(Boolean).join(' · ');
+ const tip=[d.unnamed?'unnamed: right-click to name':'',d.name&&d.device&&d.name!=d.device?d.device:'',
+  d.seen_as,d.vendor,d.ip,...d.macs].filter(Boolean).join(' · ');
  const sub=d.seen_as&&d.seen_as.toLowerCase()!=label(d).toLowerCase()?`<span class=sub>${esc(d.seen_as)}</span>`:'';
  const nw=[d.ip,...d.macs].filter(Boolean);
  const net=nw.length?`<span class=net>${nw.map(esc).join(' · ')}</span>`:'';
- return `<div class=dev draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+
+ return `<div class="dev${d.unnamed?' unnamed':''}" draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+
   `<span class=dot style=background:${color(d.status)}></span>`+
   `<span class=nm>${esc(label(d))}${sub}${net}</span>${ty}</div>`}
 function render(){
- const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.ip,...d.macs].join(' ').toLowerCase().includes(Q));
+ const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.vendor,d.ip,...d.macs].join(' ').toLowerCase().includes(Q));
  const by={'':[]};B.rooms.forEach(r=>by[r]=[]);
  shown.forEach(d=>(by[d.room]||by['']).push(d));
  Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));
  g.innerHTML=['',...B.rooms].map(r=>`<div class="room${r?'':' unassigned'}" data-room="${esc(r)}">`+
   `<h2><span>${r?esc(r):'Unassigned'}</span><span class=n>${by[r].length}</span></h2>`+
   `<div class=list>${by[r].map(card).join('')||'<div class=empty>drop devices here</div>'}</div></div>`).join('');
- const un=B.devices.filter(d=>!d.room).length;
- sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned`}
+ const un=B.devices.filter(d=>!d.room).length,nn=B.devices.filter(d=>d.unnamed).length;
+ sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned · ${nn} unnamed`}
 async function post(path,body){
  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const j=await r.json().catch(()=>({}));
  if(!r.ok)throw new Error(j.error||r.status);return j}
 async function move(id,room){
  const d=B.devices.find(x=>x.id==id);if(!d||d.room==room)return;
+ if(d.unnamed){say('Name this device first; it moves to '+room+' once named.');startRename(id,room);return}
  const was=d.room;d.room=room;render();
  try{await post('/api/room',{id,room})}
  catch(e){d.room=was;render();say('Move failed: '+e.message)}}
@@ -2497,18 +2501,20 @@ menu.addEventListener('click',e=>{
  menu.style.display='none';move(menu.dataset.id,it.dataset.room)});
 // Rename in place on the card: Enter saves, Escape or leaving the field cancels.
 let editing=false;
-function startRename(id){const d=B.devices.find(x=>x.id==id);
+// An unnamed MAC becomes a device when named; thenRoom moves it right after.
+function startRename(id,thenRoom){const d=B.devices.find(x=>x.id==id);
  const el=[...g.querySelectorAll('.dev')].find(x=>x.dataset.id==id);if(!d||!el)return;
  editing=true;el.draggable=false;const nm=el.querySelector('.nm');
  nm.innerHTML=`<input class=ren value="${esc(label(d))}" maxlength=60>`;
  const inp=nm.querySelector('input');inp.focus();inp.select();let done=false;
  const finish=async save=>{if(done)return;done=true;const name=inp.value.trim();
-  if(!save||!name||name==label(d)){editing=false;render();return}
+  if(!save||!name||name==label(d)&&!d.unnamed){editing=false;render();return}
+  let ok=false;
   try{const j=await post('/api/rename',{id,name});
-   Object.assign(d,{id:j.id,name:j.name,device:d.device?j.name:d.device});
+   Object.assign(d,{id:j.id,name:j.name,device:d.device||d.unnamed?j.name:d.device,unnamed:false});ok=true;
    if(j.warnings.length)say(`Renamed to '${j.name}'. Not to the naming standard yet: `+j.warnings.join('; '))}
   catch(e){say('Rename failed: '+e.message)}
-  editing=false;render()};
+  editing=false;render();if(ok&&thenRoom)move(d.id,thenRoom)};
  inp.addEventListener('keydown',e=>{if(e.key=='Enter')finish(true);if(e.key=='Escape')finish(false)});
  inp.addEventListener('blur',()=>finish(false))}
 document.addEventListener('click',e=>{if(!menu.contains(e.target))menu.style.display='none'});

@@ -292,6 +292,23 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(d["TV"]["ip"], "10.0.0.4")        # online MAC, not the stale one
         self.assertEqual(d["Plug"]["ip"], "10.0.0.5")      # no hostname still has an IP
 
+    def test_unnamed_macs_show_and_naming_makes_a_device(self):
+        master = [{"Device": "", "MAC": "AA:00:00:00:00:07", "IP": "10.0.0.7",
+                   "Hostname": "wlan0-90", "Vendor": "Tuya Smart", "Status": "online"},
+                  {"Device": "", "MAC": "AA:00:00:00:00:08", "Status": "defunct"}]
+        devs = home.board(master, ROOMS, [])["devices"]
+        self.assertEqual([(d["id"], d["seen_as"], d["unnamed"]) for d in devs],
+                         [("mac:AA:00:00:00:00:07", "wlan0-90", True)])
+        rows = []
+        self.assertIsNone(home.set_room(rows, master, "mac:AA:00:00:00:00:07", "Kitchen"))
+        self.assertEqual(home.rename(rows, master, [], "mac:AA:00:00:00:00:07", "Kitchen Plug"),
+                         ("", "Kitchen Plug"))
+        self.assertEqual(master[0]["Device"], "Kitchen Plug")
+        self.assertEqual(master[1]["Device"], "")                # other unnamed MACs untouched
+        self.assertEqual((rows[0]["Device"], rows[0]["Name"]), ("Kitchen Plug", "Kitchen Plug"))
+        with self.assertRaises(ValueError):
+            home.rename(rows, master, [], "mac:AA:00:00:00:00:08", "kitchen plug")
+
     def test_room_not_in_rooms_csv_is_unassigned(self):
         b = home.board([], ROOMS, [row(Device="Plug", Room="Attic")])
         self.assertEqual(b["devices"][0]["room"], "")
