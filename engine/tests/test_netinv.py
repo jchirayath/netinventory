@@ -2,6 +2,7 @@
 All fixtures are synthetic (AA:BB:CC / 00:11:22 MACs, 10.x IPs) — no real
 network data. AA-prefixed MACs are locally-administered; 00/08-prefixed are
 treated as global-OUI for the addressing-bit tests."""
+import json
 import os
 import sys
 import unittest
@@ -536,6 +537,24 @@ class TestConnectors(unittest.TestCase):
             with open(ref) as f:
                 names = [ln.split(";")[1] for ln in f.read().splitlines()[1:]]
         self.assertEqual(names, ["Front Door Sensor", "Thermo"])   # govee replaced, tuya kept
+
+    def test_adjacent_mac_only_when_unambiguous(self):
+        master = {"E8:9F:80:1E:9F:FB": {}, "AA:00:00:00:00:05": {}, "AA:00:00:00:00:07": {}}
+        self.assertEqual(netinv._adjacent_mac("E8:9F:80:1E:9F:FA", master), "E8:9F:80:1E:9F:FB")
+        self.assertEqual(netinv._adjacent_mac("AA:00:00:00:00:06", master), "")   # two neighbours
+        self.assertEqual(netinv._adjacent_mac("AA:00:00:00:00:FF", master), "")
+
+    def test_smartthings_lan_network_id_is_the_mac(self):
+        data = {"items": [
+            {"label": "Study", "type": "LAN", "lan": {"networkId": "E89F801E9FFA"}},
+            {"label": "Leak", "type": "ZIGBEE", "zigbee": {"networkId": "4B75", "eui": "286D970001096B2D"}},
+            {"label": "Plug", "type": "VIPER", "viper": {"modelName": "HS103(US)"}}]}
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = json.dumps(data).encode()
+        with mock.patch.object(connectors.urllib.request, "urlopen", return_value=resp):
+            got = [(i["name"], i["mac"], i["model"]) for i in connectors.discover_smartthings({"token": "t"})]
+        self.assertEqual(got, [("Study", "E8:9F:80:1E:9F:FA", ""), ("Leak", "", ""),
+                               ("Plug", "", "HS103(US)")])
 
     def test_govee_id_mac_guess(self):
         self.assertEqual(connectors._mac_from_govee_id("64:09:c5:32:37:36:2d:13"),

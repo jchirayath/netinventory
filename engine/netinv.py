@@ -2160,6 +2160,20 @@ def cmd_set_cloud(args):
     print(f"  stored {prov} credentials in Keychain (service netinv-cloud-{prov})")
 
 
+def _adjacent_mac(mac, master):
+    """The one inventory MAC that differs from `mac` by 1 in its last byte.
+    Clouds often report a device's base MAC (Wemo via SmartThings, the
+    Formuler via Home Assistant) while its Wi-Fi interface is base+1. Two
+    candidates is ambiguous -> ''."""
+    try:
+        head, last = mac[:-2], int(mac[-2:], 16)
+    except ValueError:
+        return ""
+    near = [f"{head}{last + d:02X}" for d in (-1, 1) if 0 <= last + d <= 255]
+    hits = [m for m in near if m in master]
+    return hits[0] if len(hits) == 1 else ""
+
+
 def cloud_merge(master, items):
     """Merge cloud connector results into the inventory. Cloud names are the
     user's own app names, so they fill a blank Device and update Hostname.
@@ -2171,6 +2185,8 @@ def cloud_merge(master, items):
         mac = norm_mac(it["mac"]) if it["mac"] else ""
         if mac.count(":") != 5 and it["ip"]:
             mac = ip2mac.get(it["ip"], "")
+        if mac and mac not in master:
+            mac = _adjacent_mac(mac, master) or mac
         # Only enrich devices already on the network. A cloud account also lists
         # Zigbee/BLE sub-devices (no WiFi MAC) and devices whose id-derived MAC
         # we can't confirm -> those go to the reference list, never new rows.

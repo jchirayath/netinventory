@@ -438,14 +438,18 @@ def discover_smartthings(c):
     out = []
     for d in data.get("items", []):
         name = d.get("label") or d.get("name") or ""
-        # MAC occasionally present for WiFi/OCF devices
+        # Details sit under the integration type: d["lan"], d["zigbee"], d["ocf"]...
+        # A LAN device's networkId is its MAC (12 hex); a Zigbee networkId is a
+        # 4-hex short address, which the length check rules out.
+        sub = d.get((d.get("type") or "").lower()) or {}
         mac = ""
-        for k in ("networkId", "macAddress"):
-            v = d.get(k) or (d.get("ocf") or {}).get(k)
-            if v and len(str(v)) == 12:
-                mac = str(v)
-        out.append(_item("smartthings", name, mac=mac,
-                         model=(d.get("ocf") or {}).get("modelNumber", "")))
+        for v in (sub.get("networkId"), sub.get("macAddress"), (d.get("ocf") or {}).get("macAddress")):
+            if v and re.fullmatch(r"[0-9A-Fa-f]{12}|([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", str(v)):
+                mac = _norm_mac(":".join(re.findall(r"[0-9A-Fa-f]{2}", str(v))))
+                break
+        model = (sub.get("modelName") or (d.get("ocf") or {}).get("modelNumber")
+                 or sub.get("manufacturerName") or "")
+        out.append(_item("smartthings", name, mac=mac, model=model))
     return out
 
 
