@@ -587,6 +587,25 @@ class TestConnectors(unittest.TestCase):
             got = connectors.govee_lan_scan(timeout=0.2)
         self.assertEqual(got, {"11:22:AA:00:00:00:00:02": ("10.0.0.7", "H6159")})
 
+    def test_govee_lan_scan_flooding_cannot_hide_a_second_claim(self):
+        import socket as so
+        pkt = lambda did: json.dumps({"msg": {"data": {"device": did}}}).encode()  # noqa: E731
+        replies = ([(pkt("11:22:AA:00:00:00:00:01"), ("10.0.0.66", 4002))]       # spoof first
+                   + [(pkt(f"99:99:BB:00:00:00:{n // 256:02X}:{n % 256:02X}"), ("10.0.0.66", 4002))
+                      for n in range(300)]                                    # fill the cap
+                   + [(pkt("11:22:AA:00:00:00:00:01"), ("10.0.0.5", 4002))])  # real device
+        sock = mock.MagicMock()
+
+        def recv(_n):
+            if replies:
+                return replies.pop(0)
+            raise so.timeout()
+        sock.recvfrom.side_effect = recv
+        with mock.patch.object(so, "socket", return_value=sock):
+            got = connectors.govee_lan_scan(timeout=0.5)
+        self.assertNotIn("11:22:AA:00:00:00:00:01", got)
+        self.assertLessEqual(len(got), 256)
+
     def test_govee_id_mac_guess(self):
         self.assertEqual(connectors._mac_from_govee_id("64:09:c5:32:37:36:2d:13"),
                          "C5:32:37:36:2D:13")

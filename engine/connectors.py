@@ -650,11 +650,16 @@ def govee_lan_scan(timeout=4.0):
             continue
         # Unauthenticated UDP: take the packet's real source address, never the
         # self-reported ip, so a device can only describe its own MAC.
-        if re.fullmatch(r"([0-9A-F]{2}:){7}[0-9A-F]{2}", did) and len(found) < 256:
-            # The id itself is self-reported: an id two hosts claim is
-            # ambiguous (one may be spoofing it), so it is dropped below.
-            if did in found and found[did][0] != addr[0]:
+        if not re.fullmatch(r"([0-9A-F]{2}:){7}[0-9A-F]{2}", did):
+            continue
+        # The id itself is self-reported: an id two hosts claim is ambiguous
+        # (one may be spoofing it), so it is dropped below. Checked before the
+        # cap, so flooding the scan with ids cannot hide a second claim.
+        if did in found:
+            if found[did][0] != addr[0]:
                 clash.add(did)
+            continue
+        if len(found) < 256:
             found[did] = (addr[0], sku if re.fullmatch(r"[A-Za-z0-9_-]{1,16}", sku) else "")
     rx.close()
     tx.close()
