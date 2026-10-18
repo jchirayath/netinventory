@@ -492,6 +492,19 @@ class TestConnectors(unittest.TestCase):
         self.assertEqual(connectors._mac_from_tuya_id("0020032900aabbcc0011"),
                          "00:AA:BB:CC:00:11")
 
+    def test_tuya_factory_macs_batches_and_formats(self):
+        calls = []
+
+        class Cloud:
+            def cloudrequest(self, url, query):
+                ids = query["device_ids"].split(",")
+                calls.append(ids)
+                return {"result": [{"id": i, "mac": "382ce5d211ed" if i == "a" else None}
+                                   for i in ids]}
+        got = connectors._tuya_factory_macs(Cloud(), ["a"] + [f"x{n}" for n in range(20)] + [""])
+        self.assertEqual(got, {"a": "38:2C:E5:D2:11:ED"})
+        self.assertEqual([len(c) for c in calls], [20, 1])
+
     def test_tuya_uuid_with_letters_yields_no_mac(self):
         self.assertEqual(connectors._mac_from_tuya_id("eb00112233445566klmno"), "")
 

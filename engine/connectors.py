@@ -137,16 +137,20 @@ def discover_tuya(c):
     except Exception as e:  # noqa: BLE001
         print(f"  ! tuya: local scan failed ({e}); using id-embedded MACs only")
     ip2mac = _resolve_arp(set(id2ip.values()))
+    factory = _tuya_factory_macs(cloud, [d.get("id", "") for d in devs
+                                         if not ip2mac.get(id2ip.get(d.get("id", ""), ""))])
 
     out = []
     for d in devs:
         did = d.get("id", "")
         lan_ip = id2ip.get(did, "")
-        # Authoritative: the live LAN scan + ARP. Fall back to an id-embedded
-        # MAC only for all-hex WiFi ids (cloud 'eb...' UUIDs would yield garbage).
+        # Authoritative: the live LAN scan + ARP. Then the cloud's factory MAC,
+        # which covers battery devices (door/flood sensors) that sleep instead
+        # of broadcasting. Last, an id-embedded MAC for all-hex WiFi ids only
+        # (cloud 'eb...' UUIDs would yield garbage).
         mac = ip2mac.get(lan_ip, "") if lan_ip else ""
         if not mac:
-            mac = _mac_from_tuya_id(did)
+            mac = factory.get(did, "") or _mac_from_tuya_id(did)
         out.append(_item("tuya", d.get("name"), mac=mac, ip=lan_ip,
                          model=d.get("product_name", "") or d.get("category_name", ""),
                          online=bool(d.get("online", True))))
@@ -209,6 +213,25 @@ def _mac_from_tuya_id(s):
         tail = s[-12:].upper()
         return ":".join(tail[i:i + 2] for i in range(0, 12, 2))
     return ""
+
+
+def _tuya_factory_macs(cloud, ids):
+    """{device id: MAC} from the cloud's factory records. The API takes a
+    limited id list per call, so ask in batches; a failed batch is skipped."""
+    out = {}
+    ids = [i for i in ids if i]
+    for n in range(0, len(ids), 20):
+        try:
+            r = cloud.cloudrequest("/v1.0/iot-03/devices/factory-infos",
+                                   query={"device_ids": ",".join(ids[n:n + 20])})
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! tuya: factory MACs failed ({e})")
+            continue
+        for f in (r or {}).get("result") or []:
+            mac = (f.get("mac") or "").strip()
+            if re.fullmatch(r"[0-9A-Fa-f]{12}", mac):
+                out[f["id"]] = _norm_mac(":".join(mac[i:i + 2] for i in range(0, 12, 2)))
+    return out
 
 
 def _norm_mac(m):
