@@ -309,6 +309,27 @@ class TestBoard(unittest.TestCase):
         with self.assertRaises(ValueError):
             home.rename(rows, master, [], "mac:AA:00:00:00:00:08", "kitchen plug")
 
+    def test_hub_linked_sensors_take_the_hubs_address_and_own_rooms(self):
+        master = [{"Device": "Leak Hub", "MAC": "2C:F4:32:91:D1:D8", "IP": "10.0.0.8",
+                   "Hostname": "ESP-91D1D8", "Status": "online"}]
+        rows = [row(Device="", Name="Washer Leak Sensor", Room="Kitchen", Type="sensor", Via="Leak Hub"),
+                row(Device="", Name="Guest Leak Sensor", Room="Garage", Type="sensor", Via="Leak Hub")]
+        d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}
+        w = d["name:Washer Leak Sensor"]
+        self.assertEqual((w["via"], w["ip"], w["status"], w["seen_as"], w["room"]),
+                         ("Leak Hub", "10.0.0.8", "online", "", "Kitchen"))
+        self.assertEqual(d["name:Guest Leak Sensor"]["room"], "Garage")
+        self.assertEqual(d["Leak Hub"]["via"], "")
+        home.rename(rows, master, [], "Leak Hub", "Govee Hub")      # links follow a rename
+        self.assertEqual({r["Via"] for r in rows if not r["Device"]}, {"Govee Hub"})
+
+    def test_check_via(self):
+        rows = [row(Device="Plug", Via="Hub"), row(Device="", Name="Kitchen Leak Sensor",
+                                                  Type="sensor", Via="Gone Hub")]
+        errors, warnings = home.check(ROOMS, rows, master_names={"Plug"})
+        self.assertTrue(any("Via is only for" in e for e in errors))
+        self.assertTrue(any("Via hub 'Gone Hub'" in w for w in warnings))
+
     def test_room_not_in_rooms_csv_is_unassigned(self):
         b = home.board([], ROOMS, [row(Device="Plug", Room="Attic")])
         self.assertEqual(b["devices"][0]["room"], "")

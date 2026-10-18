@@ -10,7 +10,9 @@ import re
 
 ROOM_FIELDS = ["Room", "Floor", "Aliases"]
 APP_ROOM_FIELDS = ["App", "Device", "Room", "Id"]   # app_rooms.csv, from `home rooms`
-HOME_FIELDS = ["Device", "Room", "Type", "Name", "Description", "Native", "Expose"]
+# Via: the Device of the hub a no-Wi-Fi device (Zigbee/BLE/RF sensor) reaches
+# the network through; blank for everything with its own MAC.
+HOME_FIELDS = ["Device", "Room", "Type", "Name", "Description", "Native", "Expose", "Via"]
 
 TYPES = ["light", "switch", "plug", "fan", "blind", "garage_door", "lock",
          "thermostat", "camera", "doorbell", "sensor", "speaker", "tv",
@@ -222,7 +224,7 @@ def new_row(master_row, room):
     typ, native = guess_type(master_row)
     return {"Device": dev, "Room": room, "Type": typ, "Name": "",
             "Description": " ".join(x for x in [master_row.get("Vendor", ""), dev] if x),
-            "Native": native, "Expose": default_expose(typ)}
+            "Native": native, "Expose": default_expose(typ), "Via": ""}
 
 
 def _key(h):
@@ -262,9 +264,10 @@ def board(master_rows, rooms, home):
             seen_as[dev] = (host, r.get("IP", ""))
     room_set = {r["Room"].lower(): r["Room"] for r in rooms}
 
-    def net(dev):
+    def net(dev, via=False):
         host, ip = seen_as.get(dev, ("", ""))
-        return {"seen_as": host, "ip": live_ip.get(dev) or ip or any_ip.get(dev, ""),
+        return {"seen_as": "" if via else host,
+                "ip": live_ip.get(dev) or ip or any_ip.get(dev, ""),
                 "macs": macs.get(dev, [])}
 
     devices, seen = [], set()
@@ -273,15 +276,19 @@ def board(master_rows, rooms, home):
         if not key or key in seen:
             continue
         seen.add(key)
+        # A hub-linked sensor has no network presence of its own: show the
+        # hub's address and take the hub's status.
+        via = h.get("Via", "") if not h["Device"] else ""
         devices.append({"id": key, "device": h["Device"], "name": h["Name"],
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
-                        "status": status.get(h["Device"], ""), **net(h["Device"])})
+                        "status": status.get(via or h["Device"], ""),
+                        **net(via or h["Device"], bool(via)), "via": via})
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)
             devices.append({"id": dev, "device": dev, "name": "",
                             "type": guess_type(first[dev])[0],
-                            "room": "", "status": status[dev], **net(dev)})
+                            "room": "", "status": status[dev], **net(dev), "via": ""})
     # Unnamed MACs the scan still sees, so nothing online is missing; the
     # board asks for a name before one can go in a room.
     for r in master_rows:
@@ -294,7 +301,7 @@ def board(master_rows, rooms, home):
         devices.append({"id": "mac:" + mac, "device": "", "name": "",
                         "type": guess_type(r)[0], "room": "", "status": r.get("Status", ""),
                         "seen_as": host, "ip": r.get("IP", "").strip(), "macs": [mac],
-                        "vendor": r.get("Vendor", "").strip(), "unnamed": True})
+                        "vendor": r.get("Vendor", "").strip(), "unnamed": True, "via": ""})
     return {"rooms": [r["Room"] for r in rooms], "devices": devices}
 
 
@@ -360,6 +367,9 @@ def rename(home, master_rows, app_rooms, key, new):
         for a in app_rooms:
             if a["Device"] == old:
                 a["Device"] = new
+        for h in home:                         # sensors linked through this hub
+            if h.get("Via") == old:
+                h["Via"] = new
     row = next((h for h in home if _key(h) == key), None)
     if row is None and is_device:
         match = next((r for r in master_rows if r.get("Device", "").strip() == new), None)
@@ -515,6 +525,11 @@ def check(rooms, home, master_names=None):
                           "to google, alexa or apple")
         if h["Device"] and master_names is not None and h["Device"] not in master_names:
             warnings.append(f"{where}: Device '{h['Device']}' is not in devices.csv")
+        via = h.get("Via", "")
+        if via and h["Device"]:
+            errors.append(f"{where}: Via is only for devices with no Device (no MAC of their own)")
+        elif via and master_names is not None and via not in master_names:
+            warnings.append(f"{where}: Via hub '{via}' is not in devices.csv")
     return errors, warnings
 
 
