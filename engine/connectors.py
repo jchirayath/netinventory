@@ -331,8 +331,9 @@ def blink_login_interactive():
         print(f"  ! blink login failed: {e}")
 
 
-def discover_blink(c):
-    """Blink via blinkpy (async). Returns camera names (no MAC — cloud cameras).
+def blink_run(c, work):
+    """Log in to Blink (cached token, else credentials) and return
+    `await work(blink)`, or None if login fails.
 
     2FA: Blink sends a code on first login from a new client. Pass it via the
     NETINV_BLINK_2FA env var (not a stdin prompt, so it works headless). The
@@ -345,7 +346,7 @@ def discover_blink(c):
         from blinkpy.helpers.util import json_load
     except ImportError:
         print("  ! blink: `pip install blinkpy aiohttp` first")
-        return []
+        return None
     token_path = os.path.expanduser("~/.netinv_blink.json")
     code = os.environ.get("NETINV_BLINK_2FA", "").strip()
 
@@ -374,30 +375,141 @@ def discover_blink(c):
                 os.chmod(token_path, 0o600)
             except Exception:  # noqa: BLE001
                 pass
-            # The camera list has no MAC; each camera's info endpoint does
-            # (mac_address, plus the IP of its last check-in). Minis, doorbells
-            # and sync modules report none, so those stay name-only.
-            from blinkpy import api
-            out = []
-            for name, cam in blink.cameras.items():
-                attrs = getattr(cam, "attributes", {}) or {}
-                mac = ip = ""
-                try:
-                    res = await api.request_camera_info(blink, attrs.get("network_id"),
-                                                        cam.camera_id)
-                    info = (res or {}).get("camera") or [{}]
-                    mac = _norm_mac(info[0].get("mac_address") or "")
-                    ip = (info[0].get("last_connect") or {}).get("ip_address") or ""
-                except Exception:  # noqa: BLE001 — name-only for this camera
-                    pass
-                out.append(_item("blink", name, mac=mac, ip=ip, model=attrs.get("type", "")))
-            return out
+            return await work(blink)
 
     try:
-        return asyncio.run(_run()) or []
+        return asyncio.run(_run())
     except Exception as e:  # noqa: BLE001
         print(f"  ! blink: {e}")
-        return []
+        return None
+
+
+async def _blink_mac_ip(blink, cam):
+    """(MAC, last check-in IP) from a camera's info endpoint; the camera list
+    has neither. Minis, doorbells and sync modules report none: ('', '')."""
+    from blinkpy import api
+    attrs = getattr(cam, "attributes", {}) or {}
+    try:
+        res = await api.request_camera_info(blink, attrs.get("network_id"), cam.camera_id)
+        info = ((res or {}).get("camera") or [{}])[0]
+    except Exception:  # noqa: BLE001
+        return "", ""
+    return (_norm_mac(info.get("mac_address") or ""),
+            (info.get("last_connect") or {}).get("ip_address") or "")
+
+
+def discover_blink(c):
+    """Blink camera names, with MAC and IP where the camera reports them."""
+    async def work(blink):
+        out = []
+        for name, cam in blink.cameras.items():
+            mac, ip = await _blink_mac_ip(blink, cam)
+            out.append(_item("blink", name, mac=mac, ip=ip,
+                             model=(getattr(cam, "attributes", {}) or {}).get("type", "")))
+        return out
+    return blink_run(c, work) or []
+
+
+# Mini ('owl') cameras stay on Wi-Fi, so waking one changes nothing a sweep sees.
+BLINK_ALWAYS_ON = {"owl", "mini"}
+# Manufacturers seen on Blink cameras' MACs (older models use TI Wi-Fi chips).
+BLINK_VENDORS = re.compile(r"amazon|blink|immedia|texas instruments", re.I)
+
+
+def blink_locate(c, sweep, only=None, wait=45, settle=90, poll=2, log=print,
+                 vendor=lambda mac: ""):
+    """Wake each Blink camera in turn (a snapshot) and see which device joins
+    the network. sweep() -> {MAC: IP} of hosts answering now; vendor(mac) ->
+    manufacturer, used to prefer Blink-like newcomers. Returns one dict per
+    camera: {name, kind, api_mac, mac, ip, how}, where how is 'blink' (Blink
+    reported the MAC and it showed up), 'appeared' (the one new host, or the
+    one Blink-made one), 'ambiguous', 'not seen' or 'always on'."""
+    import asyncio
+    import time
+
+    async def work(blink):
+        loop = asyncio.get_running_loop()
+        ever = set()                 # every MAC any sweep in this run has seen
+
+        def likely(hosts):
+            """The Blink-made hosts, when vendors are known at all; else all."""
+            if not any(vendor(m) for m in hosts):
+                return hosts
+            return {m: ip for m, ip in hosts.items() if BLINK_VENDORS.search(vendor(m))}
+
+        async def live():
+            now = await loop.run_in_executor(None, sweep)
+            ever.update(now)
+            return now
+
+        # Warm-up: a sweep misses a few flaky hosts (a Mini, a plug), and one
+        # that turned up later must not pass for the camera arriving.
+        for _ in range(3):
+            await live()
+        results, claimed = [], set()
+        for name, cam in blink.cameras.items():
+            if only and name.lower() not in {o.lower() for o in only}:
+                continue
+            kind = str((getattr(cam, "attributes", {}) or {}).get("type", "")).lower()
+            api_mac, _ = await _blink_mac_ip(blink, cam)
+            r = {"name": name, "kind": kind, "api_mac": api_mac, "mac": "", "ip": "", "how": ""}
+            if kind in BLINK_ALWAYS_ON or cam.__class__.__name__ == "BlinkCameraMini":
+                r["how"] = "always on"
+                results.append(r)
+                log(f"  {name}: Mini, always on Wi-Fi — waking it cannot single it out")
+                continue
+            await live()
+            before = set(ever)           # anything seen so far is not this camera
+            log(f"  {name}: waking (snapshot)… {len(before)} hosts seen so far")
+            try:
+                await cam.snap_picture()
+            except Exception as e:  # noqa: BLE001
+                r["how"] = f"trigger failed: {e}"
+                results.append(r)
+                continue
+            new, seen, end = {}, {}, time.monotonic() + wait
+            while time.monotonic() < end:
+                now = await live()
+                for m, ip in now.items():
+                    if m not in before and m not in claimed:
+                        new[m] = ip
+                        seen[m] = seen.get(m, 0) + 1
+                if api_mac and api_mac in now:
+                    r.update(mac=api_mac, ip=now[api_mac], how="blink")
+                    break
+                if not api_mac and len(new) == 1 and len(likely(new)) == 1 \
+                        and seen[next(iter(new))] >= 2:
+                    break                            # one Blink-like newcomer, seen twice
+                await asyncio.sleep(poll)
+            if not r["how"]:
+                steady = {m: new[m] for m, n in seen.items() if n >= 2}
+                # Other sleepy devices (a Wi-Fi lock, a sensor) wake on their own
+                # schedule: only a Blink-made newcomer can be this camera.
+                others = {}
+                if likely(steady) != steady:
+                    steady, others = likely(steady), steady
+                if api_mac:
+                    _, ip = await _blink_mac_ip(blink, cam)   # Blink's own check-in record
+                    r.update(mac=api_mac, ip=ip, how="blink (not seen awake)")
+                elif len(steady) == 1:
+                    (m, ip), = steady.items()
+                    r.update(mac=m, ip=ip, how="appeared")
+                else:
+                    r["how"] = ("ambiguous" if steady else
+                                "no Blink newcomer" if others else "not seen")
+                    r["candidates"] = steady or others or new
+            if r["mac"]:
+                claimed.add(r["mac"])
+            log(f"    -> {r['how']}: {r['mac'] or '-'} {r['ip'] or ''}"
+                + (f"  candidates {r.get('candidates')}" if r.get("candidates") else ""))
+            results.append(r)
+            # Let it fall back asleep before the next one, so wake-ups never overlap.
+            end = time.monotonic() + settle
+            while r["mac"] and time.monotonic() < end and r["mac"] in await live():
+                await asyncio.sleep(poll)
+        return results
+
+    return blink_run(c, work) or []
 
 
 def discover_smartthings(c):
