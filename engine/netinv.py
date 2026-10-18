@@ -250,6 +250,36 @@ def slow_sweep(known, wait=3, batch=64):
                 p.kill()
 
 
+def live_hosts(via=None, key=None):
+    """{MAC: IP} for hosts that answer a sweep *now*. Unlike arp_table()
+    alone, this drops hosts that left: macOS keeps ARP entries ~20 minutes,
+    so a camera that just went back to sleep would still look present.
+
+    Without root, nmap -sn only sees hosts answering TCP 80/443, which most
+    IoT devices ignore. via='user@host' runs a root ARP sweep (sudo -n nmap)
+    on another machine on the LAN instead, e.g. a Raspberry Pi."""
+    cmd = ["nmap", "-sn", "-n", "-T4", SUBNET]
+    if via:
+        cmd = (["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+               + (["-i", os.path.expanduser(key)] if key else [])
+               + [via, "sudo -n nmap -sn -n -PR -T5 --max-retries 1 " + SUBNET])  # ~4 s
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    hosts, ip = {}, None
+    for line in out.splitlines():
+        m = re.match(r"Nmap scan report for (\d+\.\d+\.\d+\.\d+)", line)
+        if m:
+            ip = m.group(1)
+            hosts.setdefault(ip, "")
+        m = re.match(r"MAC Address: ([0-9A-Fa-f:]{17})", line)
+        if m and ip:
+            hosts[ip] = norm_mac(m.group(1))          # root nmap reports the MAC itself
+    arp = arp_table()
+    return {mac or arp.get(ip, ""): ip for ip, mac in hosts.items() if mac or arp.get(ip)}
+
+
 def arp_table():
     """Return {ip: MAC} for LAN hosts in the system ARP cache."""
     table = {}
@@ -2297,6 +2327,37 @@ def cloud_merge(master, items):
     return matched
 
 
+def cmd_blink_locate(args):
+    """Wake each Blink camera in turn and record which MAC/IP it joins with.
+    --apply writes the Blink names in by MAC, as `cloud blink` would."""
+    import connectors
+    c = connectors.creds("blink")
+    if c is None:
+        print("  blink is not configured; run: netinv set-cloud blink")
+        sys.exit(1)
+    sweep = lambda: live_hosts(args.via, args.key)  # noqa: E731
+    up = sweep()
+    print(f"  {len(up)} hosts answer a sweep of {SUBNET}"
+          + (f" (run on {args.via})" if args.via else ""))
+    if not args.via and len(up) < 40:
+        print("  ! few hosts answer a non-root sweep (IoT devices ignore TCP pings);"
+              " pass --via user@host for a root ARP sweep from a LAN machine")
+    res = connectors.blink_locate(c, sweep, only=args.camera or None,
+                                  wait=args.wait, settle=args.settle, vendor=oui_lookup)
+    master = load_master()
+    print(f"\n  {'Blink camera':22} {'how':22} {'MAC':17} {'IP':15} inventory")
+    for r in res:
+        row = master.get(norm_mac(r["mac"])) if r["mac"] else None
+        print(f"  {r['name'][:22]:22} {r['how'][:22]:22} {r['mac'] or '-':17} "
+              f"{r['ip'] or '-':15} {(row['Device'] or '(unnamed)') if row else ''}")
+    if args.apply:
+        items = [connectors._item("blink", r["name"], mac=r["mac"], ip=r["ip"], model=r["kind"])
+                 for r in res if r["mac"]]
+        cloud_merge(master, items)
+        save_master(master)
+        write_reports(master)
+
+
 def cmd_cloud(args):
     import connectors
     providers = args.providers or connectors.configured_providers()
@@ -3081,6 +3142,20 @@ def main():
 
     bl = sub.add_parser("blink-login", help="interactive Blink 2FA login (run in a terminal)")
     bl.set_defaults(func=cmd_blink_login)
+
+    bk = sub.add_parser("blink-locate",
+                        help="wake each Blink camera in turn to learn its MAC/IP")
+    bk.add_argument("camera", nargs="*", help="Blink camera name(s); default all")
+    bk.add_argument("--wait", type=int, default=45,
+                    help="seconds to watch for the camera after waking it (default 45)")
+    bk.add_argument("--settle", type=int, default=90,
+                    help="max seconds to wait for it to sleep before the next (default 90)")
+    bk.add_argument("--apply", action="store_true",
+                    help="write the Blink names into devices.csv by MAC")
+    bk.add_argument("--via", help="user@host to run a root ARP sweep on (passwordless "
+                                  "sudo + nmap there), e.g. the Raspberry Pi")
+    bk.add_argument("--key", help="ssh key for --via")
+    bk.set_defaults(func=cmd_blink_locate)
 
     s = sub.add_parser("show", help="print current inventory")
     s.add_argument("query", nargs="?")

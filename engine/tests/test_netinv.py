@@ -661,6 +661,98 @@ class TestConnectors(unittest.TestCase):
             got = connectors.kasa_discover(timeout=0.2, arp=arp)
         self.assertEqual([d["alias"] for d in got], ["Garage"])
 
+    def _locate(self, cams, sweeps, vendor=lambda m: ""):
+        """Run blink_locate against fake cameras and a scripted sweep."""
+        import asyncio
+
+        class Cam:
+            def __init__(self, name, kind, cid):
+                self.name, self.camera_id = name, cid
+                self.attributes = {"type": kind, "network_id": 1}
+                self.snapped = False
+
+            async def snap_picture(self):
+                self.snapped = True
+
+        class Blink:
+            cameras = {n: Cam(n, k, i) for i, (n, k, _) in enumerate(cams)}
+
+        api_macs = {i: m for i, (_, _, m) in enumerate(cams)}
+
+        async def fake_mac_ip(blink, cam):
+            return api_macs[cam.camera_id], ""
+
+        script = iter(sweeps)
+        last = [{}]
+
+        def sweep():
+            last[0] = next(script, last[0])
+            return dict(last[0])
+
+        with mock.patch.object(connectors, "blink_run",
+                               lambda c, work: asyncio.run(work(Blink()))), \
+             mock.patch.object(connectors, "_blink_mac_ip", fake_mac_ip), \
+             mock.patch("asyncio.sleep", mock.AsyncMock()):
+            return connectors.blink_locate({}, sweep, wait=0.05, settle=0, poll=0,
+                                           log=lambda *a: None, vendor=vendor), Blink.cameras
+
+    def test_blink_locate_new_host_blink_mac_and_mini(self):
+        base = {"AA:00:00:00:00:01": "10.0.0.1"}
+        bell = dict(base, **{"B4:E4:54:00:00:01": "10.0.0.9"})
+        res, cams = self._locate(
+            [("Doorbell", "lotus", ""), ("Pool", "sedona", "C0:95:CF:8E:82:E6"),
+             ("Garage Main", "owl", "")],
+            [base, base, base,                                         # warm-up
+             base, bell, bell,                                         # doorbell wakes
+             base, dict(base, **{"C0:95:CF:8E:82:E6": "10.0.0.7"})])   # pool wakes
+        got = {r["name"]: (r["how"], r["mac"], r["ip"]) for r in res}
+        self.assertEqual(got["Doorbell"], ("appeared", "B4:E4:54:00:00:01", "10.0.0.9"))
+        self.assertEqual(got["Pool"], ("blink", "C0:95:CF:8E:82:E6", "10.0.0.7"))
+        self.assertEqual(got["Garage Main"][0], "always on")
+        self.assertFalse(cams["Garage Main"].snapped)          # a Mini is never woken
+
+    def test_blink_locate_two_newcomers_is_ambiguous(self):
+        base = {"AA:00:00:00:00:01": "10.0.0.1"}
+        two = dict(base, **{"B4:E4:54:00:00:01": "10.0.0.9", "B4:E4:54:00:00:02": "10.0.0.5"})
+        res, _ = self._locate([("Doorbell", "lotus", "")], [base] * 4 + [two, two],
+                              vendor=lambda m: "Amazon Technologies")
+        self.assertEqual((res[0]["how"], res[0]["mac"]), ("ambiguous", ""))
+        res, _ = self._locate([("Doorbell", "lotus", "")], [base] * 4 + [two, two])
+        self.assertEqual(res[0]["how"], "ambiguous")              # vendors unknown
+        res, _ = self._locate([("Doorbell", "lotus", "")], [base] * 4 + [two, two],
+                              vendor=lambda m: "Espressif")
+        self.assertEqual((res[0]["how"], len(res[0]["candidates"])), ("no Blink newcomer", 2))
+
+    def test_blink_locate_prefers_the_blink_made_newcomer(self):
+        base = {"AA:00:00:00:00:01": "10.0.0.1"}
+        two = dict(base, **{"1C:3B:F3:22:B3:3B": "10.0.0.5", "74:AB:93:00:00:09": "10.0.0.9"})
+        vendors = {"1C:3B:F3:22:B3:3B": "TP-Link Technologies", "74:AB:93:00:00:09": "Blink by Amazon"}
+        res, _ = self._locate([("Doorbell", "lotus", "")], [base] * 4 + [two, two],
+                              vendor=lambda m: vendors.get(m, ""))
+        self.assertEqual((res[0]["how"], res[0]["mac"]), ("appeared", "74:AB:93:00:00:09"))
+
+    def test_blink_locate_lone_non_blink_newcomer_is_not_the_camera(self):
+        base = {"AA:00:00:00:00:01": "10.0.0.1"}
+        lock = dict(base, **{"EC:DA:3B:20:89:F8": "10.0.0.47"})     # a sleepy Wi-Fi lock
+        res, _ = self._locate([("Back door", "lotus", "")], [base] * 4 + [lock, lock],
+                              vendor=lambda m: {"EC:DA:3B:20:89:F8": "Espressif"}.get(m, ""))
+        self.assertEqual((res[0]["how"], res[0]["mac"]), ("no Blink newcomer", ""))
+
+    def test_blink_locate_host_seen_earlier_in_run_is_not_the_camera(self):
+        base = {"AA:00:00:00:00:01": "10.0.0.1"}
+        mini = dict(base, **{"74:58:F3:EE:22:77": "10.0.0.50"})   # flaky always-on Mini
+        # Mini shows in a warm-up sweep, drops out, then "reappears" after the wake.
+        res, _ = self._locate([("Back door", "lotus", "")],
+                              [mini, base, base, base, mini, mini],
+                              vendor=lambda m: "Amazon Technologies")
+        self.assertEqual(res[0]["how"], "not seen")
+
+    def test_blink_locate_one_off_flicker_is_not_the_camera(self):
+        base = {"AA:00:00:00:00:01": "10.0.0.1"}
+        flicker = dict(base, **{"AA:00:00:00:00:02": "10.0.0.5"})     # seen once only
+        res, _ = self._locate([("Doorbell", "lotus", "")], [base] * 4 + [flicker, base, base])
+        self.assertEqual(res[0]["how"], "not seen")
+
     def test_kasa_needs_no_credentials(self):
         self.assertEqual(connectors.creds("kasa"), {})
 
