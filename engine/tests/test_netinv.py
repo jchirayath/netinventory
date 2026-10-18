@@ -570,6 +570,23 @@ class TestConnectors(unittest.TestCase):
         self.assertEqual(got, [("Study", "E8:9F:80:1E:9F:FA", ""), ("Leak", "", ""),
                                ("Plug", "", "HS103(US)")])
 
+    def test_govee_lan_scan_drops_an_id_two_hosts_claim(self):
+        import socket as so
+        pkt = lambda did: json.dumps({"msg": {"data": {"device": did, "sku": "H6159"}}}).encode()  # noqa: E731
+        replies = [(pkt("11:22:AA:00:00:00:00:01"), ("10.0.0.5", 4002)),
+                   (pkt("11:22:AA:00:00:00:00:01"), ("10.0.0.66", 4002)),    # spoofed copy
+                   (pkt("11:22:AA:00:00:00:00:02"), ("10.0.0.7", 4002))]
+        sock = mock.MagicMock()
+
+        def recv(_n):
+            if replies:
+                return replies.pop(0)
+            raise so.timeout()
+        sock.recvfrom.side_effect = recv
+        with mock.patch.object(so, "socket", return_value=sock):
+            got = connectors.govee_lan_scan(timeout=0.2)
+        self.assertEqual(got, {"11:22:AA:00:00:00:00:02": ("10.0.0.7", "H6159")})
+
     def test_govee_id_mac_guess(self):
         self.assertEqual(connectors._mac_from_govee_id("64:09:c5:32:37:36:2d:13"),
                          "C5:32:37:36:2D:13")

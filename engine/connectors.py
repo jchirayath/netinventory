@@ -625,7 +625,7 @@ def govee_lan_scan(timeout=4.0):
     switched on in the Govee app answer."""
     import socket
     import time
-    found = {}
+    found, clash = {}, set()
     try:
         rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -651,9 +651,15 @@ def govee_lan_scan(timeout=4.0):
         # Unauthenticated UDP: take the packet's real source address, never the
         # self-reported ip, so a device can only describe its own MAC.
         if re.fullmatch(r"([0-9A-F]{2}:){7}[0-9A-F]{2}", did) and len(found) < 256:
+            # The id itself is self-reported: an id two hosts claim is
+            # ambiguous (one may be spoofing it), so it is dropped below.
+            if did in found and found[did][0] != addr[0]:
+                clash.add(did)
             found[did] = (addr[0], sku if re.fullmatch(r"[A-Za-z0-9_-]{1,16}", sku) else "")
     rx.close()
     tx.close()
+    for did in clash:
+        found.pop(did, None)
     return found
 
 
