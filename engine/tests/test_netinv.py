@@ -526,6 +526,14 @@ class TestConnectors(unittest.TestCase):
                                "Thermo": ("AA:00:00:00:00:02", ""),        # id guess only
                                "Govee H6008": ("2C:F4:32:91:D1:D8", "10.0.0.9")})
 
+    def test_resolve_arp_never_pings_a_non_ip(self):
+        from unittest import mock
+        with mock.patch.object(connectors.subprocess, "Popen") as popen, \
+                mock.patch.object(connectors.subprocess, "run",
+                                  return_value=mock.Mock(stdout="", returncode=0)):
+            connectors._resolve_arp({"-f", "10.0.0.5", "10.0.0.5; rm x"})
+        self.assertEqual([c.args[0][-1] for c in popen.call_args_list], ["10.0.0.5"])
+
     def test_tuya_uuid_with_letters_yields_no_mac(self):
         self.assertEqual(connectors._mac_from_tuya_id("eb00112233445566klmno"), "")
 

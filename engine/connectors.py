@@ -248,7 +248,17 @@ def _norm_mac(m):
 
 
 def _resolve_arp(ips):
-    """Ping each IP to refresh the ARP cache, then return {ip: MAC}."""
+    """Ping each IP to refresh the ARP cache, then return {ip: MAC}. IPs come
+    from LAN replies, so anything that is not a plain IPv4 address is dropped
+    before it reaches the ping argv."""
+    import ipaddress
+    ok = set()
+    for ip in ips or ():
+        try:
+            ok.add(str(ipaddress.IPv4Address(ip)))
+        except ValueError:
+            pass
+    ips = sorted(ok)[:256]
     if not ips:
         return {}
     procs = []
@@ -465,10 +475,13 @@ def govee_lan_scan(timeout=4.0):
         try:
             data, addr = rx.recvfrom(4096)
             d = json.loads(data)["msg"]["data"]
-        except (socket.timeout, ValueError, KeyError, TypeError):
+            did, sku = str(d.get("device", "")).upper(), str(d.get("sku", ""))
+        except (socket.timeout, ValueError, KeyError, TypeError, AttributeError):
             continue
-        if d.get("device"):
-            found[d["device"].upper()] = (d.get("ip") or addr[0], d.get("sku", ""))
+        # Unauthenticated UDP: take the packet's real source address, never the
+        # self-reported ip, so a device can only describe its own MAC.
+        if re.fullmatch(r"([0-9A-F]{2}:){7}[0-9A-F]{2}", did) and len(found) < 256:
+            found[did] = (addr[0], sku if re.fullmatch(r"[A-Za-z0-9_-]{1,16}", sku) else "")
     rx.close()
     tx.close()
     return found
