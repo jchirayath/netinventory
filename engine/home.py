@@ -119,11 +119,14 @@ def split_list(value):
 
 
 def room_words(rooms):
-    """Lower-case room name and alias -> canonical Room."""
+    """Lower-case room name and alias -> canonical Room. A room's own name
+    beats another room's alias (Driveway aliased 'Garage' keeps Garage)."""
     out = {}
     for r in rooms:
-        for w in [r["Room"]] + split_list(r["Aliases"]):
-            out[w.lower()] = r["Room"]
+        for w in split_list(r["Aliases"]):
+            out.setdefault(w.lower(), r["Room"])
+    for r in rooms:
+        out[r["Room"].lower()] = r["Room"]
     return out
 
 

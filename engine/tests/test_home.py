@@ -37,6 +37,12 @@ class TestNames(unittest.TestCase):
     def test_alias_counts_as_room(self):
         self.assertEqual(self.problems("Den Lamp", "Family Room"), [])
 
+    def test_room_name_beats_another_rooms_alias(self):
+        rooms = [{"Room": "Garage", "Floor": "Down", "Aliases": ""},
+                 {"Room": "Driveway", "Floor": "Down", "Aliases": "Garage"}]
+        words = home.room_words(rooms)
+        self.assertEqual(home.name_problems("Garage Camera", "Garage", words), [])
+
     def test_must_start_with_room(self):
         self.assertIn("must start with its room", " ".join(self.problems("Ceiling Light")))
 
