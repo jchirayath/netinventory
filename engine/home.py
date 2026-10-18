@@ -327,7 +327,10 @@ def board(master_rows, rooms, home):
                         "seen_as": host, "ip": r.get("IP", "").strip(), "macs": [mac],
                         "vendor": r.get("Vendor", "").strip(), "unnamed": True, "via": "",
                         "apps": parse_app_names(r.get("AppNames", ""))})
-    return {"rooms": [r["Room"] for r in rooms], "types": TYPES, "devices": devices}
+    # The platforms that reported at least one device (from AppNames).
+    platforms = sorted({p for d in devices for p in d["apps"]})
+    return {"rooms": [r["Room"] for r in rooms], "types": TYPES, "platforms": platforms,
+            "devices": devices}
 
 
 def set_room(home, master_rows, key, room):

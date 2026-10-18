@@ -334,6 +334,7 @@ class TestBoard(unittest.TestCase):
         d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}
         self.assertEqual(d["WeMo Study"]["apps"], {"smartthings": "Study"})
         self.assertEqual(d["name:Washer Leak Sensor"]["apps"], {"govee": "H5054_A00A_Washer"})
+        self.assertEqual(home.board(master, ROOMS, rows)["platforms"], ["govee", "smartthings"])
 
     def test_check_via(self):
         rows = [row(Device="Plug", Via="Hub"), row(Device="", Name="Kitchen Leak Sensor",

@@ -2491,14 +2491,14 @@ h1{font-size:1.2rem;margin:.2rem 0}
 #menu .cur{font-weight:600}
 #menu .del{color:#b3261e}
 .seg{display:inline-flex}.seg .btn{border-radius:0}.seg .btn:first-child{border-radius:6px 0 0 6px}
-.seg .btn:last-child{border-radius:0 6px 6px 0;border-left:none}.seg .btn.on{background:var(--head);color:#fff}
+.seg .btn:last-child{border-radius:0 6px 6px 0}.seg .btn+.btn{border-left:none}.seg .btn.on{background:var(--head);color:#fff}
 </style>
 <h1 id=ttl>Rooms</h1><div id=sum>loading…</div>
 <div id=ro class=ro style=display:none>Read-only: start with
  <code>netinv serve --allow-write</code> to move devices.</div>
 <div class=bar>
  <input id=q placeholder="filter devices…">
- <span class=seg><a class=btn id=byroom href="#room">By room</a><a class=btn id=bytype href="#type">By type</a></span>
+ <span class=seg><a class=btn id=byroom href="#room">By room</a><a class=btn id=bytype href="#type">By type</a><a class=btn id=byapp href="#app">By app</a></span>
  <span class=spacer></span>
  <form id=addf style="display:flex;gap:6px;margin:0">
   <input id=newroom placeholder="new room name" maxlength=40>
@@ -2513,12 +2513,19 @@ h1{font-size:1.2rem;margin:.2rem 0}
 const WRITABLE=__WRITABLE__;
 let B={rooms:[],types:[],devices:[]},Q='';
 // Two views of the same board: columns by room, or by type (TODO first).
-const mode=()=>location.hash=='#type'?'type':'room';
+// Three views of the same board: by room, by type (TODO first), and by app:
+// the platforms that report the device (AppNames), so one device can sit in
+// several app columns. The app view is read-only: the platforms decide it.
+const mode=()=>({'#type':'type','#app':'app'})[location.hash]||'room';
 const tyLabel=t=>t=='TODO'?'TODO (no type)':t.replace('_',' ');
-const colOf=d=>mode()=='room'?(B.rooms.includes(d.room)?d.room:'')
- :(B.types.includes(d.type)?d.type:'TODO');
-const cols=()=>mode()=='room'?['',...B.rooms]:['TODO',...B.types];
-const colName=c=>mode()=='room'?(c||'Unassigned'):tyLabel(c);
+const PLAT={tuya:'Tuya / Smart Life',smartthings:'SmartThings',ha:'Home Assistant',govee:'Govee',
+ blink:'Blink',kasa:'Kasa',wyze:'Wyze',apple:'Apple Home'};
+const colsOf=d=>mode()=='room'?[B.rooms.includes(d.room)?d.room:'']
+ :mode()=='type'?[B.types.includes(d.type)?d.type:'TODO']
+ :(Object.keys(d.apps||{}).length?Object.keys(d.apps):['']);
+const cols=()=>mode()=='room'?['',...B.rooms]:mode()=='type'?['TODO',...B.types]:['',...B.platforms];
+const colName=c=>mode()=='room'?(c||'Unassigned'):mode()=='type'?tyLabel(c):(c?PLAT[c]||c:'Not in any app');
+const canDrag=()=>WRITABLE&&mode()!='app';
 const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const label=d=>d.name||d.device||d.seen_as||d.vendor||'Unknown device';
 const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
@@ -2531,19 +2538,19 @@ function card(d){
  const sub=d.seen_as&&d.seen_as.toLowerCase()!=label(d).toLowerCase()?`<span class=sub>${esc(d.seen_as)}</span>`:'';
  const nw=d.via&&!d.device?['via '+d.via,d.ip].filter(Boolean)
   :[d.via?'via '+d.via:'',d.ip,...d.macs].filter(Boolean);
- if(mode()=='type')nw.unshift(d.room?'⌂ '+d.room:'⌂ no room');
+ if(mode()!='room')nw.unshift(d.room?'⌂ '+d.room:'⌂ no room');
  const net=nw.length?`<span class=net>${nw.map(esc).join(' · ')}</span>`:'';
  // What each app calls it, only where that differs from the name shown here.
  const an=Object.entries(d.apps||{}).filter(([p,n])=>n.toLowerCase()!=label(d).toLowerCase());
  const app=an.length?`<span class=app>${an.map(([p,n])=>`${esc(p)}: ${esc(n)}`).join(' · ')}</span>`:'';
- return `<div class="dev${d.unnamed?' unnamed':''}" draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+
+ return `<div class="dev${d.unnamed?' unnamed':''}" draggable=${canDrag()} data-id="${esc(d.id)}" title="${esc(tip)}">`+
   `<span class=dot style=background:${color(d.status)}></span>`+
   `<span class=nm>${esc(label(d))}${sub}${app}${net}</span>${ty}</div>`}
 function render(){
  const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.vendor,d.via,d.ip,...d.macs,
   ...Object.values(d.apps||{})].join(' ').toLowerCase().includes(Q));
  const cs=cols(),by={};cs.forEach(c=>by[c]=[]);
- shown.forEach(d=>by[colOf(d)].push(d));
+ shown.forEach(d=>colsOf(d).forEach(c=>(by[c]||by[cs[0]]).push(d)));
  Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));
  const first=cs[0];
  g.innerHTML=cs.map(c=>`<div class="room${c==first?' unassigned':''}" data-col="${esc(c)}">`+
@@ -2552,8 +2559,10 @@ function render(){
  const un=B.devices.filter(d=>!d.room).length,nn=B.devices.filter(d=>d.unnamed).length,
   nt=B.devices.filter(d=>!B.types.includes(d.type)).length;
  sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned · ${nt} no type · ${nn} unnamed`;
- ttl.textContent=mode()=='room'?'Rooms':'Types';document.title='netinventory '+ttl.textContent.toLowerCase();
+ ttl.textContent={room:'Rooms',type:'Types',app:'Apps'}[mode()];
+ document.title='netinventory '+ttl.textContent.toLowerCase();
  byroom.classList.toggle('on',mode()=='room');bytype.classList.toggle('on',mode()=='type');
+ byapp.classList.toggle('on',mode()=='app');
  addf.style.display=WRITABLE&&mode()=='room'?'flex':'none'}
 async function post(path,body){
  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -2593,7 +2602,7 @@ g.addEventListener('dragleave',e=>{const rm=e.target.closest('.room');
  if(rm&&!rm.contains(e.relatedTarget))rm.classList.remove('over')});
 g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
  e.preventDefault();rm.classList.remove('over');const id=e.dataTransfer.getData('text/plain')||dragId;
- dragId=null;if(id)(mode()=='room'?move:retype)(id,rm.dataset.col)});
+ dragId=null;if(id&&canDrag())(mode()=='room'?move:retype)(id,rm.dataset.col)});
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
 function showMenu(id,html,x,y){menu.innerHTML=html;menu.dataset.id=id;menu.style.display='block';
  const w=menu.offsetWidth,h=menu.offsetHeight;
@@ -2768,17 +2777,16 @@ def cmd_serve(args):
             key = str(req.get("id", ""))
             try:
                 if path == "/api/type":
-                    row = home.set_type(rows, list(load_master().values()), key,
-                                        str(req.get("type", "")))
-                    ok = row is not None
+                    ok = home.set_type(rows, list(load_master().values()), key,
+                                       str(req.get("type", ""))) is not None
                 else:
                     ok = home.delete(rows, key)
             except ValueError as e:
                 _send(self, 400, _json.dumps({"error": str(e)}).encode(), "application/json")
                 return
             if not ok:
-                msg = ("unknown device" if path == "/api/type"
-                       else "only devices with no MAC can be deleted")
+                msg = ("only devices with no MAC can be deleted" if path == "/api/delete"
+                       else "unknown device")
                 _send(self, 404, _json.dumps({"error": msg}).encode(), "application/json")
                 return
             home.write_csv(HOME_CSV, home.HOME_FIELDS, rows)
