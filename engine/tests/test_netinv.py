@@ -505,10 +505,37 @@ class TestConnectors(unittest.TestCase):
         self.assertEqual(got, {"a": "38:2C:E5:D2:11:ED"})
         self.assertEqual([len(c) for c in calls], [20, 1])
 
+    def test_cloud_merge_keeps_other_providers_reference_rows(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ref = os.path.join(d, "cloud_devices.csv")
+            with open(ref, "w") as f:
+                f.write("Provider;Name;Model;MAC;IP\ntuya;Front Door Sensor;mcs;38:2C:E5:D2:11:ED;\n"
+                        "govee;Old Govee;H1;;\n")
+            item = {"provider": "govee", "name": "Thermo", "model": "H5074", "mac": "", "ip": ""}
+            with mock.patch.object(netinv, "CLOUD_REF", ref), \
+                    mock.patch.object(netinv, "arp_table", return_value={}):
+                netinv.cloud_merge({}, [item])
+            with open(ref) as f:
+                names = [ln.split(";")[1] for ln in f.read().splitlines()[1:]]
+        self.assertEqual(names, ["Front Door Sensor", "Thermo"])   # govee replaced, tuya kept
+
     def test_govee_id_mac_guess(self):
         self.assertEqual(connectors._mac_from_govee_id("64:09:c5:32:37:36:2d:13"),
                          "C5:32:37:36:2D:13")
         self.assertEqual(connectors._mac_from_govee_id("AA:BB:CC"), "")
+
+    def test_govee_hub_sensor_ids_yield_the_hub_mac(self):
+        self.assertEqual(connectors._govee_hub_mac("2EF43291D1D800A00A"), "2C:F4:32:91:D1:D8")
+        self.assertEqual(connectors._govee_hub_mac("02:F5:E0:12:1D:62:04:47"), "")
+        from unittest import mock
+        cloud = [{"device": "2EF43291D1D800A00A", "sku": "H5054", "deviceName": "Washer"},
+                 {"device": "2EF43291D1D8009FD7", "sku": "H5054", "deviceName": "Guest"}]
+        with mock.patch.object(connectors, "_govee_cloud_devices", return_value=cloud), \
+                mock.patch.object(connectors, "govee_lan_scan", return_value={}):
+            got = [(i["name"], i["mac"]) for i in connectors.discover_govee({"api_key": "k"})]
+        self.assertEqual(got, [("Washer", ""), ("Guest", ""),
+                               ("Govee Hub (H5054 sensors)", "2C:F4:32:91:D1:D8")])
 
     def test_govee_lan_mac_beats_the_guess_and_lan_only_devices_are_kept(self):
         from unittest import mock

@@ -2159,10 +2159,18 @@ def cloud_merge(master, items):
         row["Source"] = "+".join(sorted(srcs))
         matched += 1
 
-    # write the reference list of name-only devices
+    # write the reference list of name-only devices; providers not in this run
+    # (e.g. `netinv cloud govee` alone) keep their earlier rows
+    ran = {it["provider"] for it in items}
+    kept = []
+    if os.path.exists(CLOUD_REF):
+        with open(CLOUD_REF, newline="") as f:
+            kept = [r for r in csv.DictReader(f, delimiter=";") if r.get("Provider") not in ran]
     with open(CLOUD_REF, "w", newline="") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["Provider", "Name", "Model", "MAC", "IP"])
+        for r in kept:
+            w.writerow([r.get(k, "") for k in ("Provider", "Name", "Model", "MAC", "IP")])
         for it in ref:
             w.writerow([it["provider"], it["name"], it["model"], it["mac"], it["ip"]])
     print(f"  cloud: matched {matched} to MACs; {len(ref)} name-only -> {CLOUD_REF}")

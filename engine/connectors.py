@@ -515,20 +515,38 @@ def _mac_from_govee_id(device_id):
     return ":".join(p[-6:]).upper() if len(p) == 8 else ""
 
 
+def _govee_hub_mac(device_id):
+    """A sensor paired to a Govee Wi-Fi hub has a colon-less 18-hex id: the
+    hub's MAC with the locally-administered bit set, then the sensor's own
+    suffix ('2EF43291D1D800A00A' -> hub 2C:F4:32:91:D1:D8)."""
+    s = (device_id or "").upper()
+    if not re.fullmatch(r"[0-9A-F]{18}", s):
+        return ""
+    first = int(s[:2], 16) & ~0x02
+    return ":".join([f"{first:02X}"] + [s[i:i + 2] for i in range(2, 12, 2)])
+
+
 def discover_govee(c):
     """Govee app names from the cloud API; the MAC from the LAN API (with LAN
     Control on) via ARP, else a guess from the device id."""
     devs = _govee_cloud_devices(c["api_key"])
     lan = govee_lan_scan()
     ip2mac = _resolve_arp({ip for ip, _ in lan.values()})
-    out, seen = [], set()
+    out, seen, hubs = [], set(), {}
     for d in devs:
         did = (d.get("device") or "").upper()
         seen.add(did)
+        hub = _govee_hub_mac(did)
+        if hub:                                # the sensor itself has no Wi-Fi
+            hubs.setdefault(hub, d.get("sku", ""))
+            out.append(_item("govee", d.get("deviceName"), model=d.get("sku", "")))
+            continue
         ip = lan.get(did, ("", ""))[0]
         mac = ip2mac.get(ip, "") if ip else ""
         out.append(_item("govee", d.get("deviceName"), mac=mac or _mac_from_govee_id(did),
                          ip=ip, model=d.get("sku", "")))
+    for hub, sku in hubs.items():
+        out.append(_item("govee", f"Govee Hub ({sku} sensors)", mac=hub, model="hub"))
     for did, (ip, sku) in lan.items():        # LAN-only: answered but not on the account
         if did not in seen:
             out.append(_item("govee", f"Govee {sku}".strip(), mac=ip2mac.get(ip, ""),
