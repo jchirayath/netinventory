@@ -305,7 +305,10 @@ def board(master_rows, rooms, home):
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
                         "status": status.get(src, ""),
                         **net(src, not h["Device"] and bool(via)), "via": via,
-                        "apps": apps.get(h["Device"]) or parse_app_names(h.get("AppNames", ""))})
+                        # A row's own AppNames count too: a cloud may list a device
+                        # with no MAC (Blink doorbells, Minis), so a scan cannot.
+                        "apps": {**parse_app_names(h.get("AppNames", "")),
+                                 **apps.get(h["Device"], {})}})
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)

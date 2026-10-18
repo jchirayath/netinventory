@@ -333,8 +333,12 @@ class TestBoard(unittest.TestCase):
                 row(Device="", Name="Washer Leak Sensor", AppNames="govee=H5054_A00A_Washer")]
         d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}
         self.assertEqual(d["WeMo Study"]["apps"], {"smartthings": "Study"})
+        rows[0]["AppNames"] = "blink=Study Cam; smartthings=Stale"          # row's own + scanned
+        d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}
+        self.assertEqual(d["WeMo Study"]["apps"], {"blink": "Study Cam", "smartthings": "Study"})
         self.assertEqual(d["name:Washer Leak Sensor"]["apps"], {"govee": "H5054_A00A_Washer"})
-        self.assertEqual(home.board(master, ROOMS, rows)["platforms"], ["govee", "smartthings"])
+        self.assertEqual(home.board(master, ROOMS, rows)["platforms"],
+                         ["blink", "govee", "smartthings"])
 
     def test_app_room_plan(self):
         rooms = [{"Room": "Kitchen", "Floor": "Down", "Aliases": ""},
