@@ -2851,11 +2851,11 @@ def main():
 
     cl = sub.add_parser("cloud", help="pull device names from smart-home clouds")
     cl.add_argument("providers", nargs="*",
-                    help="tuya wyze blink smartthings apple (default: all configured)")
+                    help="tuya wyze blink smartthings govee apple (default: all configured)")
     cl.set_defaults(func=cmd_cloud)
 
     sc = sub.add_parser("set-cloud", help="store a cloud connector's credentials in Keychain")
-    sc.add_argument("provider", help="tuya | wyze | blink | smartthings | apple")
+    sc.add_argument("provider", help="tuya | wyze | blink | smartthings | govee | apple")
     sc.set_defaults(func=cmd_set_cloud)
 
     bl = sub.add_parser("blink-login", help="interactive Blink 2FA login (run in a terminal)")

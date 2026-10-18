@@ -20,7 +20,7 @@ Install only what you use:
     pip install tinytuya          # tuya / smartlife
     pip install wyze-sdk          # wyze
     pip install blinkpy           # blink
-    # smartthings uses the standard library only
+    # smartthings and govee use the standard library only
 """
 
 import json
@@ -52,6 +52,9 @@ PROVIDERS = {
     "apple": [
         ("apple_id", False, "Apple ID (email)"),
         ("password", True,  "Apple ID app-specific password"),
+    ],
+    "govee": [
+        ("api_key", True, "Govee API key (Govee Home app > Profile > Settings > Apply for API Key)"),
     ],
     "kasa": [],   # local LAN protocol, no account needed
     "ha": [
@@ -436,6 +439,91 @@ def discover_smartthings(c):
     return out
 
 
+def govee_lan_scan(timeout=4.0):
+    """{device id: (LAN IP, sku)} from Govee's LAN API: a multicast scan to
+    239.255.255.250:4001, answered on UDP 4002. Only devices with LAN Control
+    switched on in the Govee app answer."""
+    import socket
+    import time
+    found = {}
+    try:
+        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rx.bind(("", 4002))
+        rx.settimeout(0.5)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    except OSError as e:
+        print(f"  ! govee: LAN scan unavailable ({e})")
+        return found
+    msg = json.dumps({"msg": {"cmd": "scan", "data": {"account_topic": "reserve"}}}).encode()
+    end, next_tx = time.time() + timeout, 0
+    while time.time() < end:
+        if time.time() >= next_tx:            # repeat: UDP multicast drops packets
+            tx.sendto(msg, ("239.255.255.250", 4001))
+            next_tx = time.time() + 1
+        try:
+            data, addr = rx.recvfrom(4096)
+            d = json.loads(data)["msg"]["data"]
+        except (socket.timeout, ValueError, KeyError, TypeError):
+            continue
+        if d.get("device"):
+            found[d["device"].upper()] = (d.get("ip") or addr[0], d.get("sku", ""))
+    rx.close()
+    tx.close()
+    return found
+
+
+def _govee_cloud_devices(key):
+    """[{device, sku, deviceName}] from the Govee OpenAPI, falling back to the
+    older developer API (keys issued before 2024 may only work there)."""
+    for url, pick in (
+            ("https://openapi.api.govee.com/router/api/v1/user/devices",
+             lambda j: j.get("data") or []),
+            ("https://developer-api.govee.com/v1/devices",
+             lambda j: [{"device": d.get("device"), "sku": d.get("model"),
+                         "deviceName": d.get("deviceName")}
+                        for d in (j.get("data") or {}).get("devices", [])])):
+        req = urllib.request.Request(url, headers={"Govee-API-Key": key,
+                                                   "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return pick(json.loads(r.read().decode("utf-8", "replace")))
+        except Exception as e:  # noqa: BLE001
+            err = e
+    print(f"  ! govee: {err}")
+    return []
+
+
+def _mac_from_govee_id(device_id):
+    """Govee ids are 8 bytes ('64:09:C5:32:37:36:2D:13'); the last 6 are a
+    guess at the MAC. cloud_merge only uses it if that MAC is on the LAN."""
+    p = (device_id or "").split(":")
+    return ":".join(p[-6:]).upper() if len(p) == 8 else ""
+
+
+def discover_govee(c):
+    """Govee app names from the cloud API; the MAC from the LAN API (with LAN
+    Control on) via ARP, else a guess from the device id."""
+    devs = _govee_cloud_devices(c["api_key"])
+    lan = govee_lan_scan()
+    ip2mac = _resolve_arp({ip for ip, _ in lan.values()})
+    out, seen = [], set()
+    for d in devs:
+        did = (d.get("device") or "").upper()
+        seen.add(did)
+        ip = lan.get(did, ("", ""))[0]
+        mac = ip2mac.get(ip, "") if ip else ""
+        out.append(_item("govee", d.get("deviceName"), mac=mac or _mac_from_govee_id(did),
+                         ip=ip, model=d.get("sku", "")))
+    for did, (ip, sku) in lan.items():        # LAN-only: answered but not on the account
+        if did not in seen:
+            out.append(_item("govee", f"Govee {sku}".strip(), mac=ip2mac.get(ip, ""),
+                             ip=ip, model=sku))
+    print(f"  govee: {len(devs)} cloud devices, {len(lan)} answered on the LAN")
+    return out
+
+
 def discover_apple(c):
     """Apple/iCloud (Find My) via pyicloud. Returns the device ROSTER (name +
     model) only - Apple exposes no MAC/IP, and Wi-Fi MACs are randomized, so
@@ -641,6 +729,7 @@ DISCOVERERS = {
     "wyze": discover_wyze,
     "blink": discover_blink,
     "smartthings": discover_smartthings,
+    "govee": discover_govee,
     "apple": discover_apple,
 }
 

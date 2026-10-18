@@ -505,6 +505,27 @@ class TestConnectors(unittest.TestCase):
         self.assertEqual(got, {"a": "38:2C:E5:D2:11:ED"})
         self.assertEqual([len(c) for c in calls], [20, 1])
 
+    def test_govee_id_mac_guess(self):
+        self.assertEqual(connectors._mac_from_govee_id("64:09:c5:32:37:36:2d:13"),
+                         "C5:32:37:36:2D:13")
+        self.assertEqual(connectors._mac_from_govee_id("AA:BB:CC"), "")
+
+    def test_govee_lan_mac_beats_the_guess_and_lan_only_devices_are_kept(self):
+        from unittest import mock
+        cloud = [{"device": "11:22:AA:00:00:00:00:01", "sku": "H6159", "deviceName": "Hall Strip"},
+                 {"device": "11:22:AA:00:00:00:00:02", "sku": "H5075", "deviceName": "Thermo"}]
+        lan = {"11:22:AA:00:00:00:00:01": ("10.0.0.5", "H6159"),
+               "99:99:BB:00:00:00:00:09": ("10.0.0.9", "H6008")}
+        with mock.patch.object(connectors, "_govee_cloud_devices", return_value=cloud), \
+                mock.patch.object(connectors, "govee_lan_scan", return_value=lan), \
+                mock.patch.object(connectors, "_resolve_arp",
+                                  return_value={"10.0.0.5": "A8:46:74:0A:84:F0",
+                                                "10.0.0.9": "2C:F4:32:91:D1:D8"}):
+            got = {i["name"]: (i["mac"], i["ip"]) for i in connectors.discover_govee({"api_key": "k"})}
+        self.assertEqual(got, {"Hall Strip": ("A8:46:74:0A:84:F0", "10.0.0.5"),
+                               "Thermo": ("AA:00:00:00:00:02", ""),        # id guess only
+                               "Govee H6008": ("2C:F4:32:91:D1:D8", "10.0.0.9")})
+
     def test_tuya_uuid_with_letters_yields_no_mac(self):
         self.assertEqual(connectors._mac_from_tuya_id("eb00112233445566klmno"), "")
 

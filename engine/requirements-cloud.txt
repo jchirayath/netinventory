@@ -4,4 +4,4 @@ tinytuya      # tuya / smartlife  -> device name + MAC + IP
 wyze-sdk      # wyze              -> nickname + MAC
 blinkpy       # blink             -> camera names (no MAC)
 aiohttp       # required by blinkpy
-# smartthings uses the Python standard library only (PAT bearer token)
+# smartthings and govee use the Python standard library only (token / API key)

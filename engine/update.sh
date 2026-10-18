@@ -3,7 +3,7 @@
 #   - live subnet scan (nmap ping-sweep + ARP + reverse DNS)
 #   - SSDP/UPnP friendly-name discovery
 #   - Xfinity gateway connected-devices scrape (DHCP hostnames)
-#   - smart-home cloud connectors (any configured: tuya/wyze/blink/smartthings)
+#   - smart-home cloud connectors (any configured: tuya/wyze/blink/smartthings/govee)
 #   - auto-fills blank friendly names from high-quality discovered names
 #   - merges into devices.csv, preserving your friendly names + notes
 #   - rebuilds report.md and report-by-device.csv

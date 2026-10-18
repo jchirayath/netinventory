@@ -223,7 +223,12 @@ WiFi, so they land in `cloud_devices.csv` as a name reference.
 | **blink** | account email/password (+ 2FA) | camera names | by IP / reference |
 | **smartthings** | Personal Access Token | device labels | reference |
 | **apple** | Apple ID + app-specific password | device roster (name + model) | reference¹ |
+| **govee** | API key (Govee Home app → Profile → Settings → Apply for API Key) | app name + model; MAC + IP with LAN Control on | direct² / reference |
 | **kasa** | none: local protocol on port 9999, always on | app name + MAC + IP | direct |
+
+² Govee devices answer a LAN scan (UDP 4001/4002) only with **LAN Control** switched
+on per device in the Govee app; others are matched by a MAC guessed from the device id,
+or listed as a reference. Bluetooth-only models are reference only.
 
 ¹ Apple exposes no MAC/IP and Wi-Fi MACs are randomized, so the roster is a reference
 only. Map each once by reading the device's Wi-Fi Address (iOS: Settings → Wi-Fi → ⓘ);
