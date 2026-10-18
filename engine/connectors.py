@@ -192,6 +192,48 @@ def tuya_rooms(c):
     return out
 
 
+class TuyaRooms:
+    """Room writes for the Smart Life app: create a room, put a device in it.
+    Rooms are per home; a device's home is its owner_id."""
+
+    def __init__(self, c):
+        self.cloud = _tuya_cloud(c)
+        self.home_of = {d["id"]: d.get("owner_id") for d in
+                        self.cloud.getdevices(True).get("result", []) if d.get("id")}
+        self._rooms = {}
+
+    def rooms(self, home_id, fresh=False):
+        """{room name (stripped): room_id} for one home."""
+        if fresh or home_id not in self._rooms:
+            r = self.cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms")
+            self._rooms[home_id] = {x["name"].strip(): x["room_id"]
+                                    for x in (r.get("result") or {}).get("rooms", [])}
+        return self._rooms[home_id]
+
+    def room_devices(self, home_id, room_id):
+        r = self.cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms/{room_id}/devices")
+        return {x.get("id") for x in (r.get("result") or [])}
+
+    def move(self, device_id, room):
+        """Put the device in `room`, creating the room first if the device's
+        home has none by that name. Returns (ok, message)."""
+        home_id = self.home_of.get(device_id)
+        if not home_id:
+            return False, "unknown device"
+        if room.strip() not in self.rooms(home_id):
+            r = self.cloud.cloudrequest(f"/v1.0/homes/{home_id}/room", action="POST",
+                                        post={"name": room.strip()})
+            if not r.get("success"):
+                return False, f"create room: {r.get('msg', r)}"
+            self.rooms(home_id, fresh=True)
+        room_id = self.rooms(home_id).get(room.strip())
+        if not room_id:
+            return False, "room not found after create"
+        r = self.cloud.cloudrequest(f"/v1.0/homes/{home_id}/rooms/{room_id}/devices",
+                                    action="POST", post={"device_ids": device_id})
+        return (True, "moved") if r.get("success") else (False, str(r.get("msg", r)))
+
+
 def tuya_names(c):
     """{device id: current app name} for every Tuya/SmartLife device."""
     return {d["id"]: d.get("name", "") for d in _tuya_cloud(c).getdevices(True).get("result", [])

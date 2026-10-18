@@ -1991,6 +1991,9 @@ def cmd_home(args):
     if args.action == "push" and args.source == "ha":
         _push_ha(args, master, rows)
         return
+    if args.action == "push" and args.rooms_only and args.source == "tuya":
+        _push_tuya_rooms(args, master, rows)
+        return
     if args.action == "push" and args.rooms_only:
         print(f"  {args.source}: push only renames devices here, so --rooms-only has "
               "nothing to do (no rooms API)")
@@ -2046,6 +2049,57 @@ def cmd_home(args):
     print(f"  {len(rows)} device(s), {len(rooms)} room(s): "
           f"{len(errors)} error(s), {len(warnings)} warning(s)")
     if errors:
+        sys.exit(1)
+
+
+def _push_tuya_rooms(args, master, rows):
+    """`home push --to tuya --rooms-only`: put each Smart Life device in its
+    home.csv room, creating Smart Life rooms as needed. Never renames."""
+    import connectors
+    import home
+    c = connectors.creds("tuya")
+    if not c:
+        print("  tuya is not configured; run: netinv set-cloud tuya")
+        sys.exit(1)
+    plan = home.app_room_plan("tuya", connectors.tuya_rooms(c), master.values(), rows,
+                              home.load_rooms(ROOMS_CSV))
+    if args.device:
+        plan = [p for p in plan if args.device == p["name"]]
+    new_rooms = sorted({p["to"] for p in plan if not p["app_room"]})
+    if new_rooms:
+        print(f"  {'would create' if args.dry_run else 'creating as needed'} "
+              f"Smart Life room(s): {', '.join(new_rooms)}")
+    tr = None if args.dry_run else connectors.TuyaRooms(c)
+    checked = failed = 0
+    for p in plan:
+        target = p["app_room"] or p["to"]
+        what = f"'{p['name']}': room '{p['from'] or '-'}' -> '{target}'"
+        if args.dry_run:
+            print(f"  would set {what}")
+            continue
+        ok, msg = tr.move(p["id"], target)
+        # Once: make sure a move takes the device out of its old room rather
+        # than adding it to a second one; stop if it does not.
+        if ok and p["from"] and not checked:
+            checked = 1
+            home_id = tr.home_of[p["id"]]
+            old_id = tr.rooms(home_id, fresh=True).get(p["from"].strip())
+            if old_id and p["id"] in tr.room_devices(home_id, old_id):
+                print(f"  STOP {what}: still in '{p['from']}' too; not moving the rest")
+                sys.exit(1)
+        failed += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {what}" + ("" if ok else f": {msg}"))
+        if not ok and "quota" in msg.lower():
+            # The Tuya cloud project's plan is out of quota: every further
+            # call fails the same way. Rerun once it is extended.
+            left = len(plan) - plan.index(p) - 1
+            failed += left
+            print(f"  stopping: Tuya project quota; {left} more not tried. Extend the IoT Core "
+                  "plan (iot.tuya.com > Cloud > your project > Service API), then rerun.")
+            break
+    verb = "to move" if args.dry_run else "moved"
+    print(f"  tuya: {len(plan) - failed} {verb}, {failed} failed")
+    if failed:
         sys.exit(1)
 
 

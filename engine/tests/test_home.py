@@ -336,6 +336,24 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(d["name:Washer Leak Sensor"]["apps"], {"govee": "H5054_A00A_Washer"})
         self.assertEqual(home.board(master, ROOMS, rows)["platforms"], ["govee", "smartthings"])
 
+    def test_app_room_plan(self):
+        rooms = [{"Room": "Kitchen", "Floor": "Down", "Aliases": ""},
+                 {"Room": "Master Bedroom", "Floor": "Up", "Aliases": "Bedroom"},
+                 {"Room": "Garage", "Floor": "Down", "Aliases": ""}]
+        master = [{"Device": "Plug A", "AppNames": "tuya=Bed Plug"},
+                  {"Device": "Plug B", "AppNames": "tuya=Kitchen Plug"},
+                  {"Device": "Plug C", "AppNames": "tuya=Odd"}]
+        rows = [row(Device="Plug A", Room="Master Bedroom"), row(Device="Plug B", Room="Kitchen"),
+                row(Device="Plug C", Room="TODO"),
+                row(Device="", Name="Garage Sensor", Room="Garage", AppNames="tuya=Door")]
+        app = {"Living Room": [("Bed Plug", "a"), ("Kitchen Plug", "b")],
+               "Bedroom ": [], "Kitchen": [], "": [("Odd", "c"), ("Door", "d"), ("Unknown", "e")]}
+        got = [(p["id"], p["from"], p["to"], p["app_room"])
+               for p in home.app_room_plan("tuya", app, master, rows, rooms)]
+        self.assertEqual(got, [("d", "", "Garage", None),                   # room to create
+                               ("b", "Living Room", "Kitchen", "Kitchen"),
+                               ("a", "Living Room", "Master Bedroom", "Bedroom ")])  # alias room
+
     def test_check_via(self):
         rows = [row(Device="Plug", Via="Hub"), row(Device="", Name="Kitchen Leak Sensor",
                                                   Type="sensor", Via="Gone Hub")]

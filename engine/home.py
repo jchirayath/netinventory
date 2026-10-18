@@ -459,6 +459,42 @@ def push_plan(app, app_rooms, home, app_names):
     return plan
 
 
+def app_room_plan(app, app_rooms, master_rows, home, rooms):
+    """Room moves for one app: [{id, name, from, to, app_room}] for each app
+    device whose app room is not its home.csv Room. Devices are linked by the
+    app's own name (AppNames); one with no room here, or that links to rooms
+    that disagree, is left alone. An app room named after a room or one of its
+    aliases counts as that room; app_room is the existing app room to use, or
+    None when the app needs a room created (named `to`).
+    app_rooms: {app room name: [(app device name, app device id)]}."""
+    words = room_words(rooms)
+    canon = lambda r: words.get((r or "").strip().lower())  # noqa: E731
+    by_dev = {h["Device"]: h for h in home if h["Device"]}
+    wanted = {}
+    for r in master_rows:
+        n = parse_app_names(r.get("AppNames", "")).get(app)
+        h = by_dev.get(r.get("Device", "").strip())
+        if n and h:
+            wanted.setdefault(n, set()).add(h["Room"])
+    for h in home:
+        n = parse_app_names(h.get("AppNames", "")).get(app)
+        if n and not h["Device"]:
+            wanted.setdefault(n, set()).add(h["Room"])
+    existing = {canon(r): r for r in app_rooms if r and canon(r)}
+    plan = []
+    for app_room, devs in app_rooms.items():
+        for name, dev_id in devs:
+            want = {r for r in wanted.get(name, set()) if r and r != TODO}
+            if len(want) != 1:
+                continue
+            to = want.pop()
+            if canon(app_room) == to:
+                continue
+            plan.append({"id": dev_id, "name": name, "from": app_room, "to": to,
+                         "app_room": existing.get(to)})
+    return sorted(plan, key=lambda p: (p["to"], p["name"]))
+
+
 def mac_push_plan(found, master_rows, home):
     """[(ip, app name, wanted name)] for LAN devices found by MAC (e.g. Kasa)
     whose app name differs from their home.csv Name (only a chosen Name is
