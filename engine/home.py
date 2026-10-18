@@ -302,7 +302,7 @@ def board(master_rows, rooms, home):
                         "type": guess_type(r)[0], "room": "", "status": r.get("Status", ""),
                         "seen_as": host, "ip": r.get("IP", "").strip(), "macs": [mac],
                         "vendor": r.get("Vendor", "").strip(), "unnamed": True, "via": ""})
-    return {"rooms": [r["Room"] for r in rooms], "devices": devices}
+    return {"rooms": [r["Room"] for r in rooms], "types": TYPES, "devices": devices}
 
 
 def set_room(home, master_rows, key, room):
@@ -321,6 +321,36 @@ def set_room(home, master_rows, key, room):
     row = new_row(match, room or TODO)
     home.append(row)
     return row
+
+
+def set_type(home, master_rows, key, typ):
+    """Set one device's Type ('' = TODO). A device not yet in home.csv gets a
+    drafted row. An Expose still at the old type's default follows the new
+    type (so a hub stops being offered to voice apps). Returns the row, or
+    None if the key is unknown; raises ValueError for an unknown type."""
+    typ = typ or TODO
+    if typ != TODO and typ not in TYPES:
+        raise ValueError(f"unknown type '{typ}'")
+    row = next((h for h in home if _key(h) == key), None)
+    if row is None and set_room(home, master_rows, key, TODO) is not None:
+        row = home[-1]
+    if row is None:
+        return None
+    if row["Expose"] == default_expose(row["Type"]):
+        row["Expose"] = default_expose(typ)
+    row["Type"] = typ
+    return row
+
+
+def delete(home, key):
+    """Remove a device with no network presence (a 'name:' row: Blink camera,
+    Govee sensor...). Devices with a MAC come back on the next scan, so they
+    cannot be deleted here. Returns True if a row was removed."""
+    if not key.startswith("name:") or not key[5:].strip():
+        return False
+    n = len(home)
+    home[:] = [h for h in home if _key(h) != key]
+    return len(home) < n
 
 
 def rename(home, master_rows, app_rooms, key, new):

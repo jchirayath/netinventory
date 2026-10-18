@@ -2458,12 +2458,18 @@ h1{font-size:1.2rem;margin:.2rem 0}
 #menu div:hover{background:#f0f6ff}
 #menu .hd{color:#777;cursor:default;font-size:11px}#menu .hd:hover{background:none}
 #menu .cur{font-weight:600}
+#menu .del{color:#b3261e}
+.seg{display:inline-flex}.seg .btn{border-radius:0}.seg .btn:first-child{border-radius:6px 0 0 6px}
+.seg .btn:last-child{border-radius:0 6px 6px 0;border-left:none}.seg .btn.on{background:var(--head);color:#fff}
+.dev .rm{font-size:11px;color:#5b6b7d;background:#f1f3f6;border-radius:8px;padding:0 6px;
+ align-self:flex-start;white-space:nowrap}
 </style>
-<h1>Rooms</h1><div id=sum>loading…</div>
+<h1 id=ttl>Rooms</h1><div id=sum>loading…</div>
 <div id=ro class=ro style=display:none>Read-only: start with
  <code>netinv serve --allow-write</code> to move devices.</div>
 <div class=bar>
  <input id=q placeholder="filter devices…">
+ <span class=seg><a class=btn id=byroom href="#room">By room</a><a class=btn id=bytype href="#type">By type</a></span>
  <span class=spacer></span>
  <form id=addf style="display:flex;gap:6px;margin:0">
   <input id=newroom placeholder="new room name" maxlength=40>
@@ -2476,13 +2482,21 @@ h1{font-size:1.2rem;margin:.2rem 0}
 <div id=menu></div>
 <script>
 const WRITABLE=__WRITABLE__;
-let B={rooms:[],devices:[]},Q='';
+let B={rooms:[],types:[],devices:[]},Q='';
+// Two views of the same board: columns by room, or by type (TODO first).
+const mode=()=>location.hash=='#type'?'type':'room';
+const tyLabel=t=>t=='TODO'?'TODO (no type)':t.replace('_',' ');
+const colOf=d=>mode()=='room'?(B.rooms.includes(d.room)?d.room:'')
+ :(B.types.includes(d.type)?d.type:'TODO');
+const cols=()=>mode()=='room'?['',...B.rooms]:['TODO',...B.types];
+const colName=c=>mode()=='room'?(c||'Unassigned'):tyLabel(c);
 const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const label=d=>d.name||d.device||d.seen_as||d.vendor||'Unknown device';
 const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
 function card(d){
  const todo=!d.type||d.type=='TODO';
- const ty=`<span class="ty${todo?' todo':''}">${todo?'TODO':esc(d.type.replace('_',' '))}</span>`;
+ const ty=mode()=='type'?`<span class=rm>${d.room?esc(d.room):'no room'}</span>`
+  :`<span class="ty${todo?' todo':''}">${todo?'TODO':esc(d.type.replace('_',' '))}</span>`;
  const tip=[d.unnamed?'unnamed: right-click to name':'',d.name&&d.device&&d.name!=d.device?d.device:'',
   d.seen_as,d.vendor,d.ip,...d.macs].filter(Boolean).join(' · ');
  const sub=d.seen_as&&d.seen_as.toLowerCase()!=label(d).toLowerCase()?`<span class=sub>${esc(d.seen_as)}</span>`:'';
@@ -2493,24 +2507,43 @@ function card(d){
   `<span class=nm>${esc(label(d))}${sub}${net}</span>${ty}</div>`}
 function render(){
  const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.vendor,d.via,d.ip,...d.macs].join(' ').toLowerCase().includes(Q));
- const by={'':[]};B.rooms.forEach(r=>by[r]=[]);
- shown.forEach(d=>(by[d.room]||by['']).push(d));
+ const cs=cols(),by={};cs.forEach(c=>by[c]=[]);
+ shown.forEach(d=>by[colOf(d)].push(d));
  Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));
- g.innerHTML=['',...B.rooms].map(r=>`<div class="room${r?'':' unassigned'}" data-room="${esc(r)}">`+
-  `<h2><span>${r?esc(r):'Unassigned'}</span><span class=n>${by[r].length}</span></h2>`+
-  `<div class=list>${by[r].map(card).join('')||'<div class=empty>drop devices here</div>'}</div></div>`).join('');
- const un=B.devices.filter(d=>!d.room).length,nn=B.devices.filter(d=>d.unnamed).length;
- sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned · ${nn} unnamed`}
+ const first=cs[0];
+ g.innerHTML=cs.map(c=>`<div class="room${c==first?' unassigned':''}" data-col="${esc(c)}">`+
+  `<h2><span>${esc(colName(c))}</span><span class=n>${by[c].length}</span></h2>`+
+  `<div class=list>${by[c].map(card).join('')||'<div class=empty>drop devices here</div>'}</div></div>`).join('');
+ const un=B.devices.filter(d=>!d.room).length,nn=B.devices.filter(d=>d.unnamed).length,
+  nt=B.devices.filter(d=>!B.types.includes(d.type)).length;
+ sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned · ${nt} no type · ${nn} unnamed`;
+ ttl.textContent=mode()=='room'?'Rooms':'Types';document.title='netinventory '+ttl.textContent.toLowerCase();
+ byroom.classList.toggle('on',mode()=='room');bytype.classList.toggle('on',mode()=='type');
+ addf.style.display=WRITABLE&&mode()=='room'?'flex':'none'}
 async function post(path,body){
  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const j=await r.json().catch(()=>({}));
  if(!r.ok)throw new Error(j.error||r.status);return j}
 async function move(id,room){
  const d=B.devices.find(x=>x.id==id);if(!d||d.room==room)return;
- if(d.unnamed){say('Name this device first; it moves to '+room+' once named.');startRename(id,room);return}
+ if(d.unnamed){say('Name this device first; it moves to '+(room||'Unassigned')+' once named.');
+  startRename(id,nid=>move(nid,room));return}
  const was=d.room;d.room=room;render();
  try{await post('/api/room',{id,room})}
  catch(e){d.room=was;render();say('Move failed: '+e.message)}}
+async function retype(id,type){
+ const d=B.devices.find(x=>x.id==id);if(!d)return;
+ const t=type=='TODO'?'':type;if((d.type||'TODO')==(t||'TODO'))return;
+ if(d.unnamed){say('Name this device first; its type is set once named.');
+  startRename(id,nid=>retype(nid,type));return}
+ const was=d.type;d.type=t||'TODO';render();
+ try{await post('/api/type',{id,type:t})}
+ catch(e){d.type=was;render();say('Type change failed: '+e.message)}}
+async function remove(id){
+ const d=B.devices.find(x=>x.id==id);if(!d)return;
+ try{await post('/api/delete',{id});B.devices=B.devices.filter(x=>x!==d);render();
+  say(`Deleted '${label(d)}'.`)}
+ catch(e){say('Delete failed: '+e.message)}}
 let dragId=null;
 g.addEventListener('dragstart',e=>{const el=e.target.closest('.dev');if(!el)return;
  dragId=el.dataset.id;e.dataTransfer.setData('text/plain',dragId);e.dataTransfer.effectAllowed='move'});
@@ -2525,23 +2558,34 @@ g.addEventListener('dragleave',e=>{const rm=e.target.closest('.room');
  if(rm&&!rm.contains(e.relatedTarget))rm.classList.remove('over')});
 g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
  e.preventDefault();rm.classList.remove('over');const id=e.dataTransfer.getData('text/plain')||dragId;
- dragId=null;if(id)move(id,rm.dataset.room)});
+ dragId=null;if(id)(mode()=='room'?move:retype)(id,rm.dataset.col)});
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
 g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!WRITABLE)return;
  e.preventDefault();const d=B.devices.find(x=>x.id==el.dataset.id);
- menu.innerHTML=`<div data-act=rename>Rename…</div><div class=hd>Move ${esc(label(d))} to</div>`+['',...B.rooms].map(r=>
+ // Only devices with no MAC can go: a scanned one would come back next scan.
+ const del=d.id.startsWith('name:')?'<div data-act=delete class=del>Delete…</div>':'';
+ const rooms=`<div class=hd>Move ${esc(label(d))} to</div>`+['',...B.rooms].map(r=>
   `<div data-room="${esc(r)}" class="${r==d.room?'cur':''}">${r?esc(r):'Unassigned'}</div>`).join('');
+ const types=`<div class=hd>Type</div>`+['TODO',...B.types].map(t=>
+  `<div data-type="${esc(t)}" class="${t==(d.type||'TODO')?'cur':''}">${esc(tyLabel(t))}</div>`).join('');
+ menu.innerHTML=`<div data-act=rename>Rename…</div>${del}`+(mode()=='room'?rooms+types:types+rooms);
  menu.dataset.id=d.id;menu.style.display='block';
  const w=menu.offsetWidth,h=menu.offsetHeight;
  menu.style.left=Math.min(e.clientX,innerWidth-w-8)+'px';menu.style.top=Math.min(e.clientY,innerHeight-h-8)+'px'});
 menu.addEventListener('click',e=>{
  if(e.target.closest('[data-act=rename]')){menu.style.display='none';startRename(menu.dataset.id);return}
+ // Delete takes a second click (no confirm(): embedded browsers block it).
+ const dl=e.target.closest('[data-act=delete]');
+ if(dl){if(!dl.dataset.armed){dl.dataset.armed=1;dl.textContent='Click again to delete';return}
+  menu.style.display='none';remove(menu.dataset.id);return}
+ const ty=e.target.closest('[data-type]');
+ if(ty){menu.style.display='none';retype(menu.dataset.id,ty.dataset.type);return}
  const it=e.target.closest('[data-room]');if(!it)return;
  menu.style.display='none';move(menu.dataset.id,it.dataset.room)});
 // Rename in place on the card: Enter saves, Escape or leaving the field cancels.
 let editing=false;
-// An unnamed MAC becomes a device when named; thenRoom moves it right after.
-function startRename(id,thenRoom){const d=B.devices.find(x=>x.id==id);
+// An unnamed MAC becomes a device when named; then(newId) runs right after.
+function startRename(id,then){const d=B.devices.find(x=>x.id==id);
  const el=[...g.querySelectorAll('.dev')].find(x=>x.dataset.id==id);if(!d||!el)return;
  editing=true;el.draggable=false;const nm=el.querySelector('.nm');
  nm.innerHTML=`<input class=ren value="${esc(label(d))}" maxlength=60>`;
@@ -2553,7 +2597,7 @@ function startRename(id,thenRoom){const d=B.devices.find(x=>x.id==id);
    Object.assign(d,{id:j.id,name:j.name,device:d.device||d.unnamed?j.name:d.device,unnamed:false});ok=true;
    if(j.warnings.length)say(`Renamed to '${j.name}'. Not to the naming standard yet: `+j.warnings.join('; '))}
   catch(e){say('Rename failed: '+e.message)}
-  editing=false;render();if(ok&&thenRoom)move(d.id,thenRoom)};
+  editing=false;render();if(ok&&then)then(d.id)};
  inp.addEventListener('keydown',e=>{if(e.key=='Enter')finish(true);if(e.key=='Escape')finish(false)});
  inp.addEventListener('blur',()=>finish(false))}
 document.addEventListener('click',e=>{if(!menu.contains(e.target))menu.style.display='none'});
@@ -2569,6 +2613,7 @@ addf.addEventListener('submit',async e=>{e.preventDefault();const name=newroom.v
  catch(e){say('Add room failed: '+e.message)}});
 q.addEventListener('input',()=>{Q=q.value.toLowerCase();render()});
 if(!WRITABLE){ro.style.display='block';addf.style.display='none'}
+addEventListener('hashchange',render);
 async function load(){if(dragId!=null||editing||menu.style.display=='block')return;
  B=await (await fetch('/api/board')).json();render()}
 load();setInterval(load,15000)</script>"""
@@ -2631,7 +2676,8 @@ def cmd_serve(args):
 
         def do_POST(self):
             path = self.path.split("?")[0]
-            if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename"):
+            if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
+                            "/api/type", "/api/delete"):
                 self.send_error(404)
                 return
             if not allow_write:
@@ -2669,8 +2715,33 @@ def cmd_serve(args):
                     self._name(req)
                 elif path == "/api/rename":
                     self._rename(req)
+                elif path in ("/api/type", "/api/delete"):
+                    self._edit(path, req)
                 else:
                     self._room(path, req)
+
+        def _edit(self, path, req):
+            """Board type change, or deleting a device with no MAC."""
+            import home
+            rows = home.load_home(HOME_CSV)
+            key = str(req.get("id", ""))
+            try:
+                if path == "/api/type":
+                    row = home.set_type(rows, list(load_master().values()), key,
+                                        str(req.get("type", "")))
+                    ok = row is not None
+                else:
+                    ok = home.delete(rows, key)
+            except ValueError as e:
+                _send(self, 400, _json.dumps({"error": str(e)}).encode(), "application/json")
+                return
+            if not ok:
+                msg = ("unknown device" if path == "/api/type"
+                       else "only devices with no MAC can be deleted")
+                _send(self, 404, _json.dumps({"error": msg}).encode(), "application/json")
+                return
+            home.write_csv(HOME_CSV, home.HOME_FIELDS, rows)
+            _send(self, 200, b'{"ok":true}', "application/json")
 
         def _rename(self, req):
             """Board rename: one friendly name for devices.csv, home.csv and
@@ -2743,7 +2814,7 @@ def cmd_serve(args):
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
           f"(/, /rooms, /api/devices, /api/summary, /api/alerts, /api/events, /api/board)")
-    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add)' if allow_write else 'disabled (read-only)'}")
+    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/rename, /api/type, /api/delete)' if allow_write else 'disabled (read-only)'}")
     if args.host not in ("127.0.0.1", "localhost"):
         print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
         if allow_write:

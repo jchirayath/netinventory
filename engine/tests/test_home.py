@@ -330,6 +330,29 @@ class TestBoard(unittest.TestCase):
         self.assertTrue(any("Via is only for" in e for e in errors))
         self.assertTrue(any("Via hub 'Gone Hub'" in w for w in warnings))
 
+    def test_set_type_follows_default_expose_and_drafts_rows(self):
+        rows = [row(Device="Hub", Type="TODO", Expose="")]
+        home.set_type(rows, self.MASTER, "Hub", "hub")
+        self.assertEqual((rows[0]["Type"], rows[0]["Expose"]), ("hub", ""))
+        rows[0]["Type"], rows[0]["Expose"] = "plug", home.default_expose("plug")
+        home.set_type(rows, self.MASTER, "Hub", "hub")            # default -> infra default
+        self.assertEqual(rows[0]["Expose"], "")
+        rows[0]["Expose"] = "ha"                                   # hand-set: kept
+        home.set_type(rows, self.MASTER, "Hub", "light")
+        self.assertEqual(rows[0]["Expose"], "ha")
+        home.set_type(rows, self.MASTER, "Kitchen Plug", "")       # not in home.csv yet
+        self.assertEqual((rows[-1]["Device"], rows[-1]["Type"]), ("Kitchen Plug", "TODO"))
+        self.assertIsNone(home.set_type(rows, self.MASTER, "mac:AA:00:00:00:00:01", "plug"))
+        with self.assertRaises(ValueError):
+            home.set_type(rows, self.MASTER, "Hub", "spaceship")
+
+    def test_delete_only_devices_without_a_mac(self):
+        rows = [row(Device="Kitchen Plug"), row(Device="", Name="Pool Camera")]
+        self.assertFalse(home.delete(rows, "Kitchen Plug"))
+        self.assertFalse(home.delete(rows, "name:"))
+        self.assertTrue(home.delete(rows, "name:Pool Camera"))
+        self.assertEqual([r["Device"] for r in rows], ["Kitchen Plug"])
+
     def test_room_not_in_rooms_csv_is_unassigned(self):
         b = home.board([], ROOMS, [row(Device="Plug", Room="Attic")])
         self.assertEqual(b["devices"][0]["room"], "")
