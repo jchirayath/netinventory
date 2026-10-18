@@ -428,6 +428,23 @@ class TestMdns(unittest.TestCase):
         self.assertEqual(m["00:11:22:33:44:55"]["Vendor"], "Apple, Inc.")
 
 
+class TestSlowSweep(unittest.TestCase):
+    def test_pings_only_addresses_missing_from_arp(self):
+        with mock.patch.object(netinv, "SUBNET", "10.0.0.0/29"), \
+                mock.patch.object(netinv.sys, "platform", "darwin"), \
+                mock.patch.object(netinv.subprocess, "Popen") as popen:
+            netinv.slow_sweep({"10.0.0.1", "10.0.0.6"})
+        argv = [c.args[0] for c in popen.call_args_list]
+        self.assertEqual([a[-1] for a in argv], ["10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"])
+        self.assertEqual(argv[0][:5], ["ping", "-c", "1", "-t", "3"])
+
+    def test_skips_big_networks(self):
+        with mock.patch.object(netinv, "SUBNET", "10.0.0.0/16"), \
+                mock.patch.object(netinv.subprocess, "Popen") as popen:
+            netinv.slow_sweep(set())
+        popen.assert_not_called()
+
+
 class TestApplyName(unittest.TestCase):
     def _master(self):
         return {"AA:BB:CC:00:00:01": {k: "" for k in netinv.FIELDS} |

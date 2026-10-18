@@ -209,12 +209,43 @@ def local_scan(do_sweep=True):
             print("  ! nmap not found - relying on existing ARP cache")
         except subprocess.TimeoutExpired:
             print("  ! nmap sweep timed out - using whatever ARP learned so far")
+        slow_sweep(set(arp_table()))
 
     out = [{"mac": mac, "ip": ip, "vendor": "", "hostname": reverse_name(ip),
             "source": "scan", "online": True}
            for ip, mac in arp_table().items()]
     print(f"  local scan found {len(out)} hosts on {SUBNET}")
     return out
+
+
+def slow_sweep(known, wait=3, batch=64):
+    """Ping every subnet address nmap's sweep did not put in ARP, with a
+    longer wait. Wi-Fi devices in power-save answer in 1-2 s, after an
+    unprivileged nmap has given up, so they never reached the ARP table."""
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(SUBNET, strict=False)
+    except ValueError:
+        return
+    if net.num_addresses > 1024:                 # a /22 at most; no flooding big nets
+        return
+    # The timeout flag differs: macOS -t <s> (Linux -t is the TTL), Linux -W <s>.
+    flag = "-t" if sys.platform == "darwin" else "-W"
+    todo = [str(ip) for ip in net.hosts() if str(ip) not in known]
+    for n in range(0, len(todo), batch):
+        procs = []
+        for ip in todo[n:n + batch]:
+            try:
+                procs.append(subprocess.Popen(["ping", "-c", "1", flag, str(wait), ip],
+                                              stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL))
+            except OSError:
+                break
+        for p in procs:
+            try:
+                p.wait(wait + 2)
+            except subprocess.TimeoutExpired:
+                p.kill()
 
 
 def arp_table():
