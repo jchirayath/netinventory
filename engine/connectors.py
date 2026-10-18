@@ -374,11 +374,23 @@ def discover_blink(c):
                 os.chmod(token_path, 0o600)
             except Exception:  # noqa: BLE001
                 pass
+            # The camera list has no MAC; each camera's info endpoint does
+            # (mac_address, plus the IP of its last check-in). Minis, doorbells
+            # and sync modules report none, so those stay name-only.
+            from blinkpy import api
             out = []
             for name, cam in blink.cameras.items():
                 attrs = getattr(cam, "attributes", {}) or {}
-                out.append(_item("blink", name, ip=attrs.get("ip_address", "") or "",
-                                 model=attrs.get("type", "")))
+                mac = ip = ""
+                try:
+                    res = await api.request_camera_info(blink, attrs.get("network_id"),
+                                                        cam.camera_id)
+                    info = (res or {}).get("camera") or [{}]
+                    mac = _norm_mac(info[0].get("mac_address") or "")
+                    ip = (info[0].get("last_connect") or {}).get("ip_address") or ""
+                except Exception:  # noqa: BLE001 — name-only for this camera
+                    pass
+                out.append(_item("blink", name, mac=mac, ip=ip, model=attrs.get("type", "")))
             return out
 
     try:
