@@ -326,9 +326,18 @@ class TestBoard(unittest.TestCase):
     def test_check_via(self):
         rows = [row(Device="Plug", Via="Hub"), row(Device="", Name="Kitchen Leak Sensor",
                                                   Type="sensor", Via="Gone Hub")]
-        errors, warnings = home.check(ROOMS, rows, master_names={"Plug"})
-        self.assertTrue(any("Via is only for" in e for e in errors))
+        errors, warnings = home.check(ROOMS, rows, master_names={"Plug", "Hub"})
+        self.assertFalse(any("Via" in e for e in errors))      # a MAC'd device may have a hub too
         self.assertTrue(any("Via hub 'Gone Hub'" in w for w in warnings))
+
+    def test_device_with_own_mac_and_a_hub_keeps_its_own_address(self):
+        master = [{"Device": "Sync", "MAC": "AA:00:00:00:00:01", "IP": "10.0.0.1", "Status": "online"},
+                  {"Device": "Pool Camera", "MAC": "AA:00:00:00:00:02", "IP": "10.0.0.2",
+                   "Status": "offline"}]
+        rows = [row(Device="Pool Camera", Name="Pool Camera", Type="camera", Via="Sync")]
+        d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}["Pool Camera"]
+        self.assertEqual((d["via"], d["ip"], d["status"], d["macs"]),
+                         ("Sync", "10.0.0.2", "offline", ["AA:00:00:00:00:02"]))
 
     def test_set_type_follows_default_expose_and_drafts_rows(self):
         rows = [row(Device="Hub", Type="TODO", Expose="")]

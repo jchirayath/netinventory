@@ -2515,7 +2515,8 @@ function card(d){
  const tip=[d.unnamed?'unnamed: right-click to name':'',d.name&&d.device&&d.name!=d.device?d.device:'',
   d.seen_as,d.vendor,d.ip,...d.macs].filter(Boolean).join(' · ');
  const sub=d.seen_as&&d.seen_as.toLowerCase()!=label(d).toLowerCase()?`<span class=sub>${esc(d.seen_as)}</span>`:'';
- const nw=d.via?['via '+d.via,d.ip].filter(Boolean):[d.ip,...d.macs].filter(Boolean);
+ const nw=d.via&&!d.device?['via '+d.via,d.ip].filter(Boolean)
+  :[d.via?'via '+d.via:'',d.ip,...d.macs].filter(Boolean);
  if(mode()=='type')nw.unshift(d.room?'⌂ '+d.room:'⌂ no room');
  const net=nw.length?`<span class=net>${nw.map(esc).join(' · ')}</span>`:'';
  return `<div class="dev${d.unnamed?' unnamed':''}" draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+

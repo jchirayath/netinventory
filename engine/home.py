@@ -276,13 +276,15 @@ def board(master_rows, rooms, home):
         if not key or key in seen:
             continue
         seen.add(key)
-        # A hub-linked sensor has no network presence of its own: show the
-        # hub's address and take the hub's status.
-        via = h.get("Via", "") if not h["Device"] else ""
+        # A hub-linked sensor with no network presence of its own shows the
+        # hub's address and status; one with its own MAC (a Blink camera on
+        # Wi-Fi, paired to a sync module) keeps its own and just notes the hub.
+        via = h.get("Via", "")
+        src = h["Device"] or via
         devices.append({"id": key, "device": h["Device"], "name": h["Name"],
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
-                        "status": status.get(via or h["Device"], ""),
-                        **net(via or h["Device"], bool(via)), "via": via})
+                        "status": status.get(src, ""),
+                        **net(src, not h["Device"] and bool(via)), "via": via})
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)
@@ -556,9 +558,7 @@ def check(rooms, home, master_names=None):
         if h["Device"] and master_names is not None and h["Device"] not in master_names:
             warnings.append(f"{where}: Device '{h['Device']}' is not in devices.csv")
         via = h.get("Via", "")
-        if via and h["Device"]:
-            errors.append(f"{where}: Via is only for devices with no Device (no MAC of their own)")
-        elif via and master_names is not None and via not in master_names:
+        if via and master_names is not None and via not in master_names:
             warnings.append(f"{where}: Via hub '{via}' is not in devices.csv")
     return errors, warnings
 
