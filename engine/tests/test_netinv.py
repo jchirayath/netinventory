@@ -538,6 +538,20 @@ class TestConnectors(unittest.TestCase):
                 names = [ln.split(";")[1] for ln in f.read().splitlines()[1:]]
         self.assertEqual(names, ["Front Door Sensor", "Thermo"])   # govee replaced, tuya kept
 
+    def test_cloud_merge_records_app_names_per_provider(self):
+        import tempfile
+        m = "E8:9F:80:1E:9F:FB"
+        master = {m: {k: "" for k in netinv.FIELDS}, "AA:00:00:00:00:09": {k: "" for k in netinv.FIELDS}}
+        master[m].update(MAC=m, Device="WeMo Study", AppNames="kasa=Old; smartthings=Gone")
+        master["AA:00:00:00:00:09"].update(AppNames="smartthings=Removed From App")
+        st = {"provider": "smartthings", "name": "Study", "model": "", "mac": "E8:9F:80:1E:9F:FA", "ip": ""}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(netinv, "CLOUD_REF", os.path.join(d, "ref.csv")), \
+                mock.patch.object(netinv, "arp_table", return_value={}):
+            netinv.cloud_merge(master, [st])
+        self.assertEqual(master[m]["AppNames"], "kasa=Old; smartthings=Study")   # base MAC + 1
+        self.assertEqual(master["AA:00:00:00:00:09"]["AppNames"], "")             # smartthings ran
+
     def test_adjacent_mac_only_when_unambiguous(self):
         master = {"E8:9F:80:1E:9F:FB": {}, "AA:00:00:00:00:05": {}, "AA:00:00:00:00:07": {}}
         self.assertEqual(netinv._adjacent_mac("E8:9F:80:1E:9F:FA", master), "E8:9F:80:1E:9F:FB")

@@ -10,9 +10,27 @@ import re
 
 ROOM_FIELDS = ["Room", "Floor", "Aliases"]
 APP_ROOM_FIELDS = ["App", "Device", "Room", "Id"]   # app_rooms.csv, from `home rooms`
-# Via: the Device of the hub a no-Wi-Fi device (Zigbee/BLE/RF sensor) reaches
-# the network through; blank for everything with its own MAC.
-HOME_FIELDS = ["Device", "Room", "Type", "Name", "Description", "Native", "Expose", "Via"]
+# Via: the Device of the hub a device connects or pairs through.
+# AppNames: for a device with no MAC, what each app calls it ('govee=H5054_A00A');
+# devices with a MAC carry theirs in devices.csv, refreshed by cloud runs.
+HOME_FIELDS = ["Device", "Room", "Type", "Name", "Description", "Native", "Expose", "Via",
+               "AppNames"]
+
+
+def parse_app_names(s):
+    """'tuya=Loft; smartthings=Fan Light' -> {'tuya': 'Loft', ...}"""
+    out = {}
+    for part in (s or "").split(";"):
+        p, _, n = part.partition("=")
+        if p.strip() and n.strip():
+            out[p.strip()] = n.strip()
+    return out
+
+
+def format_app_names(d):
+    """Inverse of parse_app_names; ';' and '=' in a name become spaces."""
+    clean = lambda s: " ".join(re.sub(r"[;=]", " ", s).split())  # noqa: E731
+    return "; ".join(f"{p}={clean(n)}" for p, n in sorted(d.items()) if clean(n))
 
 TYPES = ["light", "switch", "plug", "fan", "blind", "garage_door", "lock",
          "thermostat", "camera", "doorbell", "sensor", "speaker", "tv",
@@ -224,7 +242,7 @@ def new_row(master_row, room):
     typ, native = guess_type(master_row)
     return {"Device": dev, "Room": room, "Type": typ, "Name": "",
             "Description": " ".join(x for x in [master_row.get("Vendor", ""), dev] if x),
-            "Native": native, "Expose": default_expose(typ), "Via": ""}
+            "Native": native, "Expose": default_expose(typ), "Via": "", "AppNames": ""}
 
 
 def _key(h):
@@ -237,12 +255,14 @@ def board(master_rows, rooms, home):
     """Every device for the room board: each home.csv row plus every named
     device in devices.csv that home.csv does not list yet (unassigned)."""
     status, first, seen_as = {}, {}, {}
-    macs, live_ip, any_ip = {}, {}, {}
+    macs, live_ip, any_ip, apps = {}, {}, {}, {}
     for r in master_rows:
         dev = r.get("Device", "").strip()
         if not dev:
             continue
         first.setdefault(dev, r)
+        for p, n in parse_app_names(r.get("AppNames", "")).items():
+            apps.setdefault(dev, {}).setdefault(p, n)
         if status.get(dev) != "online":
             status[dev] = r.get("Status", "")
         # Every MAC (wired + Wi-Fi); the IP of an online MAC beats a stale one.
@@ -284,13 +304,15 @@ def board(master_rows, rooms, home):
         devices.append({"id": key, "device": h["Device"], "name": h["Name"],
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
                         "status": status.get(src, ""),
-                        **net(src, not h["Device"] and bool(via)), "via": via})
+                        **net(src, not h["Device"] and bool(via)), "via": via,
+                        "apps": apps.get(h["Device"]) or parse_app_names(h.get("AppNames", ""))})
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)
             devices.append({"id": dev, "device": dev, "name": "",
                             "type": guess_type(first[dev])[0],
-                            "room": "", "status": status[dev], **net(dev), "via": ""})
+                            "room": "", "status": status[dev], **net(dev), "via": "",
+                            "apps": apps.get(dev, {})})
     # Unnamed MACs the scan still sees, so nothing online is missing; the
     # board asks for a name before one can go in a room.
     for r in master_rows:
@@ -303,7 +325,8 @@ def board(master_rows, rooms, home):
         devices.append({"id": "mac:" + mac, "device": "", "name": "",
                         "type": guess_type(r)[0], "room": "", "status": r.get("Status", ""),
                         "seen_as": host, "ip": r.get("IP", "").strip(), "macs": [mac],
-                        "vendor": r.get("Vendor", "").strip(), "unnamed": True, "via": ""})
+                        "vendor": r.get("Vendor", "").strip(), "unnamed": True, "via": "",
+                        "apps": parse_app_names(r.get("AppNames", ""))})
     return {"rooms": [r["Room"] for r in rooms], "types": TYPES, "devices": devices}
 
 

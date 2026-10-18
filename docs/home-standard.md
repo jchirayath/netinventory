@@ -32,6 +32,7 @@ Two semicolon-separated files in the engine's data directory, next to
 | `Description` | Brand, model and what it controls (no semicolons). Brands live here, never in `Name` | `Kasa HS200 wall switch, 4 recessed cans` |
 | `Native` | The app it is paired with first (its own cloud) | `kasa` |
 | `Expose` | Where it should appear, comma-separated: `ha`, `google`, `alexa`, `apple`, `smartthings` | `ha, google, alexa` |
+| `AppNames` | For a device with no `Device` only: what each app calls it, `app=name; app=name`. Devices with a MAC keep theirs in `devices.csv` (`AppNames`), refreshed on every cloud run. The room board shows an app's name only where it differs from `Name` | `govee=H5054_A00A_Washer` |
 | `Via` | Optional. The `Device` of the hub a device connects or pairs through. Each linked device keeps its own `Room`. With a blank `Device` (no network address of its own) the room board shows the hub's address and status; a device with its own MAC (a Blink camera on Wi-Fi, paired to a sync module) keeps its own | `Govee Hub (H5054 sensors)` |
 
 Devices that nobody controls (phones, laptops, the NAS, the router) stay in

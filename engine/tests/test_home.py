@@ -323,6 +323,18 @@ class TestBoard(unittest.TestCase):
         home.rename(rows, master, [], "Leak Hub", "Govee Hub")      # links follow a rename
         self.assertEqual({r["Via"] for r in rows if not r["Device"]}, {"Govee Hub"})
 
+    def test_app_names_round_trip_and_on_the_board(self):
+        self.assertEqual(home.parse_app_names("tuya=Loft; smartthings=Fan Light; bad; x="),
+                         {"tuya": "Loft", "smartthings": "Fan Light"})
+        self.assertEqual(home.format_app_names({"tuya": "a;b=c", "ha": "  "}), "tuya=a b c")
+        master = [{"Device": "WeMo Study", "MAC": "AA:00:00:00:00:01", "Status": "online",
+                   "AppNames": "smartthings=Study"}]
+        rows = [row(Device="WeMo Study", Name="Office Switch"),
+                row(Device="", Name="Washer Leak Sensor", AppNames="govee=H5054_A00A_Washer")]
+        d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}
+        self.assertEqual(d["WeMo Study"]["apps"], {"smartthings": "Study"})
+        self.assertEqual(d["name:Washer Leak Sensor"]["apps"], {"govee": "H5054_A00A_Washer"})
+
     def test_check_via(self):
         rows = [row(Device="Plug", Via="Hub"), row(Device="", Name="Kitchen Leak Sensor",
                                                   Type="sensor", Via="Gone Hub")]

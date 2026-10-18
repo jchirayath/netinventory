@@ -97,8 +97,10 @@ def subnet_prefix(subnet=None):
     parts = net.split(".")
     return ".".join(parts[:3]) + "." if len(parts) == 4 else "192.168.1."
 
+# AppNames: what each smart-home app calls this MAC ('tuya=Loft; smartthings=Fan
+# Light'), refreshed by cloud runs; it can differ from the friendly Device name.
 FIELDS = ["Device", "MAC", "IP", "Vendor", "Hostname", "Link", "Status",
-          "FirstSeen", "LastSeen", "Source", "Notes", "RSSI"]
+          "FirstSeen", "LastSeen", "Source", "Notes", "RSSI", "AppNames"]
 TODAY = dt.date.today().isoformat()
 
 
@@ -2178,9 +2180,17 @@ def cloud_merge(master, items):
     """Merge cloud connector results into the inventory. Cloud names are the
     user's own app names, so they fill a blank Device and update Hostname.
     Unmatched (no MAC/IP) items go to cloud_devices.csv as a reference list."""
+    import home
     ip2mac = arp_table()
     matched = 0
     ref = []
+    ran = {it["provider"] for it in items}
+    # This run's providers replace their own AppNames entries everywhere (a
+    # device removed from an app loses that name); other providers' stay.
+    apps = {}
+    for mac, row in master.items():
+        a = home.parse_app_names(row.get("AppNames", ""))
+        apps[mac] = {p: n for p, n in a.items() if p not in ran}
     for it in items:
         mac = norm_mac(it["mac"]) if it["mac"] else ""
         if mac.count(":") != 5 and it["ip"]:
@@ -2204,11 +2214,14 @@ def cloud_merge(master, items):
             row["Device"] = it["name"]
         srcs = set(filter(None, row["Source"].split("+"))) | {it["provider"]}
         row["Source"] = "+".join(sorted(srcs))
+        if it["name"]:
+            apps[mac][it["provider"]] = it["name"]
         matched += 1
+    for mac, row in master.items():
+        row["AppNames"] = home.format_app_names(apps.get(mac, {}))
 
     # write the reference list of name-only devices; providers not in this run
     # (e.g. `netinv cloud govee` alone) keep their earlier rows
-    ran = {it["provider"] for it in items}
     kept = []
     if os.path.exists(CLOUD_REF):
         with open(CLOUD_REF, newline="") as f:
@@ -2459,6 +2472,7 @@ h1{font-size:1.2rem;margin:.2rem 0}
 .dev .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dev .ren{width:100%;font:13px system-ui;padding:2px 4px;border:1px solid #9db4d3;border-radius:4px}
 .dev .sub{display:block;font-size:11px;color:#6b7a8c;overflow:hidden;text-overflow:ellipsis}
+.dev .app{display:block;font-size:11px;color:#7a5c00;white-space:normal}
 .dev.unnamed{border-style:dashed;background:#fbfcfd}
 .dev.unnamed .nm{font-style:italic;color:#56606c}
 .dev .net{display:block;font:10.5px ui-monospace,Menlo,monospace;color:#8593a3;
@@ -2519,11 +2533,15 @@ function card(d){
   :[d.via?'via '+d.via:'',d.ip,...d.macs].filter(Boolean);
  if(mode()=='type')nw.unshift(d.room?'⌂ '+d.room:'⌂ no room');
  const net=nw.length?`<span class=net>${nw.map(esc).join(' · ')}</span>`:'';
+ // What each app calls it, only where that differs from the name shown here.
+ const an=Object.entries(d.apps||{}).filter(([p,n])=>n.toLowerCase()!=label(d).toLowerCase());
+ const app=an.length?`<span class=app>${an.map(([p,n])=>`${esc(p)}: ${esc(n)}`).join(' · ')}</span>`:'';
  return `<div class="dev${d.unnamed?' unnamed':''}" draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+
   `<span class=dot style=background:${color(d.status)}></span>`+
-  `<span class=nm>${esc(label(d))}${sub}${net}</span>${ty}</div>`}
+  `<span class=nm>${esc(label(d))}${sub}${app}${net}</span>${ty}</div>`}
 function render(){
- const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.vendor,d.via,d.ip,...d.macs].join(' ').toLowerCase().includes(Q));
+ const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.vendor,d.via,d.ip,...d.macs,
+  ...Object.values(d.apps||{})].join(' ').toLowerCase().includes(Q));
  const cs=cols(),by={};cs.forEach(c=>by[c]=[]);
  shown.forEach(d=>by[colOf(d)].push(d));
  Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));
