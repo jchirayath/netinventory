@@ -2449,7 +2449,8 @@ h1{font-size:1.2rem;margin:.2rem 0}
  white-space:normal}
 .dev .ty{font-size:11px;color:#3a516b;background:#eef2f8;border-radius:8px;padding:0 6px;
  align-self:flex-start;white-space:nowrap}
-.dev .ty.todo{color:#a3acb8;background:#f3f4f6}
+.dev .ty.todo{color:#8a5a00;background:#fff4e5;border:1px dashed #f0c48a}
+.dev .ty[title]{cursor:pointer}.dev .ty[title]:hover{outline:1px solid #9db4d3}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
 .empty{color:#9aa;padding:4px 4px 8px}
 #menu{position:fixed;display:none;background:#fff;border:1px solid #ccd;border-radius:6px;
@@ -2461,8 +2462,6 @@ h1{font-size:1.2rem;margin:.2rem 0}
 #menu .del{color:#b3261e}
 .seg{display:inline-flex}.seg .btn{border-radius:0}.seg .btn:first-child{border-radius:6px 0 0 6px}
 .seg .btn:last-child{border-radius:0 6px 6px 0;border-left:none}.seg .btn.on{background:var(--head);color:#fff}
-.dev .rm{font-size:11px;color:#5b6b7d;background:#f1f3f6;border-radius:8px;padding:0 6px;
- align-self:flex-start;white-space:nowrap}
 </style>
 <h1 id=ttl>Rooms</h1><div id=sum>loading…</div>
 <div id=ro class=ro style=display:none>Read-only: start with
@@ -2495,12 +2494,13 @@ const label=d=>d.name||d.device||d.seen_as||d.vendor||'Unknown device';
 const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
 function card(d){
  const todo=!d.type||d.type=='TODO';
- const ty=mode()=='type'?`<span class=rm>${d.room?esc(d.room):'no room'}</span>`
-  :`<span class="ty${todo?' todo':''}">${todo?'TODO':esc(d.type.replace('_',' '))}</span>`;
+ // The type badge is the type picker: click it to set the type.
+ const ty=`<span class="ty${todo?' todo':''}"${WRITABLE?' title="set type"':''}>${todo?'TODO':esc(d.type.replace('_',' '))}</span>`;
  const tip=[d.unnamed?'unnamed: right-click to name':'',d.name&&d.device&&d.name!=d.device?d.device:'',
   d.seen_as,d.vendor,d.ip,...d.macs].filter(Boolean).join(' · ');
  const sub=d.seen_as&&d.seen_as.toLowerCase()!=label(d).toLowerCase()?`<span class=sub>${esc(d.seen_as)}</span>`:'';
  const nw=d.via?['via '+d.via,d.ip].filter(Boolean):[d.ip,...d.macs].filter(Boolean);
+ if(mode()=='type')nw.unshift(d.room?'⌂ '+d.room:'⌂ no room');
  const net=nw.length?`<span class=net>${nw.map(esc).join(' · ')}</span>`:'';
  return `<div class="dev${d.unnamed?' unnamed':''}" draggable=${WRITABLE} data-id="${esc(d.id)}" title="${esc(tip)}">`+
   `<span class=dot style=background:${color(d.status)}></span>`+
@@ -2560,18 +2560,24 @@ g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
  e.preventDefault();rm.classList.remove('over');const id=e.dataTransfer.getData('text/plain')||dragId;
  dragId=null;if(id)(mode()=='room'?move:retype)(id,rm.dataset.col)});
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
+function showMenu(id,html,x,y){menu.innerHTML=html;menu.dataset.id=id;menu.style.display='block';
+ const w=menu.offsetWidth,h=menu.offsetHeight;
+ menu.style.left=Math.min(x,innerWidth-w-8)+'px';menu.style.top=Math.min(y,innerHeight-h-8)+'px'}
+const typeList=d=>`<div class=hd>Type of ${esc(label(d))}</div>`+['TODO',...B.types].map(t=>
+ `<div data-type="${esc(t)}" class="${t==(d.type||'TODO')?'cur':''}">${esc(tyLabel(t))}</div>`).join('');
+// Click a type badge: pick the type right there.
+g.addEventListener('click',e=>{const b=e.target.closest('.ty');if(!b||!WRITABLE)return;
+ e.stopPropagation();const d=B.devices.find(x=>x.id==b.closest('.dev').dataset.id);if(!d)return;
+ const r=b.getBoundingClientRect();showMenu(d.id,typeList(d),r.left,r.bottom+2)});
 g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!WRITABLE)return;
  e.preventDefault();const d=B.devices.find(x=>x.id==el.dataset.id);
  // Only devices with no MAC can go: a scanned one would come back next scan.
  const del=d.id.startsWith('name:')?'<div data-act=delete class=del>Delete…</div>':'';
  const rooms=`<div class=hd>Move ${esc(label(d))} to</div>`+['',...B.rooms].map(r=>
   `<div data-room="${esc(r)}" class="${r==d.room?'cur':''}">${r?esc(r):'Unassigned'}</div>`).join('');
- const types=`<div class=hd>Type</div>`+['TODO',...B.types].map(t=>
-  `<div data-type="${esc(t)}" class="${t==(d.type||'TODO')?'cur':''}">${esc(tyLabel(t))}</div>`).join('');
- menu.innerHTML=`<div data-act=rename>Rename…</div>${del}`+(mode()=='room'?rooms+types:types+rooms);
- menu.dataset.id=d.id;menu.style.display='block';
- const w=menu.offsetWidth,h=menu.offsetHeight;
- menu.style.left=Math.min(e.clientX,innerWidth-w-8)+'px';menu.style.top=Math.min(e.clientY,innerHeight-h-8)+'px'});
+ const types=typeList(d);
+ showMenu(d.id,`<div data-act=rename>Rename…</div>${del}`+(mode()=='room'?rooms+types:types+rooms),
+  e.clientX,e.clientY)});
 menu.addEventListener('click',e=>{
  if(e.target.closest('[data-act=rename]')){menu.style.display='none';startRename(menu.dataset.id);return}
  // Delete takes a second click (no confirm(): embedded browsers block it).
