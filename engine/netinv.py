@@ -1991,6 +1991,10 @@ def cmd_home(args):
     if args.action == "push" and args.source == "ha":
         _push_ha(args, master, rows)
         return
+    if args.action == "push" and args.rooms_only:
+        print(f"  {args.source}: push only renames devices here, so --rooms-only has "
+              "nothing to do (no rooms API)")
+        return
     if args.action == "push":
         import connectors
         if args.source == "kasa":       # local: match by MAC, rename by IP
@@ -2060,6 +2064,8 @@ def _push_ha(args, master, rows):
         print(f"  ! ha: {e}")
         sys.exit(1)
     plan = home.ha_push_plan(devices, areas, master.values(), rows, home.load_rooms(ROOMS_CSV))
+    if args.rooms_only:                 # keep every HA name as it is
+        plan = [{**p, "name": None} for p in plan if p["area"]]
     if args.device:
         plan = [p for p in plan if args.device in (p["old"], p["name"])]
     missing = sorted({p["area"] for p in plan if p["area"] and not p["area_id"]})
@@ -2979,6 +2985,8 @@ def main():
                     help="push --to ha: create HA areas for rooms it does not have")
     hm.add_argument("--device", help="push: only this device (old or new name)")
     hm.add_argument("--dry-run", action="store_true", help="push: show, change nothing")
+    hm.add_argument("--rooms-only", action="store_true",
+                    help="push: set rooms/areas only; never rename a device in the app")
     hm.set_defaults(func=cmd_home)
 
     r = sub.add_parser("report", help="rebuild reports from devices.csv")
