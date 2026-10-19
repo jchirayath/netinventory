@@ -446,6 +446,45 @@ class TestSlowSweep(unittest.TestCase):
         popen.assert_not_called()
 
 
+class TestPresence(unittest.TestCase):
+    def row(self, mac, status, **kw):
+        r = {k: "" for k in netinv.FIELDS}
+        r.update(MAC=mac, Status=status, IP="10.0.0.1", **kw)
+        return r
+
+    def test_leave_and_back_events(self):
+        master = {"A": self.row("A", "offline", Device="Plug"),     # was online
+                  "B": self.row("B", "online", Device="Cam"),       # was offline
+                  "C": self.row("C", "online")}                     # unchanged
+        before = {"A": "online", "B": "offline", "C": "online"}
+        with mock.patch.object(netinv, "log_events") as log:
+            left, back = netinv.report_presence(master, before)
+        self.assertEqual(([r["MAC"] for r in left], [r["MAC"] for r in back]), (["A"], ["B"]))
+        self.assertEqual([c.kwargs["kind"] for c in log.call_args_list], ["leave", "back"])
+
+    def test_verify_live_keeps_only_hosts_that_answer(self):
+        procs = {"10.0.0.1": 0, "10.0.0.2": 1}
+
+        def popen(argv, **_kw):
+            return mock.Mock(wait=mock.Mock(return_value=procs[argv[-1]]))
+        with mock.patch.object(netinv.subprocess, "Popen", side_effect=popen):
+            got = netinv.verify_live([{"ip": "10.0.0.1"}, {"ip": "10.0.0.2"}, {"ip": ""}])
+        self.assertEqual(got, [{"ip": "10.0.0.1"}])
+
+    def test_event_email_lists_every_detail(self):
+        r = self.row("AA:BB:CC:00:00:01", "online", Device="Pool Camera", Vendor="Amazon",
+                     Hostname="Blink-Device", Link="Wi-Fi 2.4 GHz", FirstSeen="2026-10-18")
+        subject, body = netinv.event_email([("back", r), ("leave", r)], {"Pool Camera": "Pool"})
+        self.assertEqual(subject, "netinventory: 1 came online, 1 went offline")
+        for s in ("CAME ONLINE: Pool Camera", "WENT OFFLINE", "AA:BB:CC:00:00:01",
+                  "10.0.0.1", "Room:     Pool", "Amazon", "Blink-Device", "Wi-Fi 2.4 GHz"):
+            self.assertIn(s, body)
+
+    def test_send_email_without_settings_does_not_raise(self):
+        with mock.patch.object(netinv, "email_creds", return_value=None):
+            self.assertEqual(netinv.send_email("s", "b")[0], False)
+
+
 class TestApplyName(unittest.TestCase):
     def _master(self):
         return {"AA:BB:CC:00:00:01": {k: "" for k in netinv.FIELDS} |

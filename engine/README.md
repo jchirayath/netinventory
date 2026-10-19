@@ -154,7 +154,12 @@ notification.
 ```
 
 `watch` keeps polling (gateway + local scan + SSDP), merging, and alerting until
-you stop it. Each join is captured with its time, IP, MAC, vendor, hostname, and
+you stop it. Each poll also logs a `leave` event when a device that was online
+stops answering and a `back` event when an offline one returns (it pings every
+host, so the time is the poll's, not when the ARP cache lets go ~20 min later).
+`./netinv.py set-email` stores SMTP settings in the Keychain (Gmail: an app
+password) and sends a test; `watch --email` then mails each poll's joins,
+comebacks and leaves with name, room, MAC, IP, vendor and time. Each join is captured with its time, IP, MAC, vendor, hostname, and
 band in `events.csv`. For unattended scheduled runs, install the LaunchAgent:
 
 ```bash

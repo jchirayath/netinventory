@@ -1018,7 +1018,8 @@ def prune_events():
 
 
 def log_events(rows, kind="join"):
-    """Append device events to events.csv (append-only history of joins)."""
+    """Append device events to events.csv (append-only history of joins,
+    leaves and comebacks)."""
     if not rows:
         return
     newfile = not os.path.exists(EVENTS_LOG)
@@ -1044,6 +1045,125 @@ def notify(title, message):
             capture_output=True, timeout=5)
     except Exception:  # noqa: BLE001
         pass
+
+
+def report_presence(master, before_status):
+    """Log 'leave' (was online, not seen now) and 'back' (was offline or
+    defunct, online now) events for known MACs; returns (left, back).
+    before_status: {MAC: Status} captured before this run's merge."""
+    left = [r for m, r in master.items()
+            if before_status.get(m) == "online" and r["Status"] != "online"]
+    back = [r for m, r in master.items()
+            if before_status.get(m) in ("offline", "defunct") and r["Status"] == "online"]
+    log_events(left, kind="leave")
+    log_events(back, kind="back")
+    for sign, rows in (("-", left), ("+", back)):
+        for r in rows:
+            print(f"    {sign} {(r['IP'] or '(no ip)'):15} {r['MAC']}  "
+                  f"{'left' if sign == '-' else 'back'}  {r['Device'] or r['Hostname'] or r['Vendor'] or ''}")
+    return left, back
+
+
+def verify_live(rows, wait=3):
+    """Keep the scan sightings whose IP answers a ping now. The ARP cache
+    keeps a departed device for ~20 minutes, so without this a 'leave' is
+    seen that late; a device that ignores pings will read as away."""
+    flag = "-t" if sys.platform == "darwin" else "-W"
+    procs = [(s, subprocess.Popen(["ping", "-c", "2", flag, str(wait), s["ip"]],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+             for s in rows if s.get("ip")]
+    return [s for s, p in procs if p.wait() == 0]
+
+
+# Email alerts: SMTP settings live in the Keychain (service netinv-cloud-email),
+# set with `netinv set-email`. Gmail needs an app password, not the login one.
+EMAIL_FIELDS = [("smtp_host", False, "SMTP server (Gmail: smtp.gmail.com)"),
+                ("smtp_port", False, "SMTP port (587 = STARTTLS, 465 = SSL)"),
+                ("username", False, "SMTP login (your email address)"),
+                ("password", True, "SMTP password (Gmail: an app password)"),
+                ("to", False, "Send alerts to (email address)")]
+
+
+def email_creds():
+    import connectors
+    out = {f: connectors.kc_get("email", f) for f, _s, _p in EMAIL_FIELDS}
+    return out if all(out.values()) else None
+
+
+def event_email(events, room_of=None):
+    """(subject, body) for one poll's events: [(kind, row)], kind in
+    join/back/leave. room_of: {Device: Room} from home.csv."""
+    room_of = room_of or {}
+    word = {"join": "joined (new)", "back": "came online", "leave": "went offline"}
+    counts = {k: sum(1 for e, _ in events if e == k) for k in word}
+    subject = "netinventory: " + ", ".join(f"{n} {word[k]}" for k, n in counts.items() if n)
+    lines = [f"Network changes at {now_stamp()}", ""]
+    for kind, r in events:
+        lines += [f"{word[kind].upper()}: {r['Device'] or r['Hostname'] or '(unnamed device)'}",
+                  f"  Time:     {now_stamp()}",
+                  f"  MAC:      {r['MAC']}",
+                  f"  IP:       {r['IP'] or '-'}",
+                  f"  Room:     {room_of.get(r['Device'], '') or '-'}",
+                  f"  Vendor:   {r['Vendor'] or '-'}",
+                  f"  Hostname: {r['Hostname'] or '-'}",
+                  f"  Link:     {r['Link'] or '-'}   First seen: {r['FirstSeen'] or '-'}",
+                  ""]
+    return subject, "\n".join(lines)
+
+
+def send_email(subject, body, c=None):
+    """Send one plain-text email with the stored SMTP settings. Returns
+    (ok, message); never raises, so a mail outage cannot stop a watch."""
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    c = c or email_creds()
+    if not c:
+        return False, "email not configured; run: netinv set-email"
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subject, c["username"], c["to"]
+    msg.set_content(body)
+    try:
+        port = int(c["smtp_port"])
+        ctx = ssl.create_default_context()
+        if port == 465:
+            server = smtplib.SMTP_SSL(c["smtp_host"], port, context=ctx, timeout=20)
+        else:
+            server = smtplib.SMTP(c["smtp_host"], port, timeout=20)
+            server.starttls(context=ctx)
+        with server:
+            server.login(c["username"], c["password"])
+            server.send_message(msg)
+        return True, "sent"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def email_events(master, new, left, back):
+    """Email this poll's joins, comebacks and leaves (nothing if none)."""
+    events = ([("join", r) for r in new] + [("back", r) for r in back]
+              + [("leave", r) for r in left])
+    if not events:
+        return
+    import home
+    room_of = {h["Device"]: h["Room"] for h in home.load_home(HOME_CSV)
+               if h["Device"] and h["Room"] != home.TODO}
+    ok, msg = send_email(*event_email(events, room_of))
+    print(f"  email: {msg}")
+
+
+def cmd_set_email(args):
+    import getpass
+    import connectors
+    for field, is_secret, prompt in EMAIL_FIELDS:
+        val = getpass.getpass(f"{prompt}: ") if is_secret else input(f"{prompt}: ").strip()
+        if not val:
+            print(f"  aborted: '{field}' empty")
+            return
+        connectors.kc_set("email", field, val)
+    print("  stored email settings in Keychain; sending a test…")
+    ok, msg = send_email("netinventory: test alert", "Email alerts are set up.")
+    print(f"  {'ok' if ok else 'FAILED'}: {msg}")
 
 
 def report_new(master, before_macs, do_notify=False):
@@ -1659,6 +1779,7 @@ def cmd_update(args):
         if not args.no_mdns:
             sightings += mdns_discover()
 
+    before_status = {m: r["Status"] for m, r in master.items()}
     seen = merge(master, sightings)
     filled = enrich_vendors(master)
     if filled:
@@ -1685,6 +1806,7 @@ def cmd_update(args):
     # actually looked at the live network this run
     if do_local or args.router:
         report_new(master, before, do_notify=args.notify)
+        report_presence(master, before_status)
     print(f"\n  {len(master)} MACs in {MASTER}  ·  {len(seen)} online this run")
     unnamed = sum(1 for r in master.values() if not r["Device"])
     if unnamed:
@@ -1708,10 +1830,13 @@ def cmd_watch(args):
         n += 1
         master = load_master()
         before = set(master)
+        before_status = {m: r["Status"] for m, r in master.items()}
         sightings = []
         if use_router and creds[1]:
             sightings += router_scan(*creds)
-        sightings += local_scan(do_sweep=not args.no_sweep)
+        # Only hosts answering now count, so leave/back times are this poll's,
+        # not whenever the ARP cache lets go (~20 min later).
+        sightings += verify_live(local_scan(do_sweep=not args.no_sweep))
         if not args.no_ssdp:
             sightings += ssdp_discover()
         if not args.no_mdns:
@@ -1721,8 +1846,11 @@ def cmd_watch(args):
         save_master(master)
         write_reports(master)
         new = report_new(master, before, do_notify=args.notify)
-        if not new:
-            print(f"  [{now_stamp()}] poll #{n}: {len(seen)} online, no new devices")
+        left, back = report_presence(master, before_status)
+        print(f"  [{now_stamp()}] poll #{n}: {len(seen)} online, {len(new)} new, "
+              f"{len(left)} left, {len(back)} back")
+        if args.email:
+            email_events(master, new, left, back)
         if args.once:
             break
         time.sleep(args.interval)
@@ -3086,7 +3214,11 @@ def main():
     w.add_argument("--no-mdns", action="store_true", help="skip mDNS/DNS-SD name discovery")
     w.add_argument("--notify", action="store_true", help="macOS notification on new device")
     w.add_argument("--once", action="store_true", help="run a single poll and exit")
+    w.add_argument("--email", action="store_true",
+                   help="email joins, comebacks and leaves (set up with set-email)")
     w.set_defaults(func=cmd_watch)
+    se = sub.add_parser("set-email", help="store SMTP settings for email alerts in Keychain")
+    se.set_defaults(func=cmd_set_email)
 
     n = sub.add_parser("name", help="assign MAC(s) to a friendly device name")
     n.add_argument("device")
