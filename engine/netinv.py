@@ -1106,17 +1106,53 @@ def verify_live(rows, wait=3):
 
 # Email alerts: SMTP settings live in the Keychain (service netinv-cloud-email),
 # set with `netinv set-email`. Gmail needs an app password, not the login one.
+# With no password stored, mail goes out through Mail.app's own account instead.
 EMAIL_FIELDS = [("smtp_host", False, "SMTP server (Gmail: smtp.gmail.com)"),
                 ("smtp_port", False, "SMTP port (587 = STARTTLS, 465 = SSL)"),
                 ("username", False, "SMTP login (your email address)"),
-                ("password", True, "SMTP password (Gmail: an app password)"),
+                ("password", True, "SMTP password (Gmail: an app password; "
+                                   "blank = send through Mail.app)"),
                 ("to", False, "Send alerts to (email address)")]
 
 
-def email_creds():
+def email_settings():
+    """Whatever email fields are stored, missing ones as None."""
     import connectors
-    out = {f: connectors.kc_get("email", f) for f, _s, _p in EMAIL_FIELDS}
+    return {f: connectors.kc_get("email", f) for f, _s, _p in EMAIL_FIELDS}
+
+
+def email_creds():
+    out = email_settings()
     return out if all(out.values()) else None
+
+
+# Arguments go in as argv, never spliced into the script, so a device name with
+# quotes in it cannot break (or inject into) the AppleScript.
+MAIL_APP_SCRIPT = """on run argv
+  set {theSubject, theBody, theTo, theFrom} to argv
+  tell application "Mail"
+    set m to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+    if theFrom is not "" then set sender of m to theFrom
+    tell m to make new to recipient at end of to recipients with properties {address:theTo}
+    send m
+  end tell
+end run"""
+
+
+def send_via_mail_app(subject, body, to, sender=""):
+    """Hand one message to Mail.app, which sends it with an account it already
+    has. Returns (ok, message); never raises."""
+    if sys.platform != "darwin":
+        return False, "Mail.app is macOS only"
+    try:
+        r = subprocess.run(["osascript", "-", subject, body, to, sender or ""],
+                           input=MAIL_APP_SCRIPT, capture_output=True, text=True,
+                           timeout=60)
+    except Exception as e:  # noqa: BLE001
+        return False, f"Mail.app: {e}"
+    if r.returncode != 0:
+        return False, f"Mail.app: {(r.stderr or r.stdout).strip()}"
+    return True, "sent via Mail.app"
 
 
 def event_email(events, room_of=None):
@@ -1141,14 +1177,26 @@ def event_email(events, room_of=None):
 
 
 def send_email(subject, body, c=None):
-    """Send one plain-text email with the stored SMTP settings. Returns
-    (ok, message); never raises, so a mail outage cannot stop a watch."""
+    """Send one plain-text email: SMTP when a full login is stored, otherwise
+    (or when SMTP fails) through Mail.app. Returns (ok, message); never
+    raises, so a mail outage cannot stop a watch."""
+    s = c or email_settings()
+    if not s.get("to"):
+        return False, "email not configured; run: netinv set-email"
+    if all(s.get(f) for f, _s, _p in EMAIL_FIELDS):
+        ok, msg = send_smtp(subject, body, s)
+        if ok:
+            return ok, msg
+        ok, mail_msg = send_via_mail_app(subject, body, s["to"], s.get("username"))
+        return ok, (f"{mail_msg} (SMTP failed: {msg})" if ok
+                    else f"SMTP: {msg}; {mail_msg}")
+    return send_via_mail_app(subject, body, s["to"], s.get("username"))
+
+
+def send_smtp(subject, body, c):
     import smtplib
     import ssl
     from email.message import EmailMessage
-    c = c or email_creds()
-    if not c:
-        return False, "email not configured; run: netinv set-email"
     msg = EmailMessage()
     msg["Subject"], msg["From"], msg["To"] = subject, c["username"], c["to"]
     msg.set_content(body)
@@ -1186,6 +1234,9 @@ def cmd_set_email(args):
     import connectors
     for field, is_secret, prompt in EMAIL_FIELDS:
         val = getpass.getpass(f"{prompt}: ") if is_secret else input(f"{prompt}: ").strip()
+        if not val and field == "password":
+            connectors.kc_delete("email", field)    # no SMTP login: use Mail.app
+            continue
         if not val:
             print(f"  aborted: '{field}' empty")
             return

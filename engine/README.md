@@ -159,8 +159,21 @@ stops answering and a `back` event when an offline one returns (it pings every
 host, so the time is the poll's, not when the ARP cache lets go ~20 min later).
 `./netinv.py set-email` stores SMTP settings in the Keychain (Gmail: an app
 password) and sends a test; `watch --email` then mails each poll's joins,
-comebacks and leaves with name, room, MAC, IP, vendor and time. Each join is captured with its time, IP, MAC, vendor, hostname, and
-band in `events.csv`. For unattended scheduled runs, install the LaunchAgent:
+comebacks and leaves with name, room, MAC, IP, vendor and time. Leave the
+password blank and mail goes out through Mail.app's own account instead (it is
+also the fallback when SMTP fails); macOS asks once to let the job control Mail.
+Each join is captured with its time, IP, MAC, vendor, hostname, and
+band in `events.csv`. To keep `watch --email` running in the background (starts
+at login, restarted if it dies), use `scan-jobs.sh` at the repo root:
+
+```bash
+../scan-jobs.sh start        # default: --interval 120 --no-router --email
+../scan-jobs.sh status       # loaded? running? last log lines
+../scan-jobs.sh logs         # follow engine/netinv-watch.log
+../scan-jobs.sh stop         # also stops a watch started by hand
+```
+
+For a periodic full refresh instead, install the update LaunchAgent:
 
 ```bash
 ./contrib/install-launchagent.sh 1800     # run ./update.sh every 30 min
