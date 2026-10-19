@@ -15,6 +15,10 @@ APP_ROOM_FIELDS = ["App", "Device", "Room", "Id"]   # app_rooms.csv, from `home 
 # devices with a MAC carry theirs in devices.csv, refreshed by cloud runs.
 HOME_FIELDS = ["Device", "Room", "Type", "Name", "Description", "Native", "Expose", "Via",
                "AppNames"]
+# types.csv and apps.csv hold the board's own edits; until one exists the
+# built-in TYPES / APP_CATALOG below are the list.
+TYPE_FIELDS = ["Type", "Infra"]          # Infra 'yes': never exposed to voice apps
+APP_FIELDS = ["Key", "Label", "Portal", "Match"]
 
 
 def parse_app_names(s):
@@ -150,27 +154,207 @@ def app_key(name):
     return APP_ALIASES.get(n, n)
 
 
-def guess_app(row):
-    """The catalog app a device most likely belongs to, from its name,
-    hostname and vendor; '' if nothing matches."""
+def default_apps():
+    """APP_CATALOG as apps.csv rows: the list until someone edits it."""
+    return [{"Key": k, "Label": lbl, "Portal": url, "Match": pat}
+            for k, lbl, url, pat in APP_CATALOG]
+
+
+def load_apps(path):
+    """apps.csv (Key;Label;Portal;Match), in match order; the built-in
+    catalog while the file does not exist."""
+    return _read(path, APP_FIELDS) if os.path.exists(path) else default_apps()
+
+
+def _match(pattern, hay):
+    try:
+        return bool(pattern) and re.search(pattern, hay) is not None
+    except re.error:                 # a hand-edited apps.csv; the board rejects these
+        return False
+
+
+def guess_app(row, apps=None):
+    """The app a device most likely belongs to, from its name, hostname and
+    vendor; '' if nothing matches."""
     hay = " ".join([row.get("Device", ""), row.get("Hostname", ""),
                     row.get("Vendor", "")]).lower()
-    return next((k for k, _, _, pat in APP_CATALOG if re.search(pat, hay)), "")
+    return next((a["Key"] for a in (default_apps() if apps is None else apps) if _match(a["Match"], hay)), "")
 
 
-def device_app(native, apps, row):
+def device_app(native, reported, row, apps=None):
     """(app, set): a set Native wins; then the vendor cloud that reports the
     device (its AppNames, hubs aside); then a guess from name and vendor."""
     if native.strip():
         n = app_key(native)
         return ("" if n == NO_APP else n), True
-    cloud = [app_key(p) for p in apps if app_key(p) not in AGGREGATORS]
-    return (cloud[0] if cloud else guess_app(row)), False
+    cloud = [app_key(p) for p in reported if app_key(p) not in AGGREGATORS]
+    return (cloud[0] if cloud else guess_app(row, apps)), False
 
 
-def app_catalog():
-    """The catalog as the board sends it: [{key, label, portal}]."""
-    return [{"key": k, "label": lbl, "portal": url} for k, lbl, url, _ in APP_CATALOG]
+def app_catalog(apps=None):
+    """The apps as the board sends them: [{key, label, portal, match}],
+    by label (match order is the file's)."""
+    out = [{"key": a["Key"], "label": a["Label"] or a["Key"], "portal": a["Portal"],
+            "match": a["Match"]} for a in (default_apps() if apps is None else apps) if a["Key"]]
+    return sorted(out, key=lambda a: a["label"].lower())
+
+
+_APP_KEY = re.compile(r"^[a-z][a-z0-9]{0,23}$")
+_PORTAL = re.compile(r"^https?://[^\s\"'<>]+$")
+
+
+def _app_fields(label, portal, match):
+    """Cleaned (label, portal, match); ValueError if one is not usable."""
+    label, portal, match = " ".join(label.split()), portal.strip(), match.strip()
+    if not label:
+        raise ValueError("app name required")
+    if len(label) > 40:
+        raise ValueError("app name is longer than 40 characters")
+    if portal and portal.lower() != LOCAL and not _PORTAL.match(portal):
+        raise ValueError("portal must be an http(s):// address, 'local', or blank")
+    if len(match) > 200:
+        raise ValueError("match is longer than 200 characters")
+    try:
+        re.compile(match)
+    except re.error as e:
+        raise ValueError(f"match is not a valid pattern: {e}") from None
+    return label, (LOCAL if portal.lower() == LOCAL else portal), match.lower()
+
+
+def _find_app(apps, key):
+    return next((a for a in apps if a["Key"] == app_key(key)), None)
+
+
+def add_app(apps, label, portal="", match=""):
+    """Add an app; its key comes from the name ('Ring Video' -> 'ringvideo').
+    A new app goes first in match order, so a brand beats the parent company
+    an older app matches on (Ring before Amazon). Returns the key."""
+    label, portal, match = _app_fields(label, portal, match)
+    key = re.sub(r"[^a-z0-9]", "", label.lower())[:24]
+    if not _APP_KEY.match(key):
+        raise ValueError("app name must start with a letter")
+    if key == NO_APP or key in APP_ALIASES or _find_app(apps, key):
+        raise ValueError(f"an app with key '{key}' already exists")
+    apps.insert(0, {"Key": key, "Label": label, "Portal": portal, "Match": match})
+    return key
+
+
+def edit_app(apps, key, label, portal, match):
+    """Change an app's name, portal or match. The key stays: home.csv Native
+    and the cloud connectors refer to it."""
+    row = _find_app(apps, key)
+    if row is None:
+        raise ValueError(f"unknown app '{key}'")
+    row["Label"], row["Portal"], row["Match"] = _app_fields(label, portal, match)
+    return row["Key"]
+
+
+def default_types():
+    """TYPES as types.csv rows: the list until someone edits it."""
+    return [{"Type": t, "Infra": "yes" if t in INFRA_TYPES else ""} for t in TYPES]
+
+
+def load_types(path):
+    """types.csv (Type;Infra); the built-in TYPES while it does not exist."""
+    return _read(path, TYPE_FIELDS) if os.path.exists(path) else default_types()
+
+
+def type_names(types=None):
+    return [t["Type"] for t in (default_types() if types is None else types) if t["Type"]]
+
+
+def infra_types(types=None):
+    """Types never offered to a voice app (hubs, network gear)."""
+    return {t["Type"] for t in (default_types() if types is None else types)
+            if t["Infra"].strip().lower() in ("yes", "y", "true", "1")}
+
+
+_TYPE_KEY = re.compile(r"^[a-z][a-z0-9_]{0,29}$")
+
+
+def type_key(name):
+    """'Garage Door' -> 'garage_door'; ValueError if it cannot be a type."""
+    key = "_".join(re.sub(r"[-\s]+", " ", name.strip().lower()).split())
+    if not key:
+        raise ValueError("type name required")
+    if not _TYPE_KEY.match(key) or key == TODO.lower():
+        raise ValueError("a type is letters, digits and spaces, starting with a letter "
+                         "(at most 30)")
+    return key
+
+
+def _find_type(types, typ):
+    return next((t for t in types if t["Type"] == typ), None)
+
+
+def _retype(h, new, infra_before, infra_after):
+    """Point one home.csv row at another type. An Expose still at the old
+    type's default follows the new one (a hub stops going to voice apps)."""
+    if h["Expose"] == default_expose(h["Type"], infra_before):
+        h["Expose"] = default_expose(new, infra_after)
+    h["Type"] = new
+
+
+def add_type(types, name, infra=False):
+    """Add a type; returns its key ('Pool Pump' -> 'pool_pump')."""
+    key = type_key(name)
+    if _find_type(types, key):
+        raise ValueError(f"type '{key}' already exists")
+    types.append({"Type": key, "Infra": "yes" if infra else ""})
+    return key
+
+
+def edit_type(types, home, typ, name, infra):
+    """Rename a type and/or set whether it is infrastructure. Its home.csv
+    devices follow. Returns (key, devices changed)."""
+    row = _find_type(types, typ)
+    if row is None:
+        raise ValueError(f"unknown type '{typ}'")
+    key = type_key(name) if name.strip() else typ
+    if key != typ and _find_type(types, key):
+        raise ValueError(f"type '{key}' already exists")
+    before = infra_types(types)
+    row["Type"], row["Infra"] = key, "yes" if infra else ""
+    after = infra_types(types)
+    moved = 0
+    for h in home:
+        if h["Type"] == typ:
+            _retype(h, key, before, after)
+            moved += 1
+    return key, moved
+
+
+def delete_type(types, home, typ, move_to=""):
+    """Drop a type; its home.csv devices move to `move_to` (another type) or
+    to TODO. Returns how many devices moved."""
+    row = _find_type(types, typ)
+    if row is None:
+        raise ValueError(f"unknown type '{typ}'")
+    if move_to and (move_to == typ or not _find_type(types, move_to)):
+        raise ValueError(f"cannot move devices to '{move_to}'")
+    infra = infra_types(types)
+    moved = 0
+    for h in home:
+        if h["Type"] == typ:
+            _retype(h, move_to or TODO, infra, infra)
+            moved += 1
+    types.remove(row)
+    return moved
+
+
+def delete_app(apps, home, key):
+    """Drop an app; its home.csv devices go back to a guess (Native blank).
+    Returns how many devices it held."""
+    row = _find_app(apps, key)
+    if row is None:
+        raise ValueError(f"unknown app '{key}'")
+    apps.remove(row)
+    moved = 0
+    for h in home:
+        if app_key(h["Native"]) == row["Key"]:
+            h["Native"] = ""
+            moved += 1
+    return moved
 
 
 # Seed for a missing rooms.csv; Floor is left TODO so `check` asks for it.
@@ -289,8 +473,10 @@ def guess_type(row):
     return TODO, native
 
 
-def default_expose(typ):
-    if typ in INFRA_TYPES or typ == TODO:
+def default_expose(typ, infra=None):
+    """Where a new device of this type goes; infra is the set of
+    infrastructure types (the built-in ones if None)."""
+    if typ in (INFRA_TYPES if infra is None else infra) or typ == TODO:
         return ""
     if typ == "speaker":        # a voice speaker is the endpoint, not a target
         return "ha"
@@ -333,7 +519,7 @@ def _key(h):
     return h["Device"] or ("name:" + h["Name"] if h["Name"] else "")
 
 
-def board(master_rows, rooms, home):
+def board(master_rows, rooms, home, types=None, catalog=None):
     """Every device for the room board: each home.csv row plus every named
     device in devices.csv that home.csv does not list yet (unassigned)."""
     status, first, seen_as = {}, {}, {}
@@ -390,7 +576,7 @@ def board(master_rows, rooms, home):
         scanned = first.get(h["Device"], {})
         hay = {"Device": h["Device"] or h["Name"], "Hostname": scanned.get("Hostname", ""),
                "Vendor": " ".join([scanned.get("Vendor", ""), h["Description"]])}
-        app, app_set = device_app(h.get("Native", ""), reported, hay)
+        app, app_set = device_app(h.get("Native", ""), reported, hay, catalog)
         devices.append({"id": key, "device": h["Device"], "name": h["Name"],
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
                         "status": status.get(src, ""),
@@ -399,7 +585,7 @@ def board(master_rows, rooms, home):
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)
-            app, _ = device_app("", apps.get(dev, {}), first[dev])
+            app, _ = device_app("", apps.get(dev, {}), first[dev], catalog)
             devices.append({"id": dev, "device": dev, "name": "",
                             "type": guess_type(first[dev])[0],
                             "room": "", "status": status[dev], **net(dev), "via": "",
@@ -418,7 +604,7 @@ def board(master_rows, rooms, home):
                         "type": guess_type(r)[0], "room": "", "status": r.get("Status", ""),
                         "seen_as": host, "ip": r.get("IP", "").strip(), "macs": [mac],
                         "vendor": r.get("Vendor", "").strip(), "unnamed": True, "via": "",
-                        "apps": reported, "app": device_app("", reported, r)[0],
+                        "apps": reported, "app": device_app("", reported, r, catalog)[0],
                         "app_set": False})
     # Every app column a device sits in: its own app, then each app that
     # reports it (a Kasa plug also shows under Home Assistant).
@@ -427,11 +613,17 @@ def board(master_rows, rooms, home):
     # The platforms that reported at least one device (from AppNames).
     platforms = sorted({p for d in devices for p in d["apps"]})
     # Every catalog app, then any app a device names that the catalog lacks.
-    catalog = app_catalog()
-    extra = sorted({k for d in devices for k in d["in_apps"] if k not in APP_KEYS})
-    catalog += [{"key": k, "label": k, "portal": ""} for k in extra]
-    return {"rooms": [r["Room"] for r in rooms], "types": TYPES, "platforms": platforms,
-            "apps": catalog, "devices": devices}
+    known = app_catalog(catalog)
+    keys = {a["key"] for a in known}
+    extra = sorted({k for d in devices for k in d["in_apps"] if k not in keys})
+    known += [{"key": k, "label": k, "portal": "", "match": "", "extra": True} for k in extra]
+    types = default_types() if types is None else types
+    return {"rooms": [r["Room"] for r in rooms], "types": type_names(types),
+            "platforms": platforms, "apps": known, "devices": devices,
+            # what the board's edit forms show
+            "room_info": [{"room": r["Room"], "floor": r["Floor"], "aliases": r["Aliases"]}
+                          for r in rooms],
+            "infra": sorted(infra_types(types))}
 
 
 def set_room(home, master_rows, key, room):
@@ -452,32 +644,32 @@ def set_room(home, master_rows, key, room):
     return row
 
 
-def set_type(home, master_rows, key, typ):
+def set_type(home, master_rows, key, typ, types=None):
     """Set one device's Type ('' = TODO). A device not yet in home.csv gets a
     drafted row. An Expose still at the old type's default follows the new
     type (so a hub stops being offered to voice apps). Returns the row, or
     None if the key is unknown; raises ValueError for an unknown type."""
     typ = typ or TODO
-    if typ != TODO and typ not in TYPES:
+    if typ != TODO and typ not in type_names(types):
         raise ValueError(f"unknown type '{typ}'")
     row = next((h for h in home if _key(h) == key), None)
     if row is None and set_room(home, master_rows, key, TODO) is not None:
         row = home[-1]
     if row is None:
         return None
-    if row["Expose"] == default_expose(row["Type"]):
-        row["Expose"] = default_expose(typ)
-    row["Type"] = typ
+    infra = infra_types(types)
+    _retype(row, typ, infra, infra)
     return row
 
 
-def set_app(home, master_rows, key, app):
+def set_app(home, master_rows, key, app, catalog=None):
     """Set the app one device belongs to (home.csv Native): a catalog key,
     NO_APP for "no app", or '' to go back to the guess. A device not yet in
     home.csv gets a drafted row. Returns the row, or None if the key is
     unknown; raises ValueError for an app the catalog lacks."""
     app = app_key(app)
-    if app and app != NO_APP and app not in APP_KEYS:
+    if app and app != NO_APP and not _find_app(default_apps() if catalog is None else catalog,
+                                                app):
         raise ValueError(f"unknown app '{app}'")
     row = next((h for h in home if _key(h) == key), None)
     if row is None and set_room(home, master_rows, key, TODO) is not None:
@@ -716,6 +908,30 @@ def delete_room(rooms, home, room, move_to=""):
     return moved
 
 
+def edit_room(rooms, room, floor, aliases):
+    """Set a room's Floor and Aliases (comma-separated). An alias another room
+    already uses, as its name or an alias, is refused: it would map twice."""
+    row = _find_room(rooms, room)
+    if row is None:
+        raise ValueError(f"unknown room '{room}'")
+    floor = " ".join(floor.split())
+    if len(floor) > 20:
+        raise ValueError("floor is longer than 20 characters")
+    if ";" in floor + aliases:
+        raise ValueError("no semicolons")
+    words = room_words([r for r in rooms if r is not row])
+    clean, seen = [], {row["Room"].lower()}
+    for a in map(clean_room, split_list(aliases)):
+        if a.lower() in seen:
+            continue
+        if a.lower() in words:
+            raise ValueError(f"'{a}' is already used by room '{words[a.lower()]}'")
+        seen.add(a.lower())
+        clean.append(a)
+    row["Floor"], row["Aliases"] = floor or TODO, ", ".join(clean)
+    return row
+
+
 def rename_room(rooms, home, room, new):
     """Rename a room in rooms.csv and on every home.csv device in it. The old
     name becomes an alias, so an app room or a Name prefix that used it still
@@ -744,7 +960,7 @@ def rename_room(rooms, home, room, new):
     return moved
 
 
-def check(rooms, home, master_names=None):
+def check(rooms, home, master_names=None, types=None):
     """Validate against docs/home-standard.md. Returns (errors, warnings),
     each a list of strings."""
     errors, warnings = [], []
@@ -770,8 +986,8 @@ def check(rooms, home, master_names=None):
             errors.append(f"{where}: Room '{room}' is not in rooms.csv")
         if typ == TODO or not typ:
             errors.append(f"{where}: Type not set")
-        elif typ not in TYPES:
-            errors.append(f"{where}: Type '{typ}' is not one of {', '.join(TYPES)}")
+        elif typ not in type_names(types):
+            errors.append(f"{where}: Type '{typ}' is not one of {', '.join(type_names(types))}")
         errors += [f"{where}: {e}" for e in name_problems(name, room, words)]
         if name:
             key = name.lower()
@@ -783,7 +999,7 @@ def check(rooms, home, master_names=None):
         if bad:
             errors.append(f"{where}: Expose has unknown app(s) {', '.join(bad)}; "
                           f"use {', '.join(sorted(APPS))}")
-        if typ in INFRA_TYPES and VOICE_APPS & set(expose):
+        if typ in infra_types(types) and VOICE_APPS & set(expose):
             errors.append(f"{where}: '{typ}' is infrastructure; do not expose it "
                           "to google, alexa or apple")
         if h["Device"] and master_names is not None and h["Device"] not in master_names:

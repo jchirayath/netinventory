@@ -54,6 +54,8 @@ EVENTS_LOG = os.path.join(DATA_DIR, "events.csv")
 ROOMS_CSV = os.path.join(DATA_DIR, "rooms.csv")      # docs/home-standard.md
 HOME_CSV = os.path.join(DATA_DIR, "home.csv")
 APP_ROOMS_CSV = os.path.join(DATA_DIR, "app_rooms.csv")  # written by `home rooms`
+TYPES_CSV = os.path.join(DATA_DIR, "types.csv")  # board edits; built-in list until then
+APPS_CSV = os.path.join(DATA_DIR, "apps.csv")
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 def _load_config():
@@ -2283,7 +2285,7 @@ def cmd_home(args):
         print(f"  added {len(new)} device(s) to {HOME_CSV}; {todo} need a room or type")
         return
     names = {r["Device"] for r in master.values() if r["Device"]}
-    errors, warnings = home.check(rooms, rows, names)
+    errors, warnings = home.check(rooms, rows, names, home.load_types(TYPES_CSV))
     for w in warnings:
         print(f"  warn  {w}")
     for e in errors:
@@ -2840,6 +2842,18 @@ h1{font-size:1.2rem;margin:.2rem 0}
 .room h2 .portal:hover{opacity:1;text-decoration:underline}
 .dev .guess{font-size:10.5px;color:#8593a3;font-style:italic}
 .dev .open{font-size:11px;text-decoration:none;color:#3a516b;align-self:flex-start}
+.room h2 .hed{cursor:pointer;opacity:.7;margin-left:6px;font-weight:400}.room h2 .hed:hover{opacity:1}
+#ed{position:fixed;inset:0;background:#0004;display:none;align-items:flex-start;justify-content:center;
+ padding-top:12vh;z-index:20}
+#ed form{background:#fff;border-radius:8px;box-shadow:0 8px 30px #0003;padding:14px 16px;width:min(26rem,calc(100vw - 32px))}
+#ed h3{margin:0 0 10px;font-size:14px}
+#ed label{display:block;margin:8px 0 2px;color:#3a516b;font-size:12px}
+#ed input[type=text]{width:100%;padding:5px 8px;font:13px system-ui;border:1px solid #cdd;border-radius:6px}
+#ed .chk{display:flex;gap:6px;align-items:center;color:#111;font-size:13px}
+#ed .hint{font-size:11px;color:#8593a3;margin-top:2px}
+#ed .err{color:#b3261e;font-size:12px;min-height:1em;margin-top:8px}
+#ed .row{display:flex;justify-content:flex-end;gap:6px;margin-top:10px}
+#ed .pri{background:var(--head);color:#fff;border-color:var(--head)}
 </style>
 <h1 id=ttl>Rooms</h1><div id=sum>loading…</div>
 <div id=ro class=ro style=display:none>Read-only: start with
@@ -2859,6 +2873,9 @@ h1{font-size:1.2rem;margin:.2rem 0}
 <div id=msg class=ro style=display:none></div>
 <div class=grid id=g></div>
 <div id=menu></div>
+<div id=ed><form id=edf autocomplete=off><h3 id=edt></h3><div id=edb></div><div class=err id=ede></div>
+ <div class=row><button class=btn type=button id=edc>Cancel</button><button class="btn pri" type=submit>Save</button></div>
+</form></div>
 <script>
 const WRITABLE=__WRITABLE__;
 let B={rooms:[],types:[],apps:[],devices:[]},Q='';
@@ -2942,7 +2959,8 @@ function render(){
  // While filtering, only the columns with a match are worth the space.
  const cs=filtering()?all.filter(c=>by[c].length):all;
  g.innerHTML=cs.map(c=>`<div class="room${c==first?' unassigned':''}" data-col="${esc(c)}">`+
-  `<h2><span>${esc(colName(c))}${portalLink(c)}</span><span class=n>${by[c].length}</span></h2>`+
+  `<h2><span>${esc(colName(c))}${portalLink(c)}${editable(c)?'<span class=hed title="edit">✎</span>':''}</span>`+
+  `<span class=n>${by[c].length}</span></h2>`+
   `<div class=list>${by[c].map(d=>card(d,c)).join('')||'<div class=empty>drop devices here</div>'}</div></div>`).join('')
   ||'<div class=empty>no devices match the filters</div>';
  const un=B.devices.filter(d=>!d.room).length,nn=B.devices.filter(d=>d.unnamed).length,
@@ -2954,7 +2972,8 @@ function render(){
  document.title='netinventory '+ttl.textContent.toLowerCase();
  byroom.classList.toggle('on',mode()=='room');bytype.classList.toggle('on',mode()=='type');
  byapp.classList.toggle('on',mode()=='app');
- addf.style.display=WRITABLE&&mode()=='room'?'flex':'none'}
+ addf.style.display=WRITABLE?'flex':'none';
+ newroom.placeholder='new '+mode()+' name';add.textContent='+ '+{room:'Room',type:'Type',app:'App'}[mode()]}
 async function post(path,body){
  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const j=await r.json().catch(()=>({}));
@@ -3006,27 +3025,74 @@ g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
  e.preventDefault();rm.classList.remove('over');const id=e.dataTransfer.getData('text/plain')||dragId;
  dragId=null;if(id&&canDrag())({room:move,type:retype,app:reapp})[mode()](id,rm.dataset.col)});
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
-async function deleteRoom(room,to){
- try{const j=await post('/api/room-delete',{room,to});
-  B.rooms=B.rooms.filter(r=>r!=room);B.devices.forEach(d=>{if(d.room==room)d.room=to});render();
-  say(`Deleted room '${room}'`+(j.moved?`; ${j.moved} device${j.moved==1?'':'s'} moved to ${to||'Unassigned'}.`:'.'))}
- catch(e){say('Delete room failed: '+e.message)}}
-// Rename a room in place in its header: Enter saves, Escape or leaving cancels.
-function startRoomRename(room){
- const h=[...g.querySelectorAll('.room')].find(x=>x.dataset.col==room);if(!h)return;
- editing=true;const sp=h.querySelector('h2 span');
- sp.innerHTML=`<input class=ren value="${esc(room)}" maxlength=40 style="color:#111">`;
- const inp=sp.querySelector('input');inp.focus();inp.select();let done=false;
- const finish=async save=>{if(done)return;done=true;const name=inp.value.trim();
-  if(save&&name&&name!=room){
-   try{const j=await post('/api/room-rename',{room,name});
-    B.rooms=B.rooms.map(r=>r==room?j.room:r);B.devices.forEach(d=>{if(d.room==room)d.room=j.room});
-    say(`Renamed '${room}' to '${j.room}'; '${room}' is kept as an alias.`)}
-   catch(e){say('Rename room failed: '+e.message)}}
-  editing=false;render()};
- inp.addEventListener('keydown',e=>{if(e.key=='Enter')finish(true);if(e.key=='Escape')finish(false)});
- inp.addEventListener('blur',()=>finish(false))}
-function showMenu(id,html,x,y){menu.innerHTML=html;menu.dataset.id=id;menu.dataset.room='';menu.style.display='block';
+// ── Categories: each tab's columns (rooms, types, apps) can be added, edited
+// and deleted. The first column (Unassigned / TODO / No app) is not one, nor
+// is an app only a cloud report names (it is not in the list to edit).
+const editable=c=>{const cs=cols();return WRITABLE&&!!c&&c!=cs[0]&&cs.includes(c)
+ &&(mode()!='app'||!(appOf(c)||{}).extra)};
+const owns=(k,c)=>d=>k=='room'?d.room==c:k=='type'?d.type==c:d.app==c;
+const ownCount=(k,c)=>B.devices.filter(owns(k,c)).length;
+const n_=(n,w)=>`${n} ${w}${n==1?'':'s'}`;
+async function deleteCat(k,c,to){
+ const name=k=='app'?appLabel(c):k=='type'?tyLabel(c):c;
+ try{const j=k=='room'?await post('/api/room-delete',{room:c,to})
+   :k=='type'?await post('/api/type-delete',{type:c,to}):await post('/api/app-delete',{key:c});
+  say(`Deleted ${k} '${name}'`+(!j.moved?'.':k=='app'?`; ${n_(j.moved,'device')} went back to a guess.`
+   :`; ${n_(j.moved,'device')} moved to ${to?(k=='type'?tyLabel(to):to):(k=='type'?'TODO':'Unassigned')}.`));
+  await load(true)}
+ catch(e){say(`Delete ${k} failed: `+e.message)}}
+// The edit form, for a new category (c '') or an existing one.
+function field(id,lbl,val,hint,max){return `<label for=${id}>${lbl}</label><input type=text id=${id} `+
+ `value="${esc(val||'')}" maxlength=${max||40}>`+(hint?`<div class=hint>${hint}</div>`:'')}
+let edKind='',edCat='';
+function openEditor(k,c,name){
+ edKind=k;edCat=c;ede.textContent='';editing=true;menu.style.display='none';
+ if(k=='room'){const r=B.room_info.find(x=>x.room==c)||{};
+  edt.textContent=c?`Edit room '${c}'`:'New room';
+  edb.innerHTML=field('e_name','Name',c||name)+
+   field('e_floor','Floor',r.floor=='TODO'?'':r.floor,'Upstairs, Downstairs, Outside…',20)+
+   field('e_alias','Aliases',r.aliases,'Other names for it, comma-separated (for voice apps)',120)+
+   (c?'<div class=hint>A new name keeps the old one as an alias.</div>':'')}
+ else if(k=='type'){
+  edt.textContent=c?`Edit type '${tyLabel(c)}'`:'New type';
+  edb.innerHTML=field('e_name','Name',c?c.replace(/_/g,' '):name,'Letters, digits and spaces; stored as lower_case')+
+   `<label class=chk><input type=checkbox id=e_infra${B.infra.includes(c)?' checked':''}> `+
+   `Infrastructure (a hub or network gear: never offered to voice apps)</label>`}
+ else{const a=appOf(c)||{};
+  edt.textContent=c?`Edit app '${a.label}'`:'New app';
+  edb.innerHTML=field('e_name','Name',a.label||name)+
+   field('e_portal','Management portal',a.portal,"https://… where you manage it, or <code>local</code> "+
+    "for gear managed on its own web page (its cards link to the device's IP)",300)+
+   field('e_match','Match',a.match,'Words in a device\\'s name, hostname or vendor that mean this app, '+
+    'separated by | (a regular expression), e.g. <code>ring|doorbell</code>. Blank: never guessed.',200)+
+   (c?`<div class=hint>Key <code>${esc(c)}</code> (what home.csv Native holds) stays the same.</div>`:'')}
+ ed.style.display='flex';setTimeout(()=>{const i=edb.querySelector('input');i.focus();i.select()})}
+function closeEditor(){ed.style.display='none';editing=false;render()}
+edc.addEventListener('click',closeEditor);
+ed.addEventListener('mousedown',e=>{if(e.target==ed)closeEditor()});
+ed.addEventListener('keydown',e=>{if(e.key=='Escape')closeEditor()});
+edf.addEventListener('submit',async e=>{e.preventDefault();
+ const v=id=>{const x=document.getElementById(id);return x?x.value.trim():''};const k=edKind,c=edCat;
+ const name=v('e_name');if(!name){ede.textContent='A name is required.';return}
+ try{let msg;
+  if(k=='room'){let room=c,aliases=v('e_alias');
+   if(!c){room=(await post('/api/room-add',{room:name})).room;msg=`Added room '${room}'.`}
+   else if(name!=c){room=(await post('/api/room-rename',{room:c,name})).room;
+    // The rename keeps the old name as an alias; the form's list must too.
+    if(room.toLowerCase()!=c.toLowerCase()&&!aliases.toLowerCase().split(',').map(x=>x.trim()).includes(c.toLowerCase()))
+     aliases=aliases?aliases+', '+c:c;
+    msg=`Renamed '${c}' to '${room}'; '${c}' is kept as an alias.`}
+   await post('/api/room-edit',{room,floor:v('e_floor'),aliases});msg=msg||`Saved room '${room}'.`}
+  else if(k=='type'){const infra=document.getElementById('e_infra').checked;
+   const j=c?await post('/api/type-edit',{type:c,name,infra}):await post('/api/type-add',{name,infra});
+   msg=c?`Saved type '${tyLabel(j.type)}'`+(j.moved&&j.type!=c?`; ${n_(j.moved,'device')} follow it.`:'.')
+    :`Added type '${tyLabel(j.type)}'.`}
+  else{const body={label:name,portal:v('e_portal'),match:v('e_match')};
+   const j=c?await post('/api/app-edit',{key:c,...body}):await post('/api/app-add',body);
+   msg=c?`Saved app '${name}'.`:`Added app '${name}' (key ${j.key}).`}
+  ed.style.display='none';editing=false;await load(true);say(msg)}
+ catch(err){ede.textContent=err.message}});
+function showMenu(id,html,x,y){menu.innerHTML=html;menu.dataset.id=id;menu.dataset.cat='';menu.style.display='block';
  const w=menu.offsetWidth,h=menu.offsetHeight;
  menu.style.left=Math.min(x,innerWidth-w-8)+'px';menu.style.top=Math.min(y,innerHeight-h-8)+'px'}
 const typeList=d=>`<div class=hd>Type of ${esc(label(d))}</div>`+['TODO',...B.types].map(t=>
@@ -3038,14 +3104,15 @@ const appList=d=>`<div class=hd>App of ${esc(label(d))}${d.app&&!d.app_set?' (gu
 g.addEventListener('click',e=>{const b=e.target.closest('.ty');if(!b||!WRITABLE)return;
  e.stopPropagation();const d=B.devices.find(x=>x.id==b.closest('.dev').dataset.id);if(!d)return;
  const r=b.getBoundingClientRect();showMenu(d.id,typeList(d),r.left,r.bottom+2)});
-// Right-click a room's header: rename or delete the room (room view only).
-const roomCount=r=>B.devices.filter(d=>d.room==r).length;
-g.addEventListener('contextmenu',e=>{const h=e.target.closest('.room h2');if(!h||!WRITABLE||mode()!='room')return;
- const r=h.closest('.room').dataset.col;if(!r)return;          // Unassigned is not a room
- e.preventDefault();e.stopImmediatePropagation();const n=roomCount(r);
- showMenu('',`<div class=hd>${esc(r)} · ${n} device${n==1?'':'s'}</div>`+
-  `<div data-act=room-rename>Rename room…</div><div data-act=room-delete class=del>Delete room…</div>`,
-  e.clientX,e.clientY);menu.dataset.room=r});
+// A column header's ✎ edits it; right-click it to edit or delete.
+g.addEventListener('click',e=>{const p=e.target.closest('.room h2 .hed');if(!p)return;
+ const c=p.closest('.room').dataset.col;if(editable(c))openEditor(mode(),c)});
+g.addEventListener('contextmenu',e=>{const h=e.target.closest('.room h2');if(!h)return;
+ const c=h.closest('.room').dataset.col;if(!editable(c))return;
+ e.preventDefault();e.stopImmediatePropagation();const k=mode();
+ showMenu('',`<div class=hd>${esc(colName(c))} · ${n_(ownCount(k,c),'device')}</div>`+
+  `<div data-act=cat-edit>Edit ${k}…</div><div data-act=cat-delete class=del>Delete ${k}…</div>`,
+  e.clientX,e.clientY);menu.dataset.cat=c});
 g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!WRITABLE)return;
  e.preventDefault();const d=B.devices.find(x=>x.id==el.dataset.id);
  // Only devices with no MAC can go: a scanned one would come back next scan.
@@ -3057,22 +3124,25 @@ g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!
  const lists={room:rooms+types+apps,type:types+rooms+apps,app:apps+rooms+types}[mode()];
  showMenu(d.id,`<div data-act=rename>Rename…</div>${del}`+lists,e.clientX,e.clientY)});
 menu.addEventListener('click',e=>{
- const room=menu.dataset.room;
- if(e.target.closest('[data-act=room-rename]')){menu.style.display='none';startRoomRename(room);return}
- // Deleting a room: an empty one takes a second click; one with devices asks
- // where they go, and picking the destination is the confirmation.
- const rd=e.target.closest('[data-act=room-delete]');
- if(rd){const n=roomCount(room);
-  if(!n){if(!rd.dataset.armed){rd.dataset.armed=1;rd.textContent=`Click again to delete '${room}'`;return}
-   menu.style.display='none';deleteRoom(room,'');return}
+ const cat=menu.dataset.cat,k=mode();
+ if(e.target.closest('[data-act=cat-edit]')){openEditor(k,cat);return}
+ // Deleting: an empty one, or an app (its devices go back to a guess), takes
+ // a second click; a room or type with devices asks where they go, and
+ // picking the destination is the confirmation.
+ const rd=e.target.closest('[data-act=cat-delete]');
+ if(rd){const n=ownCount(k,cat);
+  if(!n||k=='app'){if(!rd.dataset.armed){rd.dataset.armed=1;
+    rd.textContent=n?`Click again: its ${n_(n,'device')} go back to a guess`:`Click again to delete '${colName(cat)}'`;return}
+   menu.style.display='none';deleteCat(k,cat,'');return}
   // The clicked item is replaced, so keep this click from reaching the
   // document's "click outside closes the menu" handler.
   e.stopPropagation();
-  menu.innerHTML=`<div class=hd>Delete '${esc(room)}' and move its ${n} device${n==1?'':'s'} to</div>`+
-   ['',...B.rooms.filter(x=>x!=room)].map(x=>`<div data-to="${esc(x)}">${x?esc(x):'Unassigned'}</div>`).join('');
+  const others=(k=='room'?B.rooms:B.types).filter(x=>x!=cat);
+  menu.innerHTML=`<div class=hd>Delete '${esc(colName(cat))}' and move its ${n_(n,'device')} to</div>`+
+   ['',...others].map(x=>`<div data-to="${esc(x)}">${esc(x?colName(x):(k=='room'?'Unassigned':'TODO'))}</div>`).join('');
   return}
  const to=e.target.closest('[data-to]');
- if(to){menu.style.display='none';deleteRoom(room,to.dataset.to);return}
+ if(to){menu.style.display='none';deleteCat(k,cat,to.dataset.to);return}
  if(e.target.closest('[data-act=rename]')){menu.style.display='none';startRename(menu.dataset.id);return}
  // Delete takes a second click (no confirm(): embedded browsers block it).
  const dl=e.target.closest('[data-act=delete]');
@@ -3108,18 +3178,25 @@ document.addEventListener('keydown',e=>{if(e.key=='Escape')menu.style.display='n
 // Code's Simple Browser) silently block those dialogs.
 let msgT;function say(t){msg.textContent=t;msg.style.display='block';
  clearTimeout(msgT);msgT=setTimeout(()=>msg.style.display='none',6000)}
-addf.addEventListener('submit',async e=>{e.preventDefault();const name=newroom.value.trim();
+// The bar's add box adds to the current tab: a room or a type straight away,
+// an app through the edit form (it wants a portal and a match too).
+addf.addEventListener('submit',async e=>{e.preventDefault();const name=newroom.value.trim(),k=mode();
  if(!name){newroom.focus();return}
- try{const j=await post('/api/room-add',{room:name});newroom.value='';
-  if(B.rooms.includes(j.room))say(`'${j.room}' already exists`);else{B.rooms.push(j.room);render()}}
- catch(e){say('Add room failed: '+e.message)}});
+ if(k=='app'){newroom.value='';openEditor('app','',name);return}
+ try{if(k=='room'){const j=await post('/api/room-add',{room:name});
+    say(B.rooms.includes(j.room)?`'${j.room}' already exists`:`Added room '${j.room}'.`)}
+  else{const j=await post('/api/type-add',{name});say(`Added type '${tyLabel(j.type)}'.`)}
+  newroom.value='';await load(true)}
+ catch(e){say(`Add ${k} failed: `+e.message)}});
 q.addEventListener('input',()=>{Q=q.value.toLowerCase();render()});
 [[froom,'room'],[ftype,'type'],[fapp,'app']].forEach(([s,k])=>s.addEventListener('change',()=>{
  F[k]=s.value;saveF();render()}));
 fclear.addEventListener('click',()=>{F.room=F.type=F.app='*';saveF();Q='';q.value='';render()});
 if(!WRITABLE){ro.style.display='block';addf.style.display='none'}
 addEventListener('hashchange',render);
-async function load(){if(dragId!=null||editing||menu.style.display=='block')return;
+// The 15 s refresh waits while something is being dragged, edited or picked;
+// load(true) is a save asking for the new state now.
+async function load(force){if(!force&&(dragId!=null||editing||menu.style.display=='block'))return;
  B=await (await fetch('/api/board')).json();render()}
 load();setInterval(load,15000)</script>"""
 
@@ -3143,10 +3220,14 @@ def cmd_serve(args):
         if path == "/api/board":
             import home
             return home.board(list(master.values()), home.load_rooms(ROOMS_CSV),
-                              home.load_home(HOME_CSV))
+                              home.load_home(HOME_CSV), home.load_types(TYPES_CSV),
+                              home.load_apps(APPS_CSV))
         return None
 
     allow_write = getattr(args, "allow_write", False)
+    # Category edits on the board: types, apps, and a room's floor and aliases.
+    CATEGORY_PATHS = ("/api/type-add", "/api/type-edit", "/api/type-delete",
+                      "/api/app-add", "/api/app-edit", "/api/app-delete", "/api/room-edit")
     import threading
     write_lock = threading.Lock()
 
@@ -3183,7 +3264,7 @@ def cmd_serve(args):
             path = self.path.split("?")[0]
             if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
                             "/api/type", "/api/app", "/api/delete", "/api/room-delete",
-                            "/api/room-rename"):
+                            "/api/room-rename", *CATEGORY_PATHS):
                 self.send_error(404)
                 return
             if not allow_write:
@@ -3223,8 +3304,51 @@ def cmd_serve(args):
                     self._rename(req)
                 elif path in ("/api/type", "/api/app", "/api/delete"):
                     self._edit(path, req)
+                elif path in CATEGORY_PATHS:
+                    self._category(path, req)
                 else:
                     self._room(path, req)
+
+        def _category(self, path, req):
+            """Add, edit or delete a type or an app, or edit a room's floor and
+            aliases. Devices that used a renamed or deleted one follow."""
+            import home
+            arg = lambda k: str(req.get(k, ""))  # noqa: E731
+            kind = path[len("/api/"):].split("-")[0]
+            rows = home.load_home(HOME_CSV)
+            try:
+                if kind == "type":
+                    types = home.load_types(TYPES_CSV)
+                    if path == "/api/type-add":
+                        out = {"type": home.add_type(types, arg("name"), bool(req.get("infra")))}
+                    elif path == "/api/type-edit":
+                        key, moved = home.edit_type(types, rows, arg("type"), arg("name"),
+                                                    bool(req.get("infra")))
+                        out = {"type": key, "moved": moved}
+                    else:
+                        out = {"moved": home.delete_type(types, rows, arg("type"), arg("to"))}
+                    home.write_csv(TYPES_CSV, home.TYPE_FIELDS, types)
+                elif kind == "app":
+                    apps = home.load_apps(APPS_CSV)
+                    if path == "/api/app-add":
+                        out = {"key": home.add_app(apps, arg("label"), arg("portal"), arg("match"))}
+                    elif path == "/api/app-edit":
+                        out = {"key": home.edit_app(apps, arg("key"), arg("label"), arg("portal"),
+                                                    arg("match"))}
+                    else:
+                        out = {"moved": home.delete_app(apps, rows, arg("key"))}
+                    home.write_csv(APPS_CSV, home.APP_FIELDS, apps)
+                else:                                   # /api/room-edit
+                    rooms = home.load_rooms(ROOMS_CSV)
+                    r = home.edit_room(rooms, arg("room"), arg("floor"), arg("aliases"))
+                    home.write_csv(ROOMS_CSV, home.ROOM_FIELDS, rooms)
+                    out = {"room": r["Room"], "floor": r["Floor"], "aliases": r["Aliases"]}
+            except ValueError as e:
+                _send(self, 400, _json.dumps({"error": str(e)}).encode(), "application/json")
+                return
+            if "moved" in out:
+                home.write_csv(HOME_CSV, home.HOME_FIELDS, rows)
+            _send(self, 200, _json.dumps({"ok": True, **out}).encode(), "application/json")
 
         def _edit(self, path, req):
             """Board type or app change, or deleting a device with no MAC."""
@@ -3234,10 +3358,12 @@ def cmd_serve(args):
             try:
                 if path == "/api/type":
                     ok = home.set_type(rows, list(load_master().values()), key,
-                                       str(req.get("type", ""))) is not None
+                                       str(req.get("type", "")),
+                                       home.load_types(TYPES_CSV)) is not None
                 elif path == "/api/app":
                     ok = home.set_app(rows, list(load_master().values()), key,
-                                      str(req.get("app", ""))) is not None
+                                      str(req.get("app", "")),
+                                      home.load_apps(APPS_CSV)) is not None
                 else:
                     ok = home.delete(rows, key)
             except ValueError as e:
@@ -3339,7 +3465,7 @@ def cmd_serve(args):
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
           f"(/, /rooms, /api/devices, /api/summary, /api/alerts, /api/events, /api/board)")
-    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/room-rename, /api/room-delete, /api/rename, /api/type, /api/app, /api/delete)' if allow_write else 'disabled (read-only)'}")
+    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/room-rename, /api/room-delete, /api/rename, /api/type, /api/app, /api/delete, /api/{type,app}-{add,edit,delete}, /api/room-edit)' if allow_write else 'disabled (read-only)'}")
     if args.host not in ("127.0.0.1", "localhost"):
         print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
         if allow_write:

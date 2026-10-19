@@ -376,7 +376,9 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(d["Kasa Plug"]["in_apps"], ["kasa", "ha"])
         self.assertEqual((d["Pet Cam"]["app"], d["Pet Cam"]["app_set"]), ("wyze", False))
         self.assertEqual(d["name:Kitchen Lamp"]["app"], "feit")      # brand from Description
-        self.assertEqual([a["key"] for a in b["apps"]], home.APP_KEYS)
+        self.assertEqual(sorted(a["key"] for a in b["apps"]), sorted(home.APP_KEYS))
+        labels = [a["label"].lower() for a in b["apps"]]
+        self.assertEqual(labels, sorted(labels))                   # columns by name
         # moving Pet Cam to Petcube drafts its home.csv row with Native set
         self.assertIsNotNone(home.set_app(rows, master, "Pet Cam", "petcube"))
         self.assertEqual(rows[-1]["Device"], "Pet Cam")
@@ -549,6 +551,112 @@ class TestRoomEdit(unittest.TestCase):
             home.rename_room(self.rooms, self.home, "Kitchen", "Living Room")
         home.rename_room(self.rooms, self.home, "Kitchen", "KITCHEN")   # case-only is fine
         self.assertIn("KITCHEN", [r["Room"] for r in self.rooms])
+
+    def test_edit_room_floor_and_aliases(self):
+        home.edit_room(self.rooms, "kitchen", " Downstairs ", "Galley, galley,  Cook Room ")
+        r = next(r for r in self.rooms if r["Room"] == "Kitchen")
+        self.assertEqual((r["Floor"], r["Aliases"]), ("Downstairs", "Galley, Cook Room"))
+        with self.assertRaisesRegex(ValueError, "already used by room 'Family Room'"):
+            home.edit_room(self.rooms, "Kitchen", "Downstairs", "Den")   # Family Room's alias
+        with self.assertRaisesRegex(ValueError, "unknown room"):
+            home.edit_room(self.rooms, "Attic", "", "")
+
+
+class TestTypeEdit(unittest.TestCase):
+    def setUp(self):
+        self.types = home.default_types()
+        self.home = [row(Device="Hub", Type="hub", Expose=""),
+                     row(Device="Pump", Type="appliance", Expose="ha, google, alexa, apple"),
+                     row(Device="Odd", Type="appliance", Expose="ha")]
+
+    def test_add_type_normalises_and_rejects_duplicates(self):
+        self.assertEqual(home.add_type(self.types, " Pool  Pump ", infra=False), "pool_pump")
+        self.assertIn("pool_pump", home.type_names(self.types))
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            home.add_type(self.types, "pool-pump")
+        for bad in ("", "9volt", "todo", "a/b"):
+            with self.assertRaises(ValueError):
+                home.add_type(self.types, bad)
+
+    def test_edit_type_renames_devices_and_infra_moves_default_expose(self):
+        key, moved = home.edit_type(self.types, self.home, "appliance", "Pool Equipment", True)
+        self.assertEqual((key, moved), ("pool_equipment", 2))
+        self.assertEqual([h["Type"] for h in self.home], ["hub", "pool_equipment", "pool_equipment"])
+        self.assertIn("pool_equipment", home.infra_types(self.types))
+        self.assertEqual(self.home[1]["Expose"], "")        # was the default: follows
+        self.assertEqual(self.home[2]["Expose"], "ha")      # set by hand: kept
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            home.edit_type(self.types, self.home, "hub", "network", True)
+
+    def test_delete_type_moves_devices_or_marks_todo(self):
+        self.assertEqual(home.delete_type(self.types, self.home, "appliance", "plug"), 2)
+        self.assertEqual(self.home[1]["Type"], "plug")
+        self.assertEqual(home.delete_type(self.types, self.home, "hub"), 1)
+        self.assertEqual(self.home[0]["Type"], "TODO")
+        self.assertNotIn("hub", home.type_names(self.types))
+        with self.assertRaisesRegex(ValueError, "cannot move"):
+            home.delete_type(self.types, self.home, "plug", "hub")       # gone now
+        # an emptied list stays empty: it never falls back to the built-in one
+        for t in home.type_names(self.types):
+            home.delete_type(self.types, [], t)
+        self.assertEqual(home.type_names(self.types), [])
+        with self.assertRaisesRegex(ValueError, "unknown type"):
+            home.set_type(self.home, [], "Hub", "plug", self.types)
+
+    def test_board_and_check_use_the_edited_types(self):
+        home.add_type(self.types, "pool pump")
+        rows = [row(Device="Pump", Room="Kitchen", Type="pool_pump", Name="Kitchen Pump")]
+        b = home.board([], ROOMS, rows, self.types)
+        self.assertIn("pool_pump", b["types"])
+        errors, _ = home.check(ROOMS, rows, None, self.types)
+        self.assertFalse([e for e in errors if "Type" in e])
+        errors, _ = home.check(ROOMS, rows)                       # built-in list: unknown
+        self.assertTrue([e for e in errors if "pool_pump" in e])
+
+
+class TestAppEdit(unittest.TestCase):
+    def setUp(self):
+        self.apps = home.default_apps()
+
+    def test_add_app_goes_first_so_a_brand_beats_its_parent(self):
+        cam = {"Device": "Ring Doorbell", "Vendor": "Amazon Technologies"}
+        self.assertEqual(home.guess_app(cam, self.apps), "alexa")
+        key = home.add_app(self.apps, "Ring", "https://account.ring.com", "Ring|doorbell")
+        self.assertEqual(key, "ring")
+        self.assertEqual(self.apps[0]["Match"], "ring|doorbell")       # lower-cased
+        self.assertEqual(home.guess_app(cam, self.apps), "ring")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            home.add_app(self.apps, "RING")
+        for label, portal, match in (("", "", ""), ("X", "javascript:alert(1)", ""),
+                                     ("X", "https://a b", ""), ("X", "", "(unclosed"),
+                                     ("None", "", ""), ("123", "", "")):
+            with self.assertRaises(ValueError):
+                home.add_app(self.apps, label, portal, match)
+
+    def test_edit_app_keeps_key_and_delete_unsets_native(self):
+        home.edit_app(self.apps, "kasa", "TP-Link Kasa", "LOCAL", "kasa|tapo")
+        a = home._find_app(self.apps, "kasa")
+        self.assertEqual((a["Label"], a["Portal"], a["Match"]), ("TP-Link Kasa", "local", "kasa|tapo"))
+        rows = [row(Device="Plug", Native="kasa"), row(Device="Light", Native="hue")]
+        self.assertEqual(home.delete_app(self.apps, rows, "kasa"), 1)
+        self.assertEqual([r["Native"] for r in rows], ["", "hue"])
+        self.assertIsNone(home._find_app(self.apps, "kasa"))
+        with self.assertRaises(ValueError):
+            home.set_app(rows, [], "Plug", "kasa", self.apps)              # gone now
+        with self.assertRaisesRegex(ValueError, "unknown app"):
+            home.edit_app(self.apps, "kasa", "Kasa", "", "")
+
+    def test_load_apps_and_types_fall_back_only_when_the_file_is_missing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "apps.csv")
+            self.assertEqual(len(home.load_apps(p)), len(home.APP_CATALOG))
+            home.write_csv(p, home.APP_FIELDS, [])
+            self.assertEqual(home.load_apps(p), [])
+            t = os.path.join(d, "types.csv")
+            self.assertEqual(home.type_names(home.load_types(t)), home.TYPES)
+            home.write_csv(t, home.TYPE_FIELDS, [{"Type": "gizmo", "Infra": "yes"}])
+            self.assertEqual(home.infra_types(home.load_types(t)), {"gizmo"})
 
 
 if __name__ == "__main__":

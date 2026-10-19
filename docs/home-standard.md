@@ -86,10 +86,16 @@ exposed to voice apps (`netinv home check` enforces it).
 | `hub` | (infrastructure) | | | |
 | `network` | (infrastructure) | | | |
 
+These are the built-in types. Types added on the room board (see
+[Editing the lists](#editing-the-lists)) have no mapping above: say in the
+device's `Description` what each app should treat it as.
+
 ## Apps
 
-The apps that manage devices live in `APP_CATALOG` in `engine/home.py`: a key
-(what `Native` holds), a label and the app's management portal. The room
+The apps that manage devices start as `APP_CATALOG` in `engine/home.py`: a key
+(what `Native` holds), a label, the app's management portal and a match
+pattern. The built-in list is below; see [Editing the lists](#editing-the-lists)
+to change it. The room
 board's **By app** tab has a column for each, with the portal one click away
 in its header. Gear managed on the LAN (Onkyo, ASUS, OBi) has no cloud portal;
 its cards link to the device's own page instead.
@@ -120,6 +126,33 @@ Kasa plug also shows under Home Assistant). Where its app is only a guess the
 card says so; drag it to the right column, or right-click > App, to set
 `Native`. Every tab filters by room, type and app (the filters are kept per
 browser, and `/rooms?type=camera&app=blink#room` links to a filtered view).
+
+## Editing the lists
+
+Rooms, types and apps can each be added, edited and deleted on the room board
+(`netinv serve --allow-write`, `/rooms`), on their own tab:
+
+- **Add**: type a name in the box at the top right and press **+ Room**,
+  **+ Type** or **+ App**. A new app opens its edit form, for the portal and
+  match.
+- **Edit**: click ✎ in a column's header, or right-click the header.
+  - Room: name, `Floor`, `Aliases`. A new name keeps the old one as an alias.
+  - Type: name (stored lower_case, `pool_pump`) and whether it is
+    infrastructure. Devices of a renamed type follow it; an `Expose` still at
+    the type's default follows the infrastructure setting.
+  - App: name, portal (`https://…`, `local`, or blank) and match (a regular
+    expression run on name, hostname and vendor; blank means never guessed).
+    The key does not change, since `Native` and the cloud connectors use it.
+- **Delete**: right-click the header. A room's or a type's devices move to
+  another one you pick, or to Unassigned / `TODO`. An app's devices go back
+  to a guess.
+
+The board's edits live in `rooms.csv`, `types.csv` and `apps.csv` (all
+git-ignored). Until `types.csv` or `apps.csv` exists, the built-in list is
+used; the first edit writes the whole list there. A new app goes first in
+match order, so a brand beats the parent company an older app matches on
+(Ring before Amazon); the board shows apps by name. `netinv home check`
+validates against `types.csv` too.
 
 ## What each app gets, and how
 
@@ -156,9 +189,8 @@ for a device HA cannot control.
    room, or right-click > Move to. Unplaced devices sit in Unassigned.
    Right-click > Rename… sets one name in `devices.csv`, `home.csv` (Device and
    Name) and `app_rooms.csv` at once, and lists any rule above it breaks.
-   Right-click a room's header to rename it (its devices follow, and the old
-   name stays in `Aliases`) or delete it (its devices move to Unassigned or to
-   a room you pick).
+   Rooms, types and apps themselves are edited from their column headers; see
+   [Editing the lists](#editing-the-lists).
 5. `netinv home check`: validate against the rules above. Fix until it passes.
 6. Push to each app (Home Assistant first), then re-check drift after any
    change made inside an app. `netinv home push --to tuya|kasa --dry-run`

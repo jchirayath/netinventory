@@ -49,3 +49,7 @@ netinv-cron.log
 # IDE / misc
 *.iml
 ~$*
+
+# Board-edited category lists (rooms.csv above holds the room list)
+types.csv
+apps.csv
