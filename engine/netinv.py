@@ -165,13 +165,39 @@ def load_master():
     return rows
 
 
-def save_master(rows):
+# What a person sets on a device. A long run (update, watch) keeps these if
+# someone changed them on disk while it ran (the room board, `netinv name`).
+USER_FIELDS = ("Device", "Notes")
+
+
+def user_snapshot(rows):
+    """{MAC: (Device, Notes)} as loaded, to detect edits made during a run."""
+    return {m: tuple(r[f] for f in USER_FIELDS) for m, r in rows.items()}
+
+
+def save_master(rows, base=None):
+    """Write devices.csv atomically. With base (a user_snapshot taken when
+    this run loaded the file), first take every Device/Notes value that
+    changed on disk since then, and every MAC added there, so a slow scan
+    cannot undo a rename made meanwhile."""
+    if base is not None:
+        for mac, d in load_master().items():
+            if mac not in rows:
+                if mac not in base:              # added while we ran (e.g. `name`)
+                    rows[mac] = d
+                continue
+            was = base.get(mac, ("",) * len(USER_FIELDS))
+            for i, f in enumerate(USER_FIELDS):
+                if d[f] != was[i]:               # someone else changed it: theirs wins
+                    rows[mac][f] = d[f]
     # sorted by IP address (devices with no current IP sort last)
     ordered = sorted(rows.values(), key=lambda r: ip_key(r["IP"]))
-    with open(MASTER, "w", newline="") as f:
+    tmp = MASTER + ".tmp"
+    with open(tmp, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
         w.writeheader()
         w.writerows(ordered)
+    os.replace(tmp, MASTER)                      # readers never see a half-written file
 
 
 # --------------------------------------------------------------------------- #
@@ -1764,6 +1790,7 @@ def auto_name(master):
 
 def cmd_update(args):
     master = load_master()
+    base = user_snapshot(master)         # to keep renames made while we scan
     before = set(master)                 # MACs known before this run
     sightings = []
     do_local = args.scan or not (args.router or args.import_csv is not None)
@@ -1795,12 +1822,12 @@ def cmd_update(args):
         new = [master[m] for m in master if m not in before]
         todo = new + [r for r in master.values()
                       if not r["Device"] and r["Status"] == "online" and r["IP"]
-                      and not r["Notes"].startswith("fp:") and r not in new]
+                      and "fp:" not in r["Notes"] and r not in new]
         todo = todo[:args.fp_limit]
         if todo:
             print(f"  fingerprinting {len(todo)} device(s) (active nmap)...")
             fingerprint_rows(todo, fast=args.fp_fast, apply_notes=True, verbose=False)
-    save_master(master)
+    save_master(master, base)
     write_reports(master)
     # an imported export isn't a real "join", so only flag new devices when we
     # actually looked at the live network this run
@@ -1829,6 +1856,7 @@ def cmd_watch(args):
     while True:
         n += 1
         master = load_master()
+        base = user_snapshot(master)
         before = set(master)
         before_status = {m: r["Status"] for m, r in master.items()}
         sightings = []
@@ -1843,7 +1871,7 @@ def cmd_watch(args):
             sightings += mdns_discover()
         seen = merge(master, sightings)
         auto_name(master)
-        save_master(master)
+        save_master(master, base)
         write_reports(master)
         new = report_new(master, before, do_notify=args.notify)
         left, back = report_presence(master, before_status)
@@ -2016,7 +2044,9 @@ def fingerprint_rows(rows, fast=False, apply_notes=False, verbose=True):
                 parts.append(g)
             if info.get("ports"):
                 parts.append("ports " + ",".join(str(p) for p in sorted(info["ports"])))
-            r["Notes"] = "; ".join(parts)
+            # Keep anything a person wrote; replace only an earlier fp: finding.
+            own = r["Notes"].split(" | fp:")[0] if not r["Notes"].startswith("fp:") else ""
+            r["Notes"] = " | ".join(x for x in (own.strip(), "; ".join(parts)) if x)
     return results
 
 

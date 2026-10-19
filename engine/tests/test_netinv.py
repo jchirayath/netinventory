@@ -446,6 +446,40 @@ class TestSlowSweep(unittest.TestCase):
         popen.assert_not_called()
 
 
+class TestSaveKeepsConcurrentEdits(unittest.TestCase):
+    def test_a_rename_made_during_a_scan_survives_its_save(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(netinv, "MASTER", os.path.join(d, "devices.csv")):
+            row = lambda mac, dev="", ip="": {**{k: "" for k in netinv.FIELDS},  # noqa: E731
+                                             "MAC": mac, "Device": dev, "IP": ip}
+            netinv.save_master({"AA:00:00:00:00:01": row("AA:00:00:00:00:01", "", "10.0.0.1"),
+                                "AA:00:00:00:00:02": row("AA:00:00:00:00:02", "Old")})
+            scan = netinv.load_master()                  # a long scan loads...
+            base = netinv.user_snapshot(scan)
+            board = netinv.load_master()                 # ...meanwhile the board renames,
+            board["AA:00:00:00:00:02"]["Device"] = "New Name"
+            board["AA:00:00:00:00:03"] = row("AA:00:00:00:00:03", "Added")   # and `name` adds
+            netinv.save_master(board)
+            scan["AA:00:00:00:00:01"]["Device"] = "Auto"  # the scan fills a blank
+            scan["AA:00:00:00:00:01"]["Status"] = "online"
+            netinv.save_master(scan, base)
+            got = {m: (r["Device"], r["Status"]) for m, r in netinv.load_master().items()}
+        self.assertEqual(got, {"AA:00:00:00:00:01": ("Auto", "online"),
+                               "AA:00:00:00:00:02": ("New Name", ""),
+                               "AA:00:00:00:00:03": ("Added", "")})
+
+    def test_fingerprint_keeps_a_persons_note(self):
+        r = {**{k: "" for k in netinv.FIELDS}, "MAC": "AA:00:00:00:00:01", "IP": "10.0.0.1",
+             "Vendor": "Acme", "Notes": "in the garage"}
+        with mock.patch.object(netinv, "fingerprint_host", return_value={"ports": {80}}), \
+                mock.patch.object(netinv, "guess_type", return_value="camera"):
+            netinv.fingerprint_rows([r], apply_notes=True, verbose=False)
+            self.assertEqual(r["Notes"], "in the garage | fp: Acme; camera; ports 80")
+            netinv.fingerprint_rows([r], apply_notes=True, verbose=False)   # again: no pile-up
+        self.assertEqual(r["Notes"], "in the garage | fp: Acme; camera; ports 80")
+
+
 class TestPresence(unittest.TestCase):
     def row(self, mac, status, **kw):
         r = {k: "" for k in netinv.FIELDS}
