@@ -164,6 +164,26 @@ class TestRouterParse(unittest.TestCase):
         self.assertIsNone(by_mac["AA:BB:CC:00:00:09"]["rssi"])
 
 
+class TestRouterLoginFailure(unittest.TestCase):
+    def test_failed_login_backs_off_without_claiming_a_lockout(self):
+        # every gateway page says "locked" somewhere ("Blocked" menu, a
+        # translated warning), so that word can't mean the account is locked
+        import io
+        import tempfile
+        page = io.BytesIO(b"<a>Add/Edit Device to be Blocked Alert:</a>")
+        opener = mock.Mock()
+        opener.open.side_effect = lambda *a, **kw: io.BytesIO(page.getvalue())
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(netinv, "ROUTER_COOKIES", os.path.join(d, "c.txt")), \
+                mock.patch.object(netinv, "ROUTER_COOLDOWN_FILE", os.path.join(d, "cd")), \
+                mock.patch("urllib.request.build_opener", return_value=opener), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(netinv.router_scan("admin", "wrong"), [])
+            self.assertTrue(os.path.exists(os.path.join(d, "cd")))
+        self.assertIn("wrong password, or", out.getvalue())
+        self.assertNotIn("LOCKED", out.getvalue())
+
+
 class TestCategorizeGuess(unittest.TestCase):
     def test_categorize(self):
         self.assertEqual(netinv.categorize({"Device": "Blink Mini Camera",
@@ -825,6 +845,31 @@ class TestConnectors(unittest.TestCase):
              mock.patch("asyncio.sleep", mock.AsyncMock()):
             return connectors.blink_locate({}, sweep, wait=0.05, settle=0, poll=0,
                                            log=lambda *a: None, vendor=vendor), Blink.cameras
+
+    def test_blink_mac_ip_skips_minis_and_doorbells(self):
+        # their ids 404 at the camera config endpoint (blinkpy logs that as
+        # "Connection error ... possibly down or throttled")
+        import asyncio
+
+        class Cam:
+            def __init__(self, kind):
+                self.camera_type, self.camera_id = kind, 7
+                self.attributes = {"network_id": 1}
+
+        calls = []
+
+        async def info(blink, net, cid):
+            calls.append(cid)
+            return {"camera": [{"mac_address": "c0:95:cf:8e:82:e6",
+                                "last_connect": {"ip_address": "10.0.0.7"}}]}
+
+        with mock.patch("blinkpy.api.request_camera_info", info):
+            for kind in ("mini", "doorbell"):
+                self.assertEqual(asyncio.run(connectors._blink_mac_ip(None, Cam(kind))),
+                                 ("", ""))
+            self.assertEqual(calls, [])
+            self.assertEqual(asyncio.run(connectors._blink_mac_ip(None, Cam(""))),
+                             ("C0:95:CF:8E:82:E6", "10.0.0.7"))
 
     def test_blink_locate_new_host_blink_mac_and_mini(self):
         base = {"AA:00:00:00:00:01": "10.0.0.1"}

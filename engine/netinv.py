@@ -717,13 +717,16 @@ def router_scan(user, password):
             print(f"  ! router login/scrape failed: {e}")
             return []
         if not _router_valid(html):
-            if "locked" in html.lower():
-                with open(ROUTER_COOLDOWN_FILE, "w") as f:
-                    f.write(now_stamp())
-                print(f"  ! router account LOCKED (too many logins). Backing off "
-                      f"{ROUTER_COOLDOWN_MIN} min; the cached session will be reused after.")
-            else:
-                print("  ! router login failed (no device data — check password)")
+            # The page can't tell us why: every gateway page carries "locked"
+            # (a translated lockout warning, the "Blocked" menu), so a wrong
+            # password looked like a lockout. Back off either way, since
+            # retrying a bad password each run is what trips the real lockout.
+            with open(ROUTER_COOLDOWN_FILE, "w") as f:
+                f.write(now_stamp())
+            print(f"  ! router login failed (no device data): wrong password, or the "
+                  f"gateway locked the account.\n    Not retrying for {ROUTER_COOLDOWN_MIN} "
+                  f"min. Check the password at http://{ROUTER_HOST}, then run "
+                  f"./netinv.py set-router-password (clears the wait).")
             return []
         try:
             cj.save(ignore_discard=True, ignore_expires=True)
@@ -2387,6 +2390,8 @@ def cmd_set_router_password(args):
         capture_output=True, text=True)
     if r.returncode == 0:
         print(f"  stored router credentials for {ROUTER_HOST} in Keychain (account '{user}')")
+        if os.path.exists(ROUTER_COOLDOWN_FILE):   # a new password earns a fresh try
+            os.remove(ROUTER_COOLDOWN_FILE)
     else:
         print(f"  ! failed to store: {r.stderr.strip()}")
 

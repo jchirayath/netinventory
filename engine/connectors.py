@@ -477,6 +477,11 @@ async def _blink_mac_ip(blink, cam):
     """(MAC, last check-in IP) from a camera's info endpoint; the camera list
     has neither. Minis, doorbells and sync modules report none: ('', '')."""
     from blinkpy import api
+    # Minis and doorbells aren't at this endpoint (404, which blinkpy logs as
+    # "Connection error ... possibly down or throttled"), and their own
+    # config endpoints carry no MAC or IP either.
+    if getattr(cam, "camera_type", "") in ("mini", "doorbell"):
+        return "", ""
     attrs = getattr(cam, "attributes", {}) or {}
     try:
         res = await api.request_camera_info(blink, attrs.get("network_id"), cam.camera_id)
