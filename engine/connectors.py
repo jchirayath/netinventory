@@ -79,6 +79,12 @@ def kc_set(provider, account, secret):
         check=True, capture_output=True, text=True)
 
 
+def kc_delete(provider, account):
+    subprocess.run(
+        ["security", "delete-generic-password", "-s", _service(provider),
+         "-a", account], capture_output=True, text=True)
+
+
 def kc_get(provider, account):
     r = subprocess.run(
         ["security", "find-generic-password", "-s", _service(provider),

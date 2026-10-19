@@ -535,8 +535,40 @@ class TestPresence(unittest.TestCase):
             self.assertIn(s, body)
 
     def test_send_email_without_settings_does_not_raise(self):
-        with mock.patch.object(netinv, "email_creds", return_value=None):
+        empty = {f: None for f, _s, _p in netinv.EMAIL_FIELDS}
+        with mock.patch.object(netinv, "email_settings", return_value=empty), \
+             mock.patch.object(netinv, "send_via_mail_app") as mail:
             self.assertEqual(netinv.send_email("s", "b")[0], False)
+        mail.assert_not_called()
+
+    def test_send_email_without_password_uses_mail_app(self):
+        s = {f: None for f, _s, _p in netinv.EMAIL_FIELDS} | {"to": "me@example.com"}
+        with mock.patch.object(netinv, "email_settings", return_value=s), \
+             mock.patch.object(netinv, "send_smtp") as smtp, \
+             mock.patch.object(netinv, "send_via_mail_app",
+                               return_value=(True, "sent via Mail.app")) as mail:
+            self.assertEqual(netinv.send_email("s", "b"), (True, "sent via Mail.app"))
+        smtp.assert_not_called()
+        mail.assert_called_once_with("s", "b", "me@example.com", None)
+
+    def test_send_email_falls_back_to_mail_app_when_smtp_fails(self):
+        s = {f: "x" for f, _s, _p in netinv.EMAIL_FIELDS} | {"to": "me@example.com"}
+        with mock.patch.object(netinv, "send_smtp", return_value=(False, "534 app password")), \
+             mock.patch.object(netinv, "send_via_mail_app",
+                               return_value=(True, "sent via Mail.app")):
+            ok, msg = netinv.send_email("s", "b", s)
+        self.assertTrue(ok)
+        self.assertIn("534 app password", msg)
+
+    def test_mail_app_gets_text_as_argv_not_script(self):
+        done = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(netinv.sys, "platform", "darwin"), \
+             mock.patch.object(netinv.subprocess, "run", return_value=done) as run:
+            ok, _ = netinv.send_via_mail_app('Cam "1"', "body", "me@example.com")
+        self.assertTrue(ok)
+        argv, kw = run.call_args.args[0], run.call_args.kwargs
+        self.assertEqual(argv, ["osascript", "-", 'Cam "1"', "body", "me@example.com", ""])
+        self.assertNotIn("Cam", kw["input"])
 
 
 class TestApplyName(unittest.TestCase):
