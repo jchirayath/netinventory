@@ -121,6 +121,9 @@ for a device HA cannot control.
    room, or right-click > Move to. Unplaced devices sit in Unassigned.
    Right-click > Rename… sets one name in `devices.csv`, `home.csv` (Device and
    Name) and `app_rooms.csv` at once, and lists any rule above it breaks.
+   Right-click a room's header to rename it (its devices follow, and the old
+   name stays in `Aliases`) or delete it (its devices move to Unassigned or to
+   a room you pick).
 5. `netinv home check`: validate against the rules above. Fix until it passes.
 6. Push to each app (Home Assistant first), then re-check drift after any
    change made inside an app. `netinv home push --to tuya|kasa --dry-run`

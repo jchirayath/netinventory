@@ -2860,7 +2860,27 @@ g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
  e.preventDefault();rm.classList.remove('over');const id=e.dataTransfer.getData('text/plain')||dragId;
  dragId=null;if(id&&canDrag())(mode()=='room'?move:retype)(id,rm.dataset.col)});
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
-function showMenu(id,html,x,y){menu.innerHTML=html;menu.dataset.id=id;menu.style.display='block';
+async function deleteRoom(room,to){
+ try{const j=await post('/api/room-delete',{room,to});
+  B.rooms=B.rooms.filter(r=>r!=room);B.devices.forEach(d=>{if(d.room==room)d.room=to});render();
+  say(`Deleted room '${room}'`+(j.moved?`; ${j.moved} device${j.moved==1?'':'s'} moved to ${to||'Unassigned'}.`:'.'))}
+ catch(e){say('Delete room failed: '+e.message)}}
+// Rename a room in place in its header: Enter saves, Escape or leaving cancels.
+function startRoomRename(room){
+ const h=[...g.querySelectorAll('.room')].find(x=>x.dataset.col==room);if(!h)return;
+ editing=true;const sp=h.querySelector('h2 span');
+ sp.innerHTML=`<input class=ren value="${esc(room)}" maxlength=40 style="color:#111">`;
+ const inp=sp.querySelector('input');inp.focus();inp.select();let done=false;
+ const finish=async save=>{if(done)return;done=true;const name=inp.value.trim();
+  if(save&&name&&name!=room){
+   try{const j=await post('/api/room-rename',{room,name});
+    B.rooms=B.rooms.map(r=>r==room?j.room:r);B.devices.forEach(d=>{if(d.room==room)d.room=j.room});
+    say(`Renamed '${room}' to '${j.room}'; '${room}' is kept as an alias.`)}
+   catch(e){say('Rename room failed: '+e.message)}}
+  editing=false;render()};
+ inp.addEventListener('keydown',e=>{if(e.key=='Enter')finish(true);if(e.key=='Escape')finish(false)});
+ inp.addEventListener('blur',()=>finish(false))}
+function showMenu(id,html,x,y){menu.innerHTML=html;menu.dataset.id=id;menu.dataset.room='';menu.style.display='block';
  const w=menu.offsetWidth,h=menu.offsetHeight;
  menu.style.left=Math.min(x,innerWidth-w-8)+'px';menu.style.top=Math.min(y,innerHeight-h-8)+'px'}
 const typeList=d=>`<div class=hd>Type of ${esc(label(d))}</div>`+['TODO',...B.types].map(t=>
@@ -2869,6 +2889,14 @@ const typeList=d=>`<div class=hd>Type of ${esc(label(d))}</div>`+['TODO',...B.ty
 g.addEventListener('click',e=>{const b=e.target.closest('.ty');if(!b||!WRITABLE)return;
  e.stopPropagation();const d=B.devices.find(x=>x.id==b.closest('.dev').dataset.id);if(!d)return;
  const r=b.getBoundingClientRect();showMenu(d.id,typeList(d),r.left,r.bottom+2)});
+// Right-click a room's header: rename or delete the room (room view only).
+const roomCount=r=>B.devices.filter(d=>d.room==r).length;
+g.addEventListener('contextmenu',e=>{const h=e.target.closest('.room h2');if(!h||!WRITABLE||mode()!='room')return;
+ const r=h.closest('.room').dataset.col;if(!r)return;          // Unassigned is not a room
+ e.preventDefault();e.stopImmediatePropagation();const n=roomCount(r);
+ showMenu('',`<div class=hd>${esc(r)} · ${n} device${n==1?'':'s'}</div>`+
+  `<div data-act=room-rename>Rename room…</div><div data-act=room-delete class=del>Delete room…</div>`,
+  e.clientX,e.clientY);menu.dataset.room=r});
 g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!WRITABLE)return;
  e.preventDefault();const d=B.devices.find(x=>x.id==el.dataset.id);
  // Only devices with no MAC can go: a scanned one would come back next scan.
@@ -2879,6 +2907,22 @@ g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!
  showMenu(d.id,`<div data-act=rename>Rename…</div>${del}`+(mode()=='room'?rooms+types:types+rooms),
   e.clientX,e.clientY)});
 menu.addEventListener('click',e=>{
+ const room=menu.dataset.room;
+ if(e.target.closest('[data-act=room-rename]')){menu.style.display='none';startRoomRename(room);return}
+ // Deleting a room: an empty one takes a second click; one with devices asks
+ // where they go, and picking the destination is the confirmation.
+ const rd=e.target.closest('[data-act=room-delete]');
+ if(rd){const n=roomCount(room);
+  if(!n){if(!rd.dataset.armed){rd.dataset.armed=1;rd.textContent=`Click again to delete '${room}'`;return}
+   menu.style.display='none';deleteRoom(room,'');return}
+  // The clicked item is replaced, so keep this click from reaching the
+  // document's "click outside closes the menu" handler.
+  e.stopPropagation();
+  menu.innerHTML=`<div class=hd>Delete '${esc(room)}' and move its ${n} device${n==1?'':'s'} to</div>`+
+   ['',...B.rooms.filter(x=>x!=room)].map(x=>`<div data-to="${esc(x)}">${x?esc(x):'Unassigned'}</div>`).join('');
+  return}
+ const to=e.target.closest('[data-to]');
+ if(to){menu.style.display='none';deleteRoom(room,to.dataset.to);return}
  if(e.target.closest('[data-act=rename]')){menu.style.display='none';startRename(menu.dataset.id);return}
  // Delete takes a second click (no confirm(): embedded browsers block it).
  const dl=e.target.closest('[data-act=delete]');
@@ -2983,7 +3027,8 @@ def cmd_serve(args):
         def do_POST(self):
             path = self.path.split("?")[0]
             if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
-                            "/api/type", "/api/delete"):
+                            "/api/type", "/api/delete", "/api/room-delete",
+                            "/api/room-rename"):
                 self.send_error(404)
                 return
             if not allow_write:
@@ -3086,6 +3131,23 @@ def cmd_serve(args):
                 _send(self, 200, _json.dumps({"ok": True, "room": room}).encode(),
                       "application/json")
                 return
+            if path in ("/api/room-delete", "/api/room-rename"):
+                rows = home.load_home(HOME_CSV)
+                try:
+                    if path == "/api/room-delete":
+                        moved = home.delete_room(rooms, rows, room, str(req.get("to", "")))
+                        result = {"ok": True, "moved": moved}
+                    else:
+                        moved = home.rename_room(rooms, rows, room, str(req.get("name", "")))
+                        result = {"ok": True, "moved": moved,
+                                  "room": home.clean_room(str(req.get("name", "")))}
+                except ValueError as e:
+                    _send(self, 400, _json.dumps({"error": str(e)}).encode(), "application/json")
+                    return
+                home.write_csv(HOME_CSV, home.HOME_FIELDS, rows)
+                home.write_csv(ROOMS_CSV, home.ROOM_FIELDS, rooms)
+                _send(self, 200, _json.dumps(result).encode(), "application/json")
+                return
             canon = {r["Room"].lower(): r["Room"] for r in rooms}
             if room and room.lower() not in canon:
                 _send(self, 400, b'{"error":"unknown room"}', "application/json")
@@ -3119,7 +3181,7 @@ def cmd_serve(args):
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
           f"(/, /rooms, /api/devices, /api/summary, /api/alerts, /api/events, /api/board)")
-    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/rename, /api/type, /api/delete)' if allow_write else 'disabled (read-only)'}")
+    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/room-rename, /api/room-delete, /api/rename, /api/type, /api/delete)' if allow_write else 'disabled (read-only)'}")
     if args.host not in ("127.0.0.1", "localhost"):
         print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
         if allow_write:
