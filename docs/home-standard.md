@@ -30,7 +30,7 @@ Two semicolon-separated files in the engine's data directory, next to
 | `Type` | One value from the type list below | `switch` |
 | `Name` | The canonical name; see the naming rules | `Family Room Ceiling Light` |
 | `Description` | Brand, model and what it controls (no semicolons). Brands live here, never in `Name` | `Kasa HS200 wall switch, 4 recessed cans` |
-| `Native` | The app it is paired with first (its own cloud) | `kasa` |
+| `Native` | The app that manages it (its own cloud): a key from the app list below, or `none` for a device no app manages. Blank means "guess": the vendor cloud that reports it, else its name, hostname and vendor | `kasa` |
 | `Expose` | Where it should appear, comma-separated: `ha`, `google`, `alexa`, `apple`, `smartthings` | `ha, google, alexa` |
 | `AppNames` | For a device with no `Device` only: what each app calls it, `app=name; app=name`. Devices with a MAC keep theirs in `devices.csv` (`AppNames`), refreshed on every cloud run. The room board shows an app's name only where it differs from `Name` | `govee=H5054_A00A_Washer` |
 | `Via` | Optional. The `Device` of the hub a device connects or pairs through. Each linked device keeps its own `Room`. With a blank `Device` (no network address of its own) the room board shows the hub's address and status; a device with its own MAC (a Blink camera on Wi-Fi, paired to a sync module) keeps its own | `Govee Hub (H5054 sensors)` |
@@ -85,6 +85,41 @@ exposed to voice apps (`netinv home check` enforces it).
 | `appliance` | switch | (by device) | (by device) | (by device) |
 | `hub` | (infrastructure) | | | |
 | `network` | (infrastructure) | | | |
+
+## Apps
+
+The apps that manage devices live in `APP_CATALOG` in `engine/home.py`: a key
+(what `Native` holds), a label and the app's management portal. The room
+board's **By app** tab has a column for each, with the portal one click away
+in its header. Gear managed on the LAN (Onkyo, ASUS, OBi) has no cloud portal;
+its cards link to the device's own page instead.
+
+| Key | App | Key | App |
+|---|---|---|---|
+| `alexa` | Amazon Alexa | `myq` | myQ |
+| `apple` | Apple | `obihai` | Obihai OBi (local) |
+| `asus` | ASUS (local) | `onkyo` | Onkyo (local) |
+| `bhyve` | Orbit B-hyve | `petcube` | Petcube |
+| `blink` | Blink | `qnap` | QNAP |
+| `ecobee` | ecobee | `roku` | Roku |
+| `epson` | Epson Connect | `sense` | Sense |
+| `feit` | Feit Electric | `smartlife` | Smart Life (Tuya) |
+| `flume` | Flume | `smartthings` | Samsung SmartThings |
+| `foscam` | Foscam | `solaredge` | SolarEdge |
+| `google` | Google Home | `tesla` | Tesla |
+| `govee` | Govee | `utec` | U-tec (U-Bolt) |
+| `ha` | Home Assistant | `wansview` | Wansview |
+| `harmony` | Logitech Harmony | `waterguru` | WaterGuru |
+| `hue` | Philips Hue | `wemo` | Wemo |
+| `iaqualink` | iAqualink | `wyze` | Wyze |
+| `kasa` | Kasa (TP-Link) | `xfinity` | Xfinity |
+| `lg` | LG ThinQ | | |
+
+A device sits in its own app's column and in every app that reports it (a
+Kasa plug also shows under Home Assistant). Where its app is only a guess the
+card says so; drag it to the right column, or right-click > App, to set
+`Native`. Every tab filters by room, type and app (the filters are kept per
+browser, and `/rooms?type=camera&app=blink#room` links to a filtered view).
 
 ## What each app gets, and how
 

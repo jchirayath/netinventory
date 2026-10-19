@@ -340,6 +340,56 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(home.board(master, ROOMS, rows)["platforms"],
                          ["blink", "govee", "smartthings"])
 
+    def test_guess_app_brand_before_parent_company(self):
+        g = lambda dev, vendor="", host="": home.guess_app(  # noqa: E731
+            {"Device": dev, "Vendor": vendor, "Hostname": host})
+        self.assertEqual(g("Front Door Camera", "Amazon Technologies", "blink-sync-module"), "blink")
+        self.assertEqual(g("Echo Dot", "Amazon Technologies"), "alexa")
+        self.assertEqual(g("PetCube", "Tianjin Hualai Technology"), "petcube")
+        self.assertEqual(g("Pet Cam", "Tianjin Hualai Technology"), "wyze")
+        self.assertEqual(g("OBi200 VoIP"), "obihai")
+        self.assertEqual(g("Living Room TV", "Samsung Electronics"), "smartthings")
+        self.assertEqual(g("Hue Bridge", "Signify"), "hue")
+        self.assertEqual(g("Sprinkler", "Orbit Irrigation"), "bhyve")
+        self.assertEqual(g("Mystery box", "Acme"), "")
+        # every catalog app has a label and a portal
+        self.assertTrue(all(a["label"] and a["portal"] for a in home.app_catalog()))
+
+    def test_device_app_set_then_cloud_then_guess(self):
+        cam = {"Device": "Front Door Camera", "Vendor": "Amazon Technologies"}
+        self.assertEqual(home.device_app("", {"blink": "Front Door"}, cam), ("blink", False))
+        self.assertEqual(home.device_app("", {}, cam), ("alexa", False))
+        # a hub that lists the device says nothing about its own app
+        self.assertEqual(home.device_app("", {"ha": "Plug"}, {"Device": "Kasa Plug"}),
+                         ("kasa", False))
+        self.assertEqual(home.device_app("tuya", {}, cam), ("smartlife", True))
+        self.assertEqual(home.device_app(home.NO_APP, {"blink": "x"}, cam), ("", True))
+
+    def test_board_app_columns_and_set_app(self):
+        master = [{"Device": "Kasa Plug", "MAC": "AA:00:00:00:00:01", "Status": "online",
+                   "Vendor": "TP-Link", "AppNames": "ha=Sofa; kasa=Sofa"},
+                  {"Device": "Pet Cam", "MAC": "AA:00:00:00:00:02", "Status": "online",
+                   "Vendor": "Tianjin Hualai Technology"}]
+        rows = [row(Device="", Name="Kitchen Lamp", Description="Feit smart bulb")]
+        b = home.board(master, ROOMS, rows)
+        d = {x["id"]: x for x in b["devices"]}
+        self.assertEqual(d["Kasa Plug"]["in_apps"], ["kasa", "ha"])
+        self.assertEqual((d["Pet Cam"]["app"], d["Pet Cam"]["app_set"]), ("wyze", False))
+        self.assertEqual(d["name:Kitchen Lamp"]["app"], "feit")      # brand from Description
+        self.assertEqual([a["key"] for a in b["apps"]], home.APP_KEYS)
+        # moving Pet Cam to Petcube drafts its home.csv row with Native set
+        self.assertIsNotNone(home.set_app(rows, master, "Pet Cam", "petcube"))
+        self.assertEqual(rows[-1]["Device"], "Pet Cam")
+        self.assertEqual(rows[-1]["Native"], "petcube")
+        d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}
+        self.assertEqual((d["Pet Cam"]["app"], d["Pet Cam"]["app_set"]), ("petcube", True))
+        home.set_app(rows, master, "Pet Cam", home.NO_APP)
+        d = {x["id"]: x for x in home.board(master, ROOMS, rows)["devices"]}
+        self.assertEqual(d["Pet Cam"]["in_apps"], [])
+        with self.assertRaises(ValueError):
+            home.set_app(rows, master, "Pet Cam", "nosuchapp")
+        self.assertIsNone(home.set_app(rows, master, "mac:AA:00:00:00:00:09", "kasa"))
+
     def test_app_room_plan(self):
         rooms = [{"Room": "Kitchen", "Floor": "Down", "Aliases": ""},
                  {"Room": "Master Bedroom", "Floor": "Up", "Aliases": "Bedroom"},

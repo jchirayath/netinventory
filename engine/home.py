@@ -90,6 +90,88 @@ _SKIP = re.compile(r"mac studio|macbook|\bmac\b|galaxy|iphone|ipad|pixel|printer
                    r"epson|obi\d|voip|polycom|nas|qnap|tesla|wii|xbox|playstation|"
                    r"video conference", re.I)
 
+# The apps that manage devices: (key, label, management portal, match). The
+# key is what home.csv Native holds. A portal of LOCAL means the device's own
+# web page (http://<its IP>), for gear managed on the LAN. Match runs on name,
+# hostname and vendor; first hit wins, so a brand comes before its parent
+# company (Blink before Amazon, PetCube before Wyze's Hualai chip).
+LOCAL = "local"
+APP_CATALOG = [
+    ("blink", "Blink", "https://blinkforhome.com", r"blink|sync.module"),
+    ("petcube", "Petcube", "https://petcube.com", r"petcube"),
+    ("wyze", "Wyze", "https://view.wyze.com", r"wyze|hualai"),
+    ("wansview", "Wansview", "https://www.wansview.com", r"wansview"),
+    ("foscam", "Foscam", "https://www.myfoscam.com", r"foscam"),
+    ("myq", "myQ", "https://www.myq.com", r"myq|chamberlain|liftmaster"),
+    ("ecobee", "ecobee", "https://www.ecobee.com/consumerportal/", r"ecobee"),
+    ("bhyve", "Orbit B-hyve", "https://techsupport.orbitbhyve.com", r"b-?hyve|orbit irrigation"),
+    ("obihai", "Obihai (OBi)", LOCAL, r"obihai|\bobi\d"),
+    ("feit", "Feit Electric", "https://www.feit.com", r"\bfeit\b"),
+    ("govee", "Govee", "https://www.govee.com", r"govee"),
+    ("kasa", "Kasa (TP-Link)", "https://www.tp-link.com/us/kasa-smart/", r"kasa|tp-link"),
+    ("wemo", "Wemo", "https://www.wemo.com", r"wemo|belkin"),
+    ("hue", "Philips Hue", "https://account.meethue.com", r"\bhue\b|philips|signify"),
+    ("harmony", "Logitech Harmony", "https://setup.myharmony.com", r"harmony|logitech"),
+    ("roku", "Roku", "https://my.roku.com", r"roku"),
+    ("lg", "LG ThinQ", "https://www.lg.com/us/lg-thinq", r"\blg\b|lg electronics"),
+    ("smartthings", "Samsung SmartThings", "https://my.smartthings.com",
+     r"samsung|smartthings|physical graph"),
+    ("onkyo", "Onkyo", LOCAL, r"onkyo|pioneer"),
+    ("qnap", "QNAP", "https://www.myqnapcloud.com", r"qnap"),
+    ("asus", "ASUS", LOCAL, r"asus|rp-ac"),
+    ("xfinity", "Xfinity", "https://internet.xfinity.com", r"xfinity|technicolor|vantiva"),
+    ("utec", "U-tec (U-Bolt)", "https://u-tec.com", r"u-bolt|u-tec|ultraloq"),
+    ("sense", "Sense", "https://home.sense.com", r"\bsense\b"),
+    ("solaredge", "SolarEdge", "https://monitoring.solaredge.com", r"solaredge"),
+    ("flume", "Flume", "https://portal.flumewater.com", r"flume"),
+    ("waterguru", "WaterGuru", "https://www.waterguru.com", r"waterguru"),
+    ("iaqualink", "iAqualink", "https://www.iaqualink.com", r"iaqualink|jandy"),
+    ("epson", "Epson Connect", "https://www.epsonconnect.com", r"epson"),
+    ("tesla", "Tesla", "https://www.tesla.com/teslaaccount", r"tesla"),
+    ("ha", "Home Assistant", "http://homeassistant.local:8123", r"home ?assistant"),
+    ("apple", "Apple", "https://account.apple.com",
+     r"apple|iphone|ipad|macbook|mac studio|\bmac\b|mac\d|homepod"),
+    ("google", "Google Home", "https://home.google.com", r"google|chromecast|\bnest\b"),
+    ("alexa", "Amazon Alexa", "https://alexa.amazon.com", r"amazon|echo|alexa"),
+    ("smartlife", "Smart Life (Tuya)", "https://ismartlife.me", r"tuya|beken|smart ?life"),
+]
+APP_KEYS = [k for k, *_ in APP_CATALOG]
+NO_APP = "none"          # Native set to "no app" on purpose (so nothing is guessed)
+# AppNames platform keys that are a catalog app under another key.
+APP_ALIASES = {"tuya": "smartlife"}
+# Hubs and voice apps that also list other vendors' devices: being reported
+# by one says nothing about which app the device itself belongs to.
+AGGREGATORS = {"ha", "smartthings", "google", "alexa", "apple"}
+
+
+def app_key(name):
+    """A Native or AppNames value as a catalog key ('tuya' -> 'smartlife')."""
+    n = (name or "").strip().lower()
+    return APP_ALIASES.get(n, n)
+
+
+def guess_app(row):
+    """The catalog app a device most likely belongs to, from its name,
+    hostname and vendor; '' if nothing matches."""
+    hay = " ".join([row.get("Device", ""), row.get("Hostname", ""),
+                    row.get("Vendor", "")]).lower()
+    return next((k for k, _, _, pat in APP_CATALOG if re.search(pat, hay)), "")
+
+
+def device_app(native, apps, row):
+    """(app, set): a set Native wins; then the vendor cloud that reports the
+    device (its AppNames, hubs aside); then a guess from name and vendor."""
+    if native.strip():
+        n = app_key(native)
+        return ("" if n == NO_APP else n), True
+    cloud = [app_key(p) for p in apps if app_key(p) not in AGGREGATORS]
+    return (cloud[0] if cloud else guess_app(row)), False
+
+
+def app_catalog():
+    """The catalog as the board sends it: [{key, label, portal}]."""
+    return [{"key": k, "label": lbl, "portal": url} for k, lbl, url, _ in APP_CATALOG]
+
 
 # Seed for a missing rooms.csv; Floor is left TODO so `check` asks for it.
 STARTER_ROOMS = [("Living Room", ""), ("Family Room", "Den"), ("Kitchen", ""),
@@ -301,21 +383,27 @@ def board(master_rows, rooms, home):
         # Wi-Fi, paired to a sync module) keeps its own and just notes the hub.
         via = h.get("Via", "")
         src = h["Device"] or via
+        # A row's own AppNames count too: a cloud may list a device with no
+        # MAC (Blink doorbells, Minis), so a scan cannot.
+        reported = {**parse_app_names(h.get("AppNames", "")), **apps.get(h["Device"], {})}
+        # The brand often lives only in Description ('Kasa HS200 wall switch').
+        scanned = first.get(h["Device"], {})
+        hay = {"Device": h["Device"] or h["Name"], "Hostname": scanned.get("Hostname", ""),
+               "Vendor": " ".join([scanned.get("Vendor", ""), h["Description"]])}
+        app, app_set = device_app(h.get("Native", ""), reported, hay)
         devices.append({"id": key, "device": h["Device"], "name": h["Name"],
                         "type": h["Type"], "room": room_set.get(h["Room"].lower(), ""),
                         "status": status.get(src, ""),
                         **net(src, not h["Device"] and bool(via)), "via": via,
-                        # A row's own AppNames count too: a cloud may list a device
-                        # with no MAC (Blink doorbells, Minis), so a scan cannot.
-                        "apps": {**parse_app_names(h.get("AppNames", "")),
-                                 **apps.get(h["Device"], {})}})
+                        "apps": reported, "app": app, "app_set": app_set})
     for dev in sorted(status):
         if dev not in seen:
             seen.add(dev)
+            app, _ = device_app("", apps.get(dev, {}), first[dev])
             devices.append({"id": dev, "device": dev, "name": "",
                             "type": guess_type(first[dev])[0],
                             "room": "", "status": status[dev], **net(dev), "via": "",
-                            "apps": apps.get(dev, {})})
+                            "apps": apps.get(dev, {}), "app": app, "app_set": False})
     # Unnamed MACs the scan still sees, so nothing online is missing; the
     # board asks for a name before one can go in a room.
     for r in master_rows:
@@ -325,15 +413,25 @@ def board(master_rows, rooms, home):
         host = r.get("Hostname", "").strip()
         if re.fullmatch(r"[0-9a-f:]{12,17}", host.lower()):
             host = ""
+        reported = parse_app_names(r.get("AppNames", ""))
         devices.append({"id": "mac:" + mac, "device": "", "name": "",
                         "type": guess_type(r)[0], "room": "", "status": r.get("Status", ""),
                         "seen_as": host, "ip": r.get("IP", "").strip(), "macs": [mac],
                         "vendor": r.get("Vendor", "").strip(), "unnamed": True, "via": "",
-                        "apps": parse_app_names(r.get("AppNames", ""))})
+                        "apps": reported, "app": device_app("", reported, r)[0],
+                        "app_set": False})
+    # Every app column a device sits in: its own app, then each app that
+    # reports it (a Kasa plug also shows under Home Assistant).
+    for d in devices:
+        d["in_apps"] = list(dict.fromkeys(k for k in [d["app"], *map(app_key, d["apps"])] if k))
     # The platforms that reported at least one device (from AppNames).
     platforms = sorted({p for d in devices for p in d["apps"]})
+    # Every catalog app, then any app a device names that the catalog lacks.
+    catalog = app_catalog()
+    extra = sorted({k for d in devices for k in d["in_apps"] if k not in APP_KEYS})
+    catalog += [{"key": k, "label": k, "portal": ""} for k in extra]
     return {"rooms": [r["Room"] for r in rooms], "types": TYPES, "platforms": platforms,
-            "devices": devices}
+            "apps": catalog, "devices": devices}
 
 
 def set_room(home, master_rows, key, room):
@@ -370,6 +468,23 @@ def set_type(home, master_rows, key, typ):
     if row["Expose"] == default_expose(row["Type"]):
         row["Expose"] = default_expose(typ)
     row["Type"] = typ
+    return row
+
+
+def set_app(home, master_rows, key, app):
+    """Set the app one device belongs to (home.csv Native): a catalog key,
+    NO_APP for "no app", or '' to go back to the guess. A device not yet in
+    home.csv gets a drafted row. Returns the row, or None if the key is
+    unknown; raises ValueError for an app the catalog lacks."""
+    app = app_key(app)
+    if app and app != NO_APP and app not in APP_KEYS:
+        raise ValueError(f"unknown app '{app}'")
+    row = next((h for h in home if _key(h) == key), None)
+    if row is None and set_room(home, master_rows, key, TODO) is not None:
+        row = home[-1]
+    if row is None:
+        return None
+    row["Native"] = app
     return row
 
 

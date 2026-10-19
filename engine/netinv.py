@@ -2834,6 +2834,12 @@ h1{font-size:1.2rem;margin:.2rem 0}
 #menu .del{color:#b3261e}
 .seg{display:inline-flex}.seg .btn{border-radius:0}.seg .btn:first-child{border-radius:6px 0 0 6px}
 .seg .btn:last-child{border-radius:0 6px 6px 0}.seg .btn+.btn{border-left:none}.seg .btn.on{background:var(--head);color:#fff}
+.bar select{padding:4px 6px;font:13px system-ui;border:1px solid #cdd;border-radius:6px;background:#fff;max-width:12rem}
+.bar select.on{border-color:var(--head);background:#e6eef9}
+.room h2 .portal{color:#fff;text-decoration:none;margin-left:6px;opacity:.85}
+.room h2 .portal:hover{opacity:1;text-decoration:underline}
+.dev .guess{font-size:10.5px;color:#8593a3;font-style:italic}
+.dev .open{font-size:11px;text-decoration:none;color:#3a516b;align-self:flex-start}
 </style>
 <h1 id=ttl>Rooms</h1><div id=sum>loading…</div>
 <div id=ro class=ro style=display:none>Read-only: start with
@@ -2841,6 +2847,8 @@ h1{font-size:1.2rem;margin:.2rem 0}
 <div class=bar>
  <input id=q placeholder="filter devices…">
  <span class=seg><a class=btn id=byroom href="#room">By room</a><a class=btn id=bytype href="#type">By type</a><a class=btn id=byapp href="#app">By app</a></span>
+ <select id=froom title="filter by room"></select><select id=ftype title="filter by type"></select><select id=fapp title="filter by app"></select>
+ <button class=btn id=fclear type=button style=display:none>Clear filters</button>
  <span class=spacer></span>
  <form id=addf style="display:flex;gap:6px;margin:0">
   <input id=newroom placeholder="new room name" maxlength=40>
@@ -2853,25 +2861,51 @@ h1{font-size:1.2rem;margin:.2rem 0}
 <div id=menu></div>
 <script>
 const WRITABLE=__WRITABLE__;
-let B={rooms:[],types:[],devices:[]},Q='';
-// Two views of the same board: columns by room, or by type (TODO first).
-// Three views of the same board: by room, by type (TODO first), and by app:
-// the platforms that report the device (AppNames), so one device can sit in
-// several app columns. The app view is read-only: the platforms decide it.
+let B={rooms:[],types:[],apps:[],devices:[]},Q='';
+// Three views of the same board: by room, by type (TODO first), and by app.
+// A device's app is the one set in home.csv (Native), else the vendor cloud
+// that reports it, else a guess from its name and vendor. Apps that also
+// list it (Home Assistant, SmartThings) show it too, so one device can sit
+// in several app columns. Dragging to an app column sets its app.
 const mode=()=>({'#type':'type','#app':'app'})[location.hash]||'room';
 const tyLabel=t=>t=='TODO'?'TODO (no type)':t.replace('_',' ');
-const PLAT={tuya:'Tuya / Smart Life',smartthings:'SmartThings',ha:'Home Assistant',govee:'Govee',
- blink:'Blink',kasa:'Kasa',wyze:'Wyze',apple:'Apple Home'};
+const appOf=k=>B.apps.find(a=>a.key==k);
+const appLabel=k=>k?(appOf(k)||{label:k}).label:'No app';
 const colsOf=d=>mode()=='room'?[B.rooms.includes(d.room)?d.room:'']
  :mode()=='type'?[B.types.includes(d.type)?d.type:'TODO']
- :(Object.keys(d.apps||{}).length?Object.keys(d.apps):['']);
-const cols=()=>mode()=='room'?['',...B.rooms]:mode()=='type'?['TODO',...B.types]:['',...B.platforms];
-const colName=c=>mode()=='room'?(c||'Unassigned'):mode()=='type'?tyLabel(c):(c?PLAT[c]||c:'Not in any app');
-const canDrag=()=>WRITABLE&&mode()!='app';
+ :(d.in_apps.length?d.in_apps:['']);
+const cols=()=>mode()=='room'?['',...B.rooms]:mode()=='type'?['TODO',...B.types]:['',...B.apps.map(a=>a.key)];
+const colName=c=>mode()=='room'?(c||'Unassigned'):mode()=='type'?tyLabel(c):appLabel(c);
+const canDrag=()=>WRITABLE;
+// Sub-filters, the same on every tab. '*' is "all"; '' is Unassigned / No app.
+// Kept per browser so a filter survives a reload; storage may be blocked.
+const F={room:'*',type:'*',app:'*'};
+try{Object.assign(F,JSON.parse(localStorage.getItem('netinv.board.filters')||'{}'))}catch(e){}
+// A link can carry filters too (/rooms?type=camera#room), so a view can be bookmarked.
+new URLSearchParams(location.search).forEach((v,k)=>{if(k in F)F[k]=v});
+const saveF=()=>{try{localStorage.setItem('netinv.board.filters',JSON.stringify(F))}catch(e){}};
+const filtering=()=>Q||F.room!='*'||F.type!='*'||F.app!='*';
+const passF=d=>(F.room=='*'||(F.room?d.room==F.room:!B.rooms.includes(d.room)))
+ &&(F.type=='*'||(F.type=='TODO'?!B.types.includes(d.type):d.type==F.type))
+ &&(F.app=='*'||(F.app?d.in_apps.includes(F.app):!d.in_apps.length));
+const IP4=/^\\d{1,3}(\\.\\d{1,3}){3}$/;
+// A device managed on its own web page (portal "local") links to its IP.
+const localUrl=d=>{const a=appOf(d.app);return a&&a.portal=='local'&&IP4.test(d.ip||'')?'http://'+d.ip:''};
+function fillSelect(sel,key,opts){
+ // Rebuild only when the choices change, so the 15 s refresh never closes an open list.
+ const sig=JSON.stringify(opts);if(sel.dataset.sig!=sig){sel.dataset.sig=sig;
+  sel.innerHTML=opts.map(([v,t])=>`<option value="${esc(v)}">${esc(t)}</option>`).join('')}
+ if(!opts.some(([v])=>v==F[key]))F[key]='*';
+ sel.value=F[key];sel.classList.toggle('on',F[key]!='*')}
+function syncFilters(){
+ fillSelect(froom,'room',[['*','All rooms'],['','Unassigned'],...B.rooms.map(r=>[r,r])]);
+ fillSelect(ftype,'type',[['*','All types'],['TODO','TODO (no type)'],...B.types.map(t=>[t,tyLabel(t)])]);
+ fillSelect(fapp,'app',[['*','All apps'],['','No app'],...B.apps.map(a=>[a.key,a.label])]);
+ fclear.style.display=filtering()?'':'none'}
 const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const label=d=>d.name||d.device||d.seen_as||d.vendor||'Unknown device';
 const color=s=>s=='online'?'#137333':(s=='offline'?'#e08600':'#bbb');
-function card(d){
+function card(d,col){
  const todo=!d.type||d.type=='TODO';
  // The type badge is the type picker: click it to set the type.
  const ty=`<span class="ty${todo?' todo':''}"${WRITABLE?' title="set type"':''}>${todo?'TODO':esc(d.type.replace('_',' '))}</span>`;
@@ -2881,26 +2915,41 @@ function card(d){
  const nw=d.via&&!d.device?['via '+d.via,d.ip].filter(Boolean)
   :[d.via?'via '+d.via:'',d.ip,...d.macs].filter(Boolean);
  if(mode()!='room')nw.unshift(d.room?'⌂ '+d.room:'⌂ no room');
+ if(mode()!='app')nw.push(appLabel(d.app));
  const net=nw.length?`<span class=net>${nw.map(esc).join(' · ')}</span>`:'';
+ // In its own app's column, say when that app is only a guess (drag to confirm).
+ const guess=mode()=='app'&&col&&col==d.app&&!d.app_set?' <span class=guess>guessed</span>':'';
+ const lu=localUrl(d);
+ const open=lu?`<a class=open href="${esc(lu)}" target=_blank rel=noopener title="open ${esc(lu)}">↗</a>`:'';
  // What each app calls it, only where that differs from the name shown here.
  const an=Object.entries(d.apps||{}).filter(([p,n])=>n.toLowerCase()!=label(d).toLowerCase());
  const app=an.length?`<span class=app>${an.map(([p,n])=>`${esc(p)}: ${esc(n)}`).join(' · ')}</span>`:'';
  return `<div class="dev${d.unnamed?' unnamed':''}" draggable=${canDrag()} data-id="${esc(d.id)}" title="${esc(tip)}">`+
   `<span class=dot style=background:${color(d.status)}></span>`+
-  `<span class=nm>${esc(label(d))}${sub}${app}${net}</span>${ty}</div>`}
+  `<span class=nm>${esc(label(d))}${guess}${sub}${app}${net}</span>${open}${ty}</div>`}
+// An app column's header links to the app's management portal.
+function portalLink(c){const a=mode()=='app'&&appOf(c);if(!a||!a.portal)return '';
+ if(a.portal=='local')return ' <span class=portal title="managed on each device\\'s own page: use the ↗ on its card">(local)</span>';
+ return ` <a class=portal href="${esc(a.portal)}" target=_blank rel=noopener title="open the ${esc(a.label)} portal">↗</a>`}
 function render(){
- const shown=B.devices.filter(d=>!Q||[label(d),d.device,d.type,d.seen_as,d.vendor,d.via,d.ip,...d.macs,
-  ...Object.values(d.apps||{})].join(' ').toLowerCase().includes(Q));
- const cs=cols(),by={};cs.forEach(c=>by[c]=[]);
- shown.forEach(d=>colsOf(d).forEach(c=>(by[c]||by[cs[0]]).push(d)));
+ syncFilters();
+ const shown=B.devices.filter(d=>passF(d)&&(!Q||[label(d),d.device,d.type,d.seen_as,d.vendor,d.via,d.ip,...d.macs,
+  ...Object.values(d.apps||{}),appLabel(d.app)].join(' ').toLowerCase().includes(Q)));
+ const all=cols(),by={};all.forEach(c=>by[c]=[]);
+ shown.forEach(d=>colsOf(d).forEach(c=>(by[c]||by[all[0]]).push(d)));
  Object.values(by).forEach(l=>l.sort((a,b)=>label(a).localeCompare(label(b))));
- const first=cs[0];
+ const first=all[0];
+ // While filtering, only the columns with a match are worth the space.
+ const cs=filtering()?all.filter(c=>by[c].length):all;
  g.innerHTML=cs.map(c=>`<div class="room${c==first?' unassigned':''}" data-col="${esc(c)}">`+
-  `<h2><span>${esc(colName(c))}</span><span class=n>${by[c].length}</span></h2>`+
-  `<div class=list>${by[c].map(card).join('')||'<div class=empty>drop devices here</div>'}</div></div>`).join('');
+  `<h2><span>${esc(colName(c))}${portalLink(c)}</span><span class=n>${by[c].length}</span></h2>`+
+  `<div class=list>${by[c].map(d=>card(d,c)).join('')||'<div class=empty>drop devices here</div>'}</div></div>`).join('')
+  ||'<div class=empty>no devices match the filters</div>';
  const un=B.devices.filter(d=>!d.room).length,nn=B.devices.filter(d=>d.unnamed).length,
-  nt=B.devices.filter(d=>!B.types.includes(d.type)).length;
- sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned · ${nt} no type · ${nn} unnamed`;
+  nt=B.devices.filter(d=>!B.types.includes(d.type)).length,na=B.devices.filter(d=>!d.app).length,
+  ng=B.devices.filter(d=>d.app&&!d.app_set).length;
+ sum.textContent=`${B.devices.length} devices · ${B.rooms.length} rooms · ${un} unassigned · ${nt} no type · `+
+  `${na} no app · ${ng} app guessed · ${nn} unnamed`+(filtering()?` · showing ${shown.length}`:'');
  ttl.textContent={room:'Rooms',type:'Types',app:'Apps'}[mode()];
  document.title='netinventory '+ttl.textContent.toLowerCase();
  byroom.classList.toggle('on',mode()=='room');bytype.classList.toggle('on',mode()=='type');
@@ -2925,6 +2974,17 @@ async function retype(id,type){
  const was=d.type;d.type=t||'TODO';render();
  try{await post('/api/type',{id,type:t})}
  catch(e){d.type=was;render();say('Type change failed: '+e.message)}}
+// Set the app a device belongs to ('' = No app, kept as "none" so nothing is guessed).
+async function reapp(id,app){
+ const d=B.devices.find(x=>x.id==id);if(!d)return;if(d.app==app&&d.app_set)return;
+ if(d.unnamed){say('Name this device first; its app is set once named.');
+  startRename(id,nid=>reapp(nid,app));return}
+ const was={app:d.app,app_set:d.app_set,in_apps:d.in_apps};
+ // Columns from reporting apps stay; only its own app moves.
+ const rep=d.in_apps.filter(k=>k!=d.app);
+ Object.assign(d,{app,app_set:true,in_apps:[...new Set([app,...rep].filter(Boolean))]});render();
+ try{await post('/api/app',{id,app:app||'none'})}
+ catch(e){Object.assign(d,was);render();say('App change failed: '+e.message)}}
 async function remove(id){
  const d=B.devices.find(x=>x.id==id);if(!d)return;
  try{await post('/api/delete',{id});B.devices=B.devices.filter(x=>x!==d);render();
@@ -2944,7 +3004,7 @@ g.addEventListener('dragleave',e=>{const rm=e.target.closest('.room');
  if(rm&&!rm.contains(e.relatedTarget))rm.classList.remove('over')});
 g.addEventListener('drop',e=>{const rm=e.target.closest('.room');if(!rm)return;
  e.preventDefault();rm.classList.remove('over');const id=e.dataTransfer.getData('text/plain')||dragId;
- dragId=null;if(id&&canDrag())(mode()=='room'?move:retype)(id,rm.dataset.col)});
+ dragId=null;if(id&&canDrag())({room:move,type:retype,app:reapp})[mode()](id,rm.dataset.col)});
 g.addEventListener('dragend',()=>{dragId=null;g.querySelectorAll('.over').forEach(x=>x.classList.remove('over'))});
 async function deleteRoom(room,to){
  try{const j=await post('/api/room-delete',{room,to});
@@ -2971,6 +3031,9 @@ function showMenu(id,html,x,y){menu.innerHTML=html;menu.dataset.id=id;menu.datas
  menu.style.left=Math.min(x,innerWidth-w-8)+'px';menu.style.top=Math.min(y,innerHeight-h-8)+'px'}
 const typeList=d=>`<div class=hd>Type of ${esc(label(d))}</div>`+['TODO',...B.types].map(t=>
  `<div data-type="${esc(t)}" class="${t==(d.type||'TODO')?'cur':''}">${esc(tyLabel(t))}</div>`).join('');
+const appList=d=>`<div class=hd>App of ${esc(label(d))}${d.app&&!d.app_set?' (guessed)':''}</div>`+
+ ['',...B.apps.map(a=>a.key)].map(k=>
+ `<div data-app="${esc(k)}" class="${k==d.app?'cur':''}">${esc(appLabel(k))}</div>`).join('');
 // Click a type badge: pick the type right there.
 g.addEventListener('click',e=>{const b=e.target.closest('.ty');if(!b||!WRITABLE)return;
  e.stopPropagation();const d=B.devices.find(x=>x.id==b.closest('.dev').dataset.id);if(!d)return;
@@ -2989,9 +3052,10 @@ g.addEventListener('contextmenu',e=>{const el=e.target.closest('.dev');if(!el||!
  const del=d.id.startsWith('name:')?'<div data-act=delete class=del>Delete…</div>':'';
  const rooms=`<div class=hd>Move ${esc(label(d))} to</div>`+['',...B.rooms].map(r=>
   `<div data-room="${esc(r)}" class="${r==d.room?'cur':''}">${r?esc(r):'Unassigned'}</div>`).join('');
- const types=typeList(d);
- showMenu(d.id,`<div data-act=rename>Rename…</div>${del}`+(mode()=='room'?rooms+types:types+rooms),
-  e.clientX,e.clientY)});
+ const types=typeList(d),apps=appList(d);
+ // The current tab's list comes first.
+ const lists={room:rooms+types+apps,type:types+rooms+apps,app:apps+rooms+types}[mode()];
+ showMenu(d.id,`<div data-act=rename>Rename…</div>${del}`+lists,e.clientX,e.clientY)});
 menu.addEventListener('click',e=>{
  const room=menu.dataset.room;
  if(e.target.closest('[data-act=room-rename]')){menu.style.display='none';startRoomRename(room);return}
@@ -3016,6 +3080,8 @@ menu.addEventListener('click',e=>{
   menu.style.display='none';remove(menu.dataset.id);return}
  const ty=e.target.closest('[data-type]');
  if(ty){menu.style.display='none';retype(menu.dataset.id,ty.dataset.type);return}
+ const ap=e.target.closest('[data-app]');
+ if(ap){menu.style.display='none';reapp(menu.dataset.id,ap.dataset.app);return}
  const it=e.target.closest('[data-room]');if(!it)return;
  menu.style.display='none';move(menu.dataset.id,it.dataset.room)});
 // Rename in place on the card: Enter saves, Escape or leaving the field cancels.
@@ -3048,6 +3114,9 @@ addf.addEventListener('submit',async e=>{e.preventDefault();const name=newroom.v
   if(B.rooms.includes(j.room))say(`'${j.room}' already exists`);else{B.rooms.push(j.room);render()}}
  catch(e){say('Add room failed: '+e.message)}});
 q.addEventListener('input',()=>{Q=q.value.toLowerCase();render()});
+[[froom,'room'],[ftype,'type'],[fapp,'app']].forEach(([s,k])=>s.addEventListener('change',()=>{
+ F[k]=s.value;saveF();render()}));
+fclear.addEventListener('click',()=>{F.room=F.type=F.app='*';saveF();Q='';q.value='';render()});
 if(!WRITABLE){ro.style.display='block';addf.style.display='none'}
 addEventListener('hashchange',render);
 async function load(){if(dragId!=null||editing||menu.style.display=='block')return;
@@ -3113,7 +3182,7 @@ def cmd_serve(args):
         def do_POST(self):
             path = self.path.split("?")[0]
             if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
-                            "/api/type", "/api/delete", "/api/room-delete",
+                            "/api/type", "/api/app", "/api/delete", "/api/room-delete",
                             "/api/room-rename"):
                 self.send_error(404)
                 return
@@ -3152,13 +3221,13 @@ def cmd_serve(args):
                     self._name(req)
                 elif path == "/api/rename":
                     self._rename(req)
-                elif path in ("/api/type", "/api/delete"):
+                elif path in ("/api/type", "/api/app", "/api/delete"):
                     self._edit(path, req)
                 else:
                     self._room(path, req)
 
         def _edit(self, path, req):
-            """Board type change, or deleting a device with no MAC."""
+            """Board type or app change, or deleting a device with no MAC."""
             import home
             rows = home.load_home(HOME_CSV)
             key = str(req.get("id", ""))
@@ -3166,6 +3235,9 @@ def cmd_serve(args):
                 if path == "/api/type":
                     ok = home.set_type(rows, list(load_master().values()), key,
                                        str(req.get("type", ""))) is not None
+                elif path == "/api/app":
+                    ok = home.set_app(rows, list(load_master().values()), key,
+                                      str(req.get("app", ""))) is not None
                 else:
                     ok = home.delete(rows, key)
             except ValueError as e:
@@ -3267,7 +3339,7 @@ def cmd_serve(args):
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
           f"(/, /rooms, /api/devices, /api/summary, /api/alerts, /api/events, /api/board)")
-    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/room-rename, /api/room-delete, /api/rename, /api/type, /api/delete)' if allow_write else 'disabled (read-only)'}")
+    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/room-rename, /api/room-delete, /api/rename, /api/type, /api/app, /api/delete)' if allow_write else 'disabled (read-only)'}")
     if args.host not in ("127.0.0.1", "localhost"):
         print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
         if allow_write:
