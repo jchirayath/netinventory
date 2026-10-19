@@ -578,6 +578,57 @@ def add_room(rooms, room):
     return room
 
 
+def _find_room(rooms, room):
+    return next((r for r in rooms if r["Room"].lower() == clean_room(room).lower()), None)
+
+
+def delete_room(rooms, home, room, move_to=""):
+    """Drop `room` from rooms.csv; its home.csv devices move to `move_to`
+    (another room) or become unassigned. Returns how many devices moved;
+    raises ValueError for an unknown room or target."""
+    row = _find_room(rooms, room)
+    if row is None:
+        raise ValueError(f"unknown room '{room}'")
+    target = _find_room(rooms, move_to) if move_to else None
+    if move_to and (target is None or target is row):
+        raise ValueError(f"cannot move devices to '{move_to}'")
+    moved = 0
+    for h in home:
+        if h["Room"].lower() == row["Room"].lower():
+            h["Room"] = target["Room"] if target else TODO
+            moved += 1
+    rooms.remove(row)
+    return moved
+
+
+def rename_room(rooms, home, room, new):
+    """Rename a room in rooms.csv and on every home.csv device in it. The old
+    name becomes an alias, so an app room or a Name prefix that used it still
+    maps. Returns how many devices were relabelled; raises ValueError for an
+    unknown room or a name another room already uses."""
+    row = _find_room(rooms, room)
+    if row is None:
+        raise ValueError(f"unknown room '{room}'")
+    new, old = clean_room(new), row["Room"]
+    if not new:
+        raise ValueError("room name required")
+    if len(new) > 40:
+        raise ValueError("room name is longer than 40 characters")
+    owner = room_words(rooms).get(new.lower())
+    if owner and owner.lower() != old.lower():
+        raise ValueError(f"'{new}' is already used by room '{owner}'")
+    aliases = [a for a in split_list(row["Aliases"]) if a.lower() != new.lower()]
+    if old.lower() != new.lower() and old.lower() not in (a.lower() for a in aliases):
+        aliases.append(old)
+    row["Room"], row["Aliases"] = new, ", ".join(aliases)
+    moved = 0
+    for h in home:
+        if h["Room"].lower() == old.lower():
+            h["Room"] = new
+            moved += 1
+    return moved
+
+
 def check(rooms, home, master_names=None):
     """Validate against docs/home-standard.md. Returns (errors, warnings),
     each a list of strings."""

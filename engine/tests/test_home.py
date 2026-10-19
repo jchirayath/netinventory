@@ -458,5 +458,48 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(rooms[-1], {"Room": "Attic Room", "Floor": "TODO", "Aliases": ""})
 
 
+class TestRoomEdit(unittest.TestCase):
+    def setUp(self):
+        self.rooms = [dict(r) for r in ROOMS]          # Living Room, Family Room (Den), Kitchen...
+        self.home = [row(Device="Lamp", Room="Kitchen"), row(Device="Plug", Room="kitchen"),
+                     row(Device="TV", Room="Family Room")]
+
+    def test_delete_room_unassigns_or_moves_its_devices(self):
+        self.assertEqual(home.delete_room(self.rooms, self.home, "Kitchen"), 2)
+        self.assertEqual([h["Room"] for h in self.home], ["TODO", "TODO", "Family Room"])
+        self.assertNotIn("Kitchen", [r["Room"] for r in self.rooms])
+        self.assertEqual(home.delete_room(self.rooms, self.home, "family room", "Living Room"), 1)
+        self.assertEqual(self.home[2]["Room"], "Living Room")
+
+    def test_delete_room_rejects_unknown_room_or_target(self):
+        with self.assertRaisesRegex(ValueError, "unknown room"):
+            home.delete_room(self.rooms, self.home, "Attic")
+        with self.assertRaisesRegex(ValueError, "cannot move"):
+            home.delete_room(self.rooms, self.home, "Kitchen", "Kitchen")
+        with self.assertRaisesRegex(ValueError, "cannot move"):
+            home.delete_room(self.rooms, self.home, "Kitchen", "Attic")
+        self.assertEqual(len(self.rooms), len(ROOMS))   # nothing removed on error
+
+    def test_rename_room_relabels_devices_and_keeps_old_name_as_alias(self):
+        self.assertEqual(home.rename_room(self.rooms, self.home, "Kitchen", " Galley  Kitchen "), 2)
+        r = next(r for r in self.rooms if r["Room"] == "Galley Kitchen")
+        self.assertEqual(r["Aliases"], "Kitchen")
+        self.assertEqual([h["Room"] for h in self.home][:2], ["Galley Kitchen"] * 2)
+        self.assertEqual(home.room_words(self.rooms)["kitchen"], "Galley Kitchen")
+
+    def test_rename_room_to_own_alias_drops_that_alias(self):
+        home.rename_room(self.rooms, self.home, "Family Room", "Den")
+        r = next(r for r in self.rooms if r["Room"] == "Den")
+        self.assertEqual(r["Aliases"], "Family Room")
+
+    def test_rename_room_rejects_a_name_another_room_uses(self):
+        with self.assertRaisesRegex(ValueError, "already used by room 'Family Room'"):
+            home.rename_room(self.rooms, self.home, "Kitchen", "den")
+        with self.assertRaisesRegex(ValueError, "already used"):
+            home.rename_room(self.rooms, self.home, "Kitchen", "Living Room")
+        home.rename_room(self.rooms, self.home, "Kitchen", "KITCHEN")   # case-only is fine
+        self.assertIn("KITCHEN", [r["Room"] for r in self.rooms])
+
+
 if __name__ == "__main__":
     unittest.main()
