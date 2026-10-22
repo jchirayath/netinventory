@@ -158,8 +158,10 @@ you stop it. Each poll also logs a `leave` event when a device that was online
 stops answering and a `back` event when an offline one returns (it pings every
 host, so the time is the poll's, not when the ARP cache lets go ~20 min later).
 `./netinv.py set-email` stores SMTP settings in the Keychain (Gmail: an app
-password) and sends a test; `watch --email` then mails each poll's joins,
-comebacks and leaves with name, room, MAC, IP, vendor and time. Leave the
+password) and sends a test; `watch --email` then mails each poll's new devices
+and known devices whose IP, hostname or vendor changed (an `update` event), with
+name, room, MAC, IP, vendor and time. Leaves and comebacks are logged but not
+mailed, since battery devices that sleep between check-ins flap. Leave the
 password blank and mail goes out through Mail.app's own account instead (it is
 also the fallback when SMTP fails); macOS asks once to let the job control Mail.
 Each join is captured with its time, IP, MAC, vendor, hostname, and

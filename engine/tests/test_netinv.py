@@ -534,6 +534,32 @@ class TestPresence(unittest.TestCase):
                   "10.0.0.1", "Room:     Pool", "Amazon", "Blink-Device", "Wi-Fi 2.4 GHz"):
             self.assertIn(s, body)
 
+    def test_report_changes_finds_new_ip_hostname_or_vendor(self):
+        master = {"A": self.row("A", "online", Hostname="cam"),     # IP moves
+                  "B": self.row("B", "offline", Hostname="plug"),   # just went quiet
+                  "C": self.row("C", "online")}                     # gains a hostname
+        before = netinv.detail_snapshot(master)
+        master["A"]["IP"] = "10.0.0.9"
+        master["C"]["Hostname"] = "Roku"
+        with mock.patch.object(netinv, "log_events") as log:
+            changes = netinv.report_changes(master, before)
+        self.assertEqual(changes, {"A": {"IP": ("10.0.0.1", "10.0.0.9")},
+                                   "C": {"Hostname": ("", "Roku")}})
+        self.assertEqual(log.call_args.kwargs["kind"], "update")
+
+    def test_event_email_shows_what_changed(self):
+        r = self.row("AA:BB:CC:00:00:02", "online", Device="Doorbell")
+        subject, body = netinv.event_email(
+            [("update", r)], changes={r["MAC"]: {"IP": ("10.0.0.5", "10.0.0.1")}})
+        self.assertEqual(subject, "netinventory: 1 changed")
+        self.assertIn("CHANGED: Doorbell", body)
+        self.assertIn("Changed:  IP 10.0.0.5 -> 10.0.0.1", body)
+
+    def test_email_events_skips_presence_only_polls(self):
+        with mock.patch.object(netinv, "send_email") as send:
+            netinv.email_events({}, [], {})
+        send.assert_not_called()
+
     def test_send_email_without_settings_does_not_raise(self):
         empty = {f: None for f, _s, _p in netinv.EMAIL_FIELDS}
         with mock.patch.object(netinv, "email_settings", return_value=empty), \

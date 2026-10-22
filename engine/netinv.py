@@ -1050,7 +1050,7 @@ def prune_events():
 
 def log_events(rows, kind="join"):
     """Append device events to events.csv (append-only history of joins,
-    leaves and comebacks)."""
+    updates, leaves and comebacks)."""
     if not rows:
         return
     newfile = not os.path.exists(EVENTS_LOG)
@@ -1093,6 +1093,35 @@ def report_presence(master, before_status):
             print(f"    {sign} {(r['IP'] or '(no ip)'):15} {r['MAC']}  "
                   f"{'left' if sign == '-' else 'back'}  {r['Device'] or r['Hostname'] or r['Vendor'] or ''}")
     return left, back
+
+
+# What identifies a known device on the wire; a change in one is worth an
+# email, unlike a battery device dozing off and waking up again.
+DETAIL_FIELDS = ("IP", "Hostname", "Vendor")
+
+
+def detail_snapshot(rows):
+    """{MAC: (IP, Hostname, Vendor)} before a merge, for report_changes."""
+    return {m: tuple(r[f] for f in DETAIL_FIELDS) for m, r in rows.items()}
+
+
+def report_changes(master, before_detail):
+    """Known MACs whose IP, hostname or vendor changed this run (merge never
+    blanks them, so a device going quiet is not a change). Logs 'update'
+    events; returns {MAC: {field: (old, new)}}."""
+    changes = {}
+    for mac, was in before_detail.items():
+        r = master.get(mac)
+        if r is None:
+            continue
+        diff = {f: (old, r[f]) for f, old in zip(DETAIL_FIELDS, was)
+                if r[f] and r[f] != old}
+        if diff:
+            changes[mac] = diff
+    log_events([master[m] for m in changes], kind="update")
+    for mac, diff in changes.items():
+        print(f"    ~ {mac}  " + ", ".join(f"{f} {o or '-'} -> {n}" for f, (o, n) in diff.items()))
+    return changes
 
 
 def verify_live(rows, wait=3):
@@ -1157,11 +1186,14 @@ def send_via_mail_app(subject, body, to, sender=""):
     return True, "sent via Mail.app"
 
 
-def event_email(events, room_of=None):
+def event_email(events, room_of=None, changes=None):
     """(subject, body) for one poll's events: [(kind, row)], kind in
-    join/back/leave. room_of: {Device: Room} from home.csv."""
+    join/update/back/leave. room_of: {Device: Room} from home.csv;
+    changes: {MAC: {field: (old, new)}} from report_changes."""
     room_of = room_of or {}
-    word = {"join": "joined (new)", "back": "came online", "leave": "went offline"}
+    changes = changes or {}
+    word = {"join": "joined (new)", "update": "changed", "back": "came online",
+            "leave": "went offline"}
     counts = {k: sum(1 for e, _ in events if e == k) for k in word}
     subject = "netinventory: " + ", ".join(f"{n} {word[k]}" for k, n in counts.items() if n)
     lines = [f"Network changes at {now_stamp()}", ""]
@@ -1173,8 +1205,10 @@ def event_email(events, room_of=None):
                   f"  Room:     {room_of.get(r['Device'], '') or '-'}",
                   f"  Vendor:   {r['Vendor'] or '-'}",
                   f"  Hostname: {r['Hostname'] or '-'}",
-                  f"  Link:     {r['Link'] or '-'}   First seen: {r['FirstSeen'] or '-'}",
-                  ""]
+                  f"  Link:     {r['Link'] or '-'}   First seen: {r['FirstSeen'] or '-'}"]
+        lines += [f"  Changed:  {f} {o or '-'} -> {n}"
+                  for f, (o, n) in changes.get(r["MAC"], {}).items()]
+        lines.append("")
     return subject, "\n".join(lines)
 
 
@@ -1218,16 +1252,17 @@ def send_smtp(subject, body, c):
         return False, str(e)
 
 
-def email_events(master, new, left, back):
-    """Email this poll's joins, comebacks and leaves (nothing if none)."""
-    events = ([("join", r) for r in new] + [("back", r) for r in back]
-              + [("leave", r) for r in left])
+def email_events(master, new, changes):
+    """Email this poll's new devices and changed ones (nothing if none).
+    Leaves and comebacks are only logged: battery devices that sleep
+    between check-ins would otherwise mail every poll."""
+    events = [("join", r) for r in new] + [("update", master[m]) for m in changes]
     if not events:
         return
     import home
     room_of = {h["Device"]: h["Room"] for h in home.load_home(HOME_CSV)
                if h["Device"] and h["Room"] != home.TODO}
-    ok, msg = send_email(*event_email(events, room_of))
+    ok, msg = send_email(*event_email(events, room_of, changes))
     print(f"  email: {msg}")
 
 
@@ -1915,6 +1950,7 @@ def cmd_watch(args):
         base = user_snapshot(master)
         before = set(master)
         before_status = {m: r["Status"] for m, r in master.items()}
+        before_detail = detail_snapshot(master)
         sightings = []
         if use_router and creds[1]:
             sightings += router_scan(*creds)
@@ -1931,10 +1967,11 @@ def cmd_watch(args):
         write_reports(master)
         new = report_new(master, before, do_notify=args.notify)
         left, back = report_presence(master, before_status)
+        changes = report_changes(master, before_detail)
         print(f"  [{now_stamp()}] poll #{n}: {len(seen)} online, {len(new)} new, "
-              f"{len(left)} left, {len(back)} back")
+              f"{len(changes)} changed, {len(left)} left, {len(back)} back")
         if args.email:
-            email_events(master, new, left, back)
+            email_events(master, new, changes)
         if args.once:
             break
         time.sleep(args.interval)
@@ -3561,7 +3598,8 @@ def main():
     w.add_argument("--notify", action="store_true", help="macOS notification on new device")
     w.add_argument("--once", action="store_true", help="run a single poll and exit")
     w.add_argument("--email", action="store_true",
-                   help="email joins, comebacks and leaves (set up with set-email)")
+                   help="email new devices and IP/hostname/vendor changes "
+                        "(not leaves/comebacks; set up with set-email)")
     w.set_defaults(func=cmd_watch)
     se = sub.add_parser("set-email", help="store SMTP settings for email alerts in Keychain")
     se.set_defaults(func=cmd_set_email)
