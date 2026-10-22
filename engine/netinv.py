@@ -900,7 +900,7 @@ def merge(master, sightings):
             online = False
         if online:
             row["Status"] = "online"
-            row["LastSeen"] = TODAY
+            row["LastSeen"] = dt.date.today().isoformat()   # not TODAY: a watch runs for days
             seen_now.add(mac)
         else:
             row["Status"] = stale_status(row["LastSeen"])
@@ -1124,6 +1124,22 @@ def report_changes(master, before_detail):
     return changes
 
 
+def long_absent(back, before_seen, days=STALE_DAYS):
+    """{MAC: LastSeen before this run} for comebacks not seen in `days`+ days
+    ('' = never seen live), the ones worth an email."""
+    today = dt.date.today()
+    out = {}
+    for r in back:
+        was = before_seen.get(r["MAC"], "")
+        try:
+            gone = (today - dt.date.fromisoformat(was)).days
+        except ValueError:
+            gone = days
+        if gone >= days:
+            out[r["MAC"]] = was
+    return out
+
+
 def verify_live(rows, wait=3):
     """Keep the scan sightings whose IP answers a ping now. The ARP cache
     keeps a departed device for ~20 minutes, so without this a 'leave' is
@@ -1186,14 +1202,16 @@ def send_via_mail_app(subject, body, to, sender=""):
     return True, "sent via Mail.app"
 
 
-def event_email(events, room_of=None, changes=None):
+def event_email(events, room_of=None, changes=None, away=None):
     """(subject, body) for one poll's events: [(kind, row)], kind in
-    join/update/back/leave. room_of: {Device: Room} from home.csv;
-    changes: {MAC: {field: (old, new)}} from report_changes."""
+    join/return/update/back/leave. room_of: {Device: Room} from home.csv;
+    changes: {MAC: {field: (old, new)}} from report_changes;
+    away: {MAC: LastSeen before} from long_absent."""
     room_of = room_of or {}
     changes = changes or {}
-    word = {"join": "joined (new)", "update": "changed", "back": "came online",
-            "leave": "went offline"}
+    away = away or {}
+    word = {"join": "joined (new)", "return": f"back after {STALE_DAYS}+ days",
+            "update": "changed", "back": "came online", "leave": "went offline"}
     counts = {k: sum(1 for e, _ in events if e == k) for k in word}
     subject = "netinventory: " + ", ".join(f"{n} {word[k]}" for k, n in counts.items() if n)
     lines = [f"Network changes at {now_stamp()}", ""]
@@ -1206,6 +1224,8 @@ def event_email(events, room_of=None, changes=None):
                   f"  Vendor:   {r['Vendor'] or '-'}",
                   f"  Hostname: {r['Hostname'] or '-'}",
                   f"  Link:     {r['Link'] or '-'}   First seen: {r['FirstSeen'] or '-'}"]
+        if r["MAC"] in away:
+            lines.append(f"  Last seen before: {away[r['MAC']] or 'never'}")
         lines += [f"  Changed:  {f} {o or '-'} -> {n}"
                   for f, (o, n) in changes.get(r["MAC"], {}).items()]
         lines.append("")
@@ -1252,17 +1272,19 @@ def send_smtp(subject, body, c):
         return False, str(e)
 
 
-def email_events(master, new, changes):
-    """Email this poll's new devices and changed ones (nothing if none).
-    Leaves and comebacks are only logged: battery devices that sleep
-    between check-ins would otherwise mail every poll."""
-    events = [("join", r) for r in new] + [("update", master[m]) for m in changes]
+def email_events(master, new, changes, away=None):
+    """Email this poll's new devices, changed ones, and ones back after a long
+    absence (nothing if none). Other leaves and comebacks are only logged:
+    battery devices that sleep between check-ins would otherwise mail every poll."""
+    away = away or {}
+    events = ([("join", r) for r in new] + [("return", master[m]) for m in away]
+              + [("update", master[m]) for m in changes])
     if not events:
         return
     import home
     room_of = {h["Device"]: h["Room"] for h in home.load_home(HOME_CSV)
                if h["Device"] and h["Room"] != home.TODO}
-    ok, msg = send_email(*event_email(events, room_of, changes))
+    ok, msg = send_email(*event_email(events, room_of, changes, away))
     print(f"  email: {msg}")
 
 
@@ -1951,6 +1973,7 @@ def cmd_watch(args):
         before = set(master)
         before_status = {m: r["Status"] for m, r in master.items()}
         before_detail = detail_snapshot(master)
+        before_seen = {m: r["LastSeen"] for m, r in master.items()}
         sightings = []
         if use_router and creds[1]:
             sightings += router_scan(*creds)
@@ -1971,7 +1994,7 @@ def cmd_watch(args):
         print(f"  [{now_stamp()}] poll #{n}: {len(seen)} online, {len(new)} new, "
               f"{len(changes)} changed, {len(left)} left, {len(back)} back")
         if args.email:
-            email_events(master, new, changes)
+            email_events(master, new, changes, long_absent(back, before_seen))
         if args.once:
             break
         time.sleep(args.interval)
@@ -3598,8 +3621,8 @@ def main():
     w.add_argument("--notify", action="store_true", help="macOS notification on new device")
     w.add_argument("--once", action="store_true", help="run a single poll and exit")
     w.add_argument("--email", action="store_true",
-                   help="email new devices and IP/hostname/vendor changes "
-                        "(not leaves/comebacks; set up with set-email)")
+                   help="email new devices, IP/hostname/vendor changes, and devices "
+                        f"back after {STALE_DAYS}+ days away (set up with set-email)")
     w.set_defaults(func=cmd_watch)
     se = sub.add_parser("set-email", help="store SMTP settings for email alerts in Keychain")
     se.set_defaults(func=cmd_set_email)

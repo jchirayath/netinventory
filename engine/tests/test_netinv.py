@@ -555,6 +555,20 @@ class TestPresence(unittest.TestCase):
         self.assertIn("CHANGED: Doorbell", body)
         self.assertIn("Changed:  IP 10.0.0.5 -> 10.0.0.1", body)
 
+    def test_long_absent_keeps_only_comebacks_after_stale_days(self):
+        ago = lambda d: (netinv.dt.date.today() - netinv.dt.timedelta(days=d)).isoformat()
+        back = [self.row(m, "online") for m in ("A", "B", "C")]
+        before = {"A": ago(1), "B": ago(netinv.STALE_DAYS), "C": ""}
+        self.assertEqual(netinv.long_absent(back, before),
+                         {"B": ago(netinv.STALE_DAYS), "C": ""})
+
+    def test_event_email_says_when_a_returning_device_was_last_seen(self):
+        r = self.row("AA:BB:CC:00:00:03", "online", Device="Old Tablet")
+        subject, body = netinv.event_email([("return", r)],
+                                           away={r["MAC"]: "2026-08-01"})
+        self.assertEqual(subject, f"netinventory: 1 back after {netinv.STALE_DAYS}+ days")
+        self.assertIn("Last seen before: 2026-08-01", body)
+
     def test_email_events_skips_presence_only_polls(self):
         with mock.patch.object(netinv, "send_email") as send:
             netinv.email_events({}, [], {})

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start / stop the background network watch: a LaunchAgent that runs
-# `netinv.py watch --email`, so new devices and changed ones are emailed
-# (leaves and comebacks are only logged, to engine/events.csv).
+# `netinv.py watch --email`, so new devices, changed ones and ones back after
+# 30+ days away are emailed (other leaves and comebacks are only logged).
 # It starts at login and launchd restarts it if it dies.
 #
 # Usage:  ./scan-jobs.sh start [watch args]   (default: --interval 120 --no-router --email)
