@@ -2298,6 +2298,12 @@ def cmd_home(args):
     if args.action == "push" and args.rooms_only and args.source == "tuya":
         _push_tuya_rooms(args, master, rows)
         return
+    if args.action == "push" and args.source == "smartthings":
+        if not args.rooms_only:
+            print("  smartthings: push only sets rooms here; add --rooms-only")
+            sys.exit(1)
+        _push_smartthings_rooms(args, master, rows)
+        return
     if args.action == "push" and args.rooms_only:
         print(f"  {args.source}: push only renames devices here, so --rooms-only has "
               "nothing to do (no rooms API)")
@@ -2410,6 +2416,45 @@ def _push_tuya_rooms(args, master, rows):
             break
     verb = "to move" if args.dry_run else "moved"
     print(f"  tuya: {len(plan) - failed} {verb}, {failed} failed")
+    if failed:
+        sys.exit(1)
+
+
+def _push_smartthings_rooms(args, master, rows):
+    """`home push --to smartthings --rooms-only`: put each SmartThings device
+    in its home.csv room, creating SmartThings rooms as needed. Never renames."""
+    import connectors
+    import home
+    c = connectors.creds("smartthings")
+    if not c:
+        print("  smartthings is not configured; run: netinv set-cloud smartthings")
+        sys.exit(1)
+    try:
+        st = connectors.SmartThingsRooms(c)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! smartthings: {e} (a Personal Access Token lasts 24 hours; "
+              "make a new one and run: netinv set-cloud smartthings)")
+        sys.exit(1)
+    plan = home.app_room_plan("smartthings", st.app_rooms(), master.values(), rows,
+                              home.load_rooms(ROOMS_CSV))
+    if args.device:
+        plan = [p for p in plan if args.device == p["name"]]
+    new_rooms = sorted({p["to"] for p in plan if not p["app_room"]})
+    if new_rooms:
+        print(f"  {'would create' if args.dry_run else 'creating as needed'} "
+              f"SmartThings room(s): {', '.join(new_rooms)}")
+    failed = 0
+    for p in plan:
+        target = p["app_room"] or p["to"]
+        what = f"'{p['name']}': room '{p['from'] or '-'}' -> '{target}'"
+        if args.dry_run:
+            print(f"  would set {what}")
+            continue
+        ok, msg = st.move([p["id"]], target)
+        failed += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {what}" + ("" if ok else f": {msg}"))
+    verb = "to move" if args.dry_run else "moved"
+    print(f"  smartthings: {len(plan) - failed} {verb}, {failed} failed")
     if failed:
         sys.exit(1)
 
@@ -3639,9 +3684,10 @@ def main():
                          "draft: add unclassified devices to home.csv; "
                          "check: validate rooms.csv + home.csv; "
                          "push: rename devices in an app to netinventory's names")
-    hm.add_argument("--from", "--to", dest="source", choices=["tuya", "kasa", "ha"],
-                    default="tuya",
-                    help="app for rooms (--from tuya) or push (--to tuya|kasa|ha); default tuya")
+    hm.add_argument("--from", "--to", dest="source",
+                    choices=["tuya", "kasa", "ha", "smartthings"], default="tuya",
+                    help="app for rooms (--from tuya) or push (--to tuya|kasa|ha|smartthings; "
+                         "smartthings sets rooms only); default tuya")
     hm.add_argument("--create-areas", action="store_true",
                     help="push --to ha: create HA areas for rooms it does not have")
     hm.add_argument("--device", help="push: only this device (old or new name)")

@@ -1035,5 +1035,37 @@ class TestConnectors(unittest.TestCase):
         self.assertFalse(connectors.kasa_rename("127.0.0.1", "x" * 32, port=port)[0])
 
 
+class TestSmartThingsRooms(unittest.TestCase):
+    def fake(self):
+        devices = {"d1": {"deviceId": "d1", "label": "Fan Light", "locationId": "L", "roomId": "r1"},
+                   "d2": {"deviceId": "d2", "label": "Study", "locationId": "L"}}
+        rooms = {"r1": "Living Room", "r2": "Office "}
+
+        def st(c, path, method="GET", body=None):
+            if path == "/devices":
+                return {"items": list(devices.values())}
+            if path == "/locations/L/rooms" and method == "GET":
+                return {"items": [{"roomId": k, "name": v} for k, v in rooms.items()]}
+            if path == "/locations/L/rooms":
+                rooms["r%d" % (len(rooms) + 1)] = body["name"]
+                return {}
+            dev = devices[path.rsplit("/", 1)[1]]
+            if method == "PUT":
+                dev["roomId"] = body["roomId"]
+            return dev
+        return st, devices, rooms
+
+    def test_app_rooms_and_move(self):
+        st, devices, rooms = self.fake()
+        with mock.patch.object(connectors, "_st", side_effect=st):
+            r = connectors.SmartThingsRooms({"token": "t"})
+            self.assertEqual(r.app_rooms(), {"Living Room": [("Fan Light", "d1")],
+                                             "Office": [], "": [("Study", "d2")]})
+            self.assertEqual(r.move(["d2"], "Office"), (True, "moved"))
+            self.assertEqual(devices["d2"]["roomId"], "r2")
+            self.assertEqual(r.move(["d1"], "Garage"), (True, "moved"))   # created
+            self.assertEqual(rooms[devices["d1"]["roomId"]], "Garage")
+
+
 if __name__ == "__main__":
     unittest.main()
