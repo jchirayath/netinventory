@@ -850,6 +850,13 @@ def name_quality(name):
     return 2
 
 
+def same_vendor(a, b):
+    """True when two non-empty vendor names are one maker ('Samsung' in
+    'Samsung Electronics')."""
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    return bool(a and b) and (a in b or b in a)
+
+
 def merge(master, sightings):
     # The gateway is authoritative for online/offline when it ran: the local
     # ARP cache keeps stale entries, so a device the router lists as offline is
@@ -866,7 +873,10 @@ def merge(master, sightings):
             row["FirstSeen"] = now_stamp()        # brand-new device
             master[mac] = row
         row["IP"] = better(s["ip"], row["IP"])
-        row["Vendor"] = better(s["vendor"], row["Vendor"])
+        # Sources spell a maker differently (OUI 'Samsung Electronics', SSDP
+        # 'Samsung'); keep the stored one so it doesn't flip every poll.
+        if not same_vendor(s["vendor"], row["Vendor"]):
+            row["Vendor"] = better(s["vendor"], row["Vendor"])
         # A discovered model (e.g. mDNS 'md=Mac15,11') is fill-only: it names a
         # device whose MAC is randomized so OUI found nothing, but it must not
         # override a real manufacturer that OUI/router already supplied.
@@ -1096,17 +1106,18 @@ def report_presence(master, before_status):
 
 
 # What identifies a known device on the wire; a change in one is worth an
-# email, unlike a battery device dozing off and waking up again.
-DETAIL_FIELDS = ("IP", "Hostname", "Vendor")
+# email, unlike a battery device dozing off and waking up again. Not Vendor:
+# a MAC's maker never changes, only how a source spells it.
+DETAIL_FIELDS = ("IP", "Hostname")
 
 
 def detail_snapshot(rows):
-    """{MAC: (IP, Hostname, Vendor)} before a merge, for report_changes."""
+    """{MAC: (IP, Hostname)} before a merge, for report_changes."""
     return {m: tuple(r[f] for f in DETAIL_FIELDS) for m, r in rows.items()}
 
 
 def report_changes(master, before_detail):
-    """Known MACs whose IP, hostname or vendor changed this run (merge never
+    """Known MACs whose IP or hostname changed this run (merge never
     blanks them, so a device going quiet is not a change). Logs 'update'
     events; returns {MAC: {field: (old, new)}}."""
     changes = {}
@@ -3621,7 +3632,7 @@ def main():
     w.add_argument("--notify", action="store_true", help="macOS notification on new device")
     w.add_argument("--once", action="store_true", help="run a single poll and exit")
     w.add_argument("--email", action="store_true",
-                   help="email new devices, IP/hostname/vendor changes, and devices "
+                   help="email new devices, IP/hostname changes, and devices "
                         f"back after {STALE_DAYS}+ days away (set up with set-email)")
     w.set_defaults(func=cmd_watch)
     se = sub.add_parser("set-email", help="store SMTP settings for email alerts in Keychain")
