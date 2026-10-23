@@ -159,7 +159,7 @@ stops answering and a `back` event when an offline one returns (it pings every
 host, so the time is the poll's, not when the ARP cache lets go ~20 min later).
 `./netinv.py set-email` stores SMTP settings in the Keychain (Gmail: an app
 password) and sends a test; `watch --email` then mails each poll's new devices
-and known devices whose IP, hostname or vendor changed (an `update` event), with
+and known devices whose IP or hostname changed (an `update` event), with
 name, room, MAC, IP, vendor and time. A device coming back after 30+ days
 unseen (`stale_days`) is mailed too, with when it was last seen; other leaves
 and comebacks are logged but not mailed, since battery devices that sleep

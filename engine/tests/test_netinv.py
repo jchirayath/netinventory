@@ -534,18 +534,29 @@ class TestPresence(unittest.TestCase):
                   "10.0.0.1", "Room:     Pool", "Amazon", "Blink-Device", "Wi-Fi 2.4 GHz"):
             self.assertIn(s, body)
 
-    def test_report_changes_finds_new_ip_hostname_or_vendor(self):
+    def test_report_changes_finds_new_ip_or_hostname(self):
         master = {"A": self.row("A", "online", Hostname="cam"),     # IP moves
                   "B": self.row("B", "offline", Hostname="plug"),   # just went quiet
-                  "C": self.row("C", "online")}                     # gains a hostname
+                  "C": self.row("C", "online"),                     # gains a hostname
+                  "D": self.row("D", "online", Vendor="Samsung")}   # vendor respelled
         before = netinv.detail_snapshot(master)
         master["A"]["IP"] = "10.0.0.9"
         master["C"]["Hostname"] = "Roku"
+        master["D"]["Vendor"] = "Samsung Electronics"
         with mock.patch.object(netinv, "log_events") as log:
             changes = netinv.report_changes(master, before)
         self.assertEqual(changes, {"A": {"IP": ("10.0.0.1", "10.0.0.9")},
                                    "C": {"Hostname": ("", "Roku")}})
         self.assertEqual(log.call_args.kwargs["kind"], "update")
+
+    def test_merge_keeps_vendor_when_a_source_respells_it(self):
+        mac = "D0:C2:4E:B6:CE:42"
+        master = {mac: self.row(mac, "online", Vendor="Samsung Electronics")}
+        seen = {"mac": mac, "ip": "10.0.0.1", "hostname": "", "online": True}
+        netinv.merge(master, [dict(seen, vendor="Samsung", source="ssdp")])
+        self.assertEqual(master[mac]["Vendor"], "Samsung Electronics")
+        netinv.merge(master, [dict(seen, vendor="Roku, Inc.", source="ssdp")])
+        self.assertEqual(master[mac]["Vendor"], "Roku, Inc.")
 
     def test_event_email_shows_what_changed(self):
         r = self.row("AA:BB:CC:00:00:02", "online", Device="Doorbell")
