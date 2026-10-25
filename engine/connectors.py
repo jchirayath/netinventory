@@ -641,6 +641,79 @@ def discover_smartthings(c):
     return out
 
 
+def _st(c, path, method="GET", body=None):
+    """One SmartThings REST call; returns the decoded JSON (raises on HTTP errors)."""
+    req = urllib.request.Request(
+        "https://api.smartthings.com/v1" + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {c['token']}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        raw = r.read().decode("utf-8", "replace")
+    return json.loads(raw) if raw else {}
+
+
+def _st_items(c, path):
+    """Every item of a paged SmartThings list."""
+    out = []
+    while path:
+        data = _st(c, path)
+        out.extend(data.get("items", []))
+        nxt = (data.get("_links") or {}).get("next") or {}
+        path = nxt.get("href", "").split("/v1", 1)[-1] if nxt.get("href") else ""
+    return out
+
+
+class SmartThingsRooms:
+    """Rooms in the SmartThings app: read them, create one, put a device in it.
+    Rooms are per location; a device carries its locationId and roomId."""
+
+    def __init__(self, c):
+        self.c = c
+        self.devices = {d["deviceId"]: d for d in _st_items(c, "/devices")}
+        self._rooms = {}
+
+    def rooms(self, location_id, fresh=False):
+        """{room name (stripped): roomId} for one location."""
+        if fresh or location_id not in self._rooms:
+            self._rooms[location_id] = {r["name"].strip(): r["roomId"] for r in
+                                        _st_items(self.c, f"/locations/{location_id}/rooms")}
+        return self._rooms[location_id]
+
+    def app_rooms(self):
+        """{room name: [(device label, deviceId)]} in the shape tuya_rooms
+        returns; devices in no room sit under ''."""
+        out = {}
+        for loc in {d.get("locationId") for d in self.devices.values() if d.get("locationId")}:
+            for name in self.rooms(loc):
+                out.setdefault(name, [])
+        for d in self.devices.values():
+            names = {v: k for k, v in self.rooms(d["locationId"]).items()} if d.get("locationId") else {}
+            out.setdefault(names.get(d.get("roomId"), ""), []).append(
+                (d.get("label") or d.get("name") or "", d["deviceId"]))
+        return out
+
+    def move(self, device_ids, room):
+        """Put the devices in `room`, creating it in their location when it is
+        missing. Returns (ok, message)."""
+        try:
+            for i in device_ids:
+                d = self.devices[i]
+                loc = d["locationId"]
+                room_id = self.rooms(loc).get(room.strip())
+                if not room_id:
+                    _st(self.c, f"/locations/{loc}/rooms", "POST", {"name": room.strip()})
+                    room_id = self.rooms(loc, fresh=True).get(room.strip())
+                if not room_id:
+                    return False, "room not found after create"
+                _st(self.c, f"/devices/{i}", "PUT",
+                    {"label": d.get("label") or d.get("name"), "roomId": room_id})
+                if _st(self.c, f"/devices/{i}").get("roomId") != room_id:
+                    return False, f"'{d.get('label')}' did not take the room"
+        except Exception as e:  # noqa: BLE001
+            return False, str(e)
+        return True, "moved"
+
+
 def govee_lan_scan(timeout=4.0):
     """{device id: (LAN IP, sku)} from Govee's LAN API: a multicast scan to
     239.255.255.250:4001, answered on UDP 4002. Only devices with LAN Control
