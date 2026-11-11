@@ -16,6 +16,8 @@ one row each; edit it by hand or with `netinv monitor on|off`:
                     cloud     the vendor cloud's online flag (sleepy battery
                               devices that drop off Wi-Fi between check-ins;
                               the default with no MAC)
+                    ble       heard in this Mac's passive Bluetooth scan
+                              (Govee thermometers, tags: no network at all)
                     none      battery only
     Match         optional 'provider=name' for a cloud reading whose name
                   differs from Device ('flume=Flume Sensor'); auto-matched
@@ -35,7 +37,7 @@ import subprocess
 import sys
 
 FIELDS = ["Device", "Enabled", "OfflineAfter", "BatteryBelow", "Check", "Match", "Notes"]
-CHECKS = ("ping", "cloud", "none")         # plus tcp:PORT
+CHECKS = ("ping", "cloud", "ble", "none")  # plus tcp:PORT
 # Battery labels some clouds report instead of a percent.
 LEVELS = {"empty": 0, "critical": 5, "low": 10, "middle": 50, "medium": 50,
           "mid": 50, "ok": 100, "normal": 100, "high": 100, "full": 100}
@@ -97,7 +99,7 @@ def validate(m):
         out.append(f"BatteryBelow '{m['BatteryBelow']}' is not a percent")
     c = m["Check"].lower()
     if c and c not in CHECKS and not re.fullmatch(r"tcp:\d{1,5}", c):
-        out.append(f"Check '{m['Check']}' is not ping, tcp:PORT, cloud or none")
+        out.append(f"Check '{m['Check']}' is not ping, tcp:PORT, cloud, ble or none")
     if m["Match"] and "=" not in m["Match"]:
         out.append(f"Match '{m['Match']}' should be provider=name")
     return out
@@ -162,7 +164,10 @@ def match_reading(m, rows, readings, home_rows=()):
             return rd
     names = names_for(m, rows, home_rows)
     for rd in readings:
-        if norm(rd["name"]) in names.get(rd["provider"], ()):
+        # Govee devices advertise over Bluetooth under the Govee app's name.
+        own = names.get(rd["provider"], set()) | (names.get("govee", set())
+                                                  if rd["provider"] == "ble" else set())
+        if norm(rd["name"]) in own:
             return rd
     for rd in readings:
         if norm(rd["name"]) in names[""]:
@@ -370,10 +375,17 @@ def run(monitors, master, state, readings=None, *, home_rows=(), now=None,
             if not enabled(m):
                 continue
             rows = rows_for(m, master)
-            reading = match_reading(m, rows, readings, home_rows) if readings else None
             check = check_of(m, rows)
+            pool_rd = readings or []
+            if check == "ble":     # only Bluetooth counts: HA's copy may be stale
+                pool_rd = [rd for rd in pool_rd if rd["provider"] == "ble"]
+            reading = match_reading(m, rows, pool_rd, home_rows) if pool_rd else None
             present = None
-            if check == "cloud":
+            if check == "ble":
+                # Readings exist only when the scan ran and heard something,
+                # so silence means gone; no readings means it wasn't asked.
+                present = (reading is not None) if pool_rd else None
+            elif check == "cloud":
                 if reading is not None and reading.get("online") is not None:
                     present = bool(reading["online"])
             elif check != "none":
@@ -400,7 +412,7 @@ ALWAYS_ON = [
     (re.compile(r"\b(qnap|synology|nas|truenas|unraid)\b", re.I), "30m", "NAS"),
     (re.compile(r"mac ?(studio|mini|pro)\b|imac", re.I), "2h", "desktop Mac"),
     (re.compile(r"\block\b|u-bolt|ultraloq|yale|schlage|august|kwikset", re.I), "2h", "lock"),
-    (re.compile(r"sync.module|camera hub|blink-sync", re.I), "1h", "camera hub"),
+    (re.compile(r"sync.module|\bhub\b|blink-sync", re.I), "1h", "hub"),
     (re.compile(r"flume", re.I), "2h", "water monitor"),
     (re.compile(r"raspberry|home ?assistant|\bpi\b|router|gateway|access point|mesh", re.I),
      "30m", "infrastructure"),
@@ -422,7 +434,10 @@ def suggest(master, readings, existing, home_rows=(), self_macs=()):
         if r["Device"]:
             devices.setdefault(norm(r["Device"]), []).append(r)
     readings = readings or []
-    used = set()
+    # Readings an existing monitor already answers to are taken, so a re-run
+    # doesn't add 'Garbage Door' beside 'Outside Garbage Door Camera'.
+    used = {id(rd) for rd in (match_reading(m, rows_for(m, master), readings, home_rows)
+                              for m in existing) if rd is not None}
 
     def add(row, why):
         have.add(norm(row["Device"]))
@@ -433,8 +448,8 @@ def suggest(master, readings, existing, home_rows=(), self_macs=()):
             continue
         name = rows[0]["Device"]
         hay = " ".join([name] + [r["Hostname"] + " " + r["Vendor"] for r in rows])
-        if "macbook" in hay.lower():
-            continue                      # laptops roam and sleep: not "offline"
+        if re.search(r"macbook|\btv\b|television", hay, re.I):
+            continue                      # laptops roam, TVs get switched off: not "offline"
         m = {"Device": name, "Enabled": "yes", "OfflineAfter": "", "BatteryBelow": "",
              "Check": "", "Match": "", "Notes": ""}
         rd = match_reading(m, rows, readings, home_rows)
@@ -457,12 +472,22 @@ def suggest(master, readings, existing, home_rows=(), self_macs=()):
             m["Enabled"], m["Notes"] = "no", "offline when suggested"
         add(m, label)
     # Battery devices with no network row (Zigbee/BLE behind a hub, the
-    # Flume sensor): monitored by their cloud name alone.
+    # Flume sensor): monitored by their cloud name alone. Bluetooth ones by
+    # being heard: Govee sensors (named like 'H5074_0447') even without a
+    # battery in their advertisement; never tags, phones or cars.
     for rd in readings:
-        if id(rd) in used or rd.get("pct") is None or norm(rd["name"]) in have:
+        ble = rd["provider"] == "ble"
+        if id(rd) in used or norm(rd["name"]) in have:
             continue
+        if rd.get("pct") is None and not (ble and re.match(r"H\d{4}", rd["name"])):
+            continue
+        has_batt = rd.get("pct") is not None
+        # Not every Govee broadcast carries the battery, so a scan may miss it;
+        # set the threshold anyway (a model that never reports just never fires).
         add({"Device": rd["name"], "Enabled": "yes", "OfflineAfter": "1d",
-             "BatteryBelow": str(DEFAULT_BATTERY), "Check": "cloud",
+             "BatteryBelow": str(DEFAULT_BATTERY) if has_batt or ble else "",
+             "Check": "ble" if ble else "cloud",
              "Match": f"{rd['provider']}={rd['name']}", "Notes": rd.get("model", "")},
-            f"{rd['provider']} battery {rd['pct']}% (cloud only)")
+            (f"{rd['provider']} battery {rd['pct']}%" if has_batt else "heard over bluetooth")
+            + (" (bluetooth)" if ble and has_batt else "" if ble else " (cloud only)"))
     return out

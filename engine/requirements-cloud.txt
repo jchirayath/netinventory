@@ -4,4 +4,5 @@ tinytuya      # tuya / smartlife  -> device name + MAC + IP
 wyze-sdk      # wyze              -> nickname + MAC
 blinkpy       # blink             -> camera names (no MAC)
 aiohttp       # required by blinkpy
+bleak         # monitors: hear Bluetooth sensors (Govee) from this Mac
 # smartthings and govee use the Python standard library only (token / API key)

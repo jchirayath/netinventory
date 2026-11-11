@@ -203,7 +203,7 @@ limit or its battery drops to a threshold, and one more when it recovers:
 | `Enabled` | `yes` / `no`: the toggle |
 | `OfflineAfter` | `30m`, `2h`, `1d`: alert once it has been gone this long (blank = never) |
 | `BatteryBelow` | percent: alert at or below it (blank = never) |
-| `Check` | `ping` (default with a MAC), `tcp:PORT` (the service is up, not just the box), `cloud` (the vendor's online flag, for battery devices that sleep off Wi-Fi; default with no MAC), `none` |
+| `Check` | `ping` (default with a MAC), `tcp:PORT` (the service is up, not just the box), `cloud` (the vendor's online flag, for battery devices that sleep off Wi-Fi; default with no MAC), `ble` (heard in this Mac's Bluetooth scan), `none` |
 | `Match` | optional `provider=name` when the cloud calls it something else (`flume=Flume Sensor`) |
 
 Battery levels come from **Home Assistant** (every `battery` entity, so
@@ -212,6 +212,18 @@ door and flood sensors), **Blink** (`ok` / `low` per battery camera and
 doorbell) and **Flume** (`set-cloud flume` with an API client id and secret
 from portal.flumewater.com). Labels map to percents: `low` = 10,
 `middle`/`medium` = 50, `ok`/`high` = 100.
+
+**Bluetooth sensors** (Govee thermometers and hygrometers) are heard
+directly by this Mac in a 30-second passive scan each hour (`pip install
+bleak`; macOS asks once to allow Bluetooth). It only listens, so it uses no
+network. A sensor counts as online when the scan hears it, and Govee
+H5074 / H507x / H510x / H517x broadcasts carry the battery. One scan can
+miss a sensor, so give `ble` monitors a limit of hours, not minutes. The
+Govee cloud is no help here: it reports every Bluetooth and hub sensor as
+offline. Leak sensors that talk only to their Govee hub (H5054, H5058)
+can't be heard, so watch the hub. macOS hides Bluetooth MACs, so a
+monitor is named after what the sensor broadcasts (`H5101_4670`). Rename
+the `Device` and keep `Match ble=H5101_4670`.
 
 It costs very little bandwidth. `watch` decides presence from the sweep it
 already does and sends nothing extra, except one TCP connect for a

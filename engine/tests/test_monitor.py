@@ -218,6 +218,51 @@ class TestRun(unittest.TestCase):
         self.assertEqual([k for _, k, _ in a], ["offline"])
 
 
+class TestBluetooth(unittest.TestCase):
+    def test_ble_name(self):
+        self.assertEqual(connectors.ble_name("GVH5101_4670"), "H5101_4670")
+        self.assertEqual(connectors.ble_name("Govee_H5074_0447"), "H5074_0447")
+        self.assertEqual(connectors.ble_name("ihoment_H5043_7038"), "H5043_7038")
+        self.assertEqual(connectors.ble_name("GVHome"), "GVHome")     # not a model
+
+    def test_govee_battery(self):
+        self.assertEqual(connectors.govee_ble_battery(
+            {0xEC88: bytes.fromhex("000c08c61e6402")}), 100)         # H5074
+        self.assertEqual(connectors.govee_ble_battery(
+            {0x0001: bytes.fromhex("0101031bfa56")}), 86)            # H5101
+        self.assertIsNone(connectors.govee_ble_battery({0x004C: b"\x02\x15"}))
+
+    def test_ble_check(self):
+        mons = [mon("H5074_0447", Check="ble", OfflineAfter="1h", BatteryBelow="20")]
+        heard = [reading("ble", "H5074_0447", 15), reading("ha", "H5074_0447", None, online=False)]
+        other = [reading("ble", "Keys", None)]
+        state = {}
+        a = monitor.run(mons, {}, state, heard, now=T0)
+        self.assertTrue(state["H5074_0447"]["up"])                  # HA's stale copy ignored
+        self.assertEqual([k for _, k, _ in a], ["battery-low"])
+        monitor.run(mons, {}, state, None, now=T0 + dt.timedelta(hours=5))   # not asked
+        self.assertTrue(state["H5074_0447"]["up"])
+        # the scan ran and didn't hear it: gone since its last broadcast at T0
+        a = monitor.run(mons, {}, state, other, now=T0 + dt.timedelta(hours=6))
+        self.assertEqual([k for _, k, _ in a], ["offline"])
+        self.assertIn("6h", a[0][2])
+
+    def test_ble_matches_govee_app_name(self):
+        m = mon("Office Thermometer", Check="ble")
+        home_rows = [{"Device": "Office Thermometer", "AppNames": "govee=H5101_4670"}]
+        rd = monitor.match_reading(m, [], [reading("ble", "H5101_4670", 86)], home_rows)
+        self.assertIsNotNone(rd)
+
+    def test_suggest_ble(self):
+        rds = [reading("ble", "H5074_0447", 100), reading("ble", "H5043_7038", None),
+               reading("ble", "Jacob's Keys", None)]
+        got = {m["Device"]: m for m, _ in monitor.suggest({}, rds, [])}
+        self.assertEqual((got["H5074_0447"]["Check"], got["H5074_0447"]["BatteryBelow"]),
+                         ("ble", "20"))
+        self.assertEqual(got["H5043_7038"]["BatteryBelow"], "20")
+        self.assertNotIn("Jacob's Keys", got)
+
+
 class TestSuggest(unittest.TestCase):
     def test_suggestions(self):
         master = {
@@ -258,6 +303,15 @@ class TestSuggest(unittest.TestCase):
         self.assertEqual((got["Mini Camera"]["Enabled"], got["Mini Camera"]["OfflineAfter"]),
                          ("no", "2h"))
         self.assertEqual(got["QNAP NAS"]["Enabled"], "yes")
+
+    def test_rerun_adds_no_duplicates(self):
+        master = {"AA:BB:CC:00:00:01": row("Outside Garbage Door Camera", "AA:BB:CC:00:00:01",
+                                           apps="blink=Garbage Door"),
+                  "AA:BB:CC:00:00:02": row("Living Room TV Hub", "AA:BB:CC:00:00:02")}
+        rds = [reading("blink", "Garbage Door", "ok")]
+        first = [m for m, _ in monitor.suggest(master, rds, [])]
+        self.assertEqual([m["Device"] for m in first], ["Outside Garbage Door Camera"])
+        self.assertEqual(monitor.suggest(master, rds, first), [])
 
 
 class TestConnectorReadings(unittest.TestCase):

@@ -1184,13 +1184,71 @@ def battery_flume(c):
     return out
 
 
+def ble_name(name):
+    """A Bluetooth advertiser's name as the Govee app spells the device:
+    'GVH5101_4670' / 'Govee_H5074_0447' / 'ihoment_H5043_7038' -> 'H5101_4670'."""
+    return re.sub(r"^(GV(?=H\d)|Govee_|ihoment_)", "", (name or "").strip())
+
+
+def govee_ble_battery(mfr):
+    """Battery percent from a Govee thermometer's BLE advertisement, or None.
+    mfr: {company id: bytes}. Layouts as decoded by Home Assistant's govee-ble."""
+    d = mfr.get(0xEC88)
+    if d is not None and len(d) == 7:          # H5074: temp, humidity, battery
+        return d[5]
+    if d is not None and len(d) == 6:          # H5072 / H5075: packed 3 bytes, battery
+        return d[4]
+    d = mfr.get(0x0001)
+    if d is not None and len(d) == 6:          # H5101 / H5102 / H5174 / H5177
+        return d[5]
+    return None
+
+
+def battery_ble(_c=None, seconds=30):
+    """Bluetooth devices this Mac hears in a passive scan (it listens, sends
+    nothing, and uses no network). Sensors that broadcast every few seconds
+    still get missed by a short scan, hence 30s; a monitor's OfflineAfter
+    spans many scans, so one miss never alerts. Every named advertiser counts as online,
+    with a battery for Govee thermometers. None if the scan can't run, or
+    hears nothing at all (Bluetooth off, or no permission), so nobody is
+    called offline because the radio was."""
+    try:
+        import asyncio
+        from bleak import BleakScanner
+    except ImportError:
+        return None
+    heard = {}
+
+    def seen(dev, adv):
+        name = ble_name(adv.local_name or dev.name or "")
+        if name:
+            pct = govee_ble_battery(adv.manufacturer_data or {})
+            if pct is not None or name not in heard:
+                heard[name] = pct
+
+    async def scan():
+        async with BleakScanner(seen):
+            await asyncio.sleep(seconds)
+    try:
+        asyncio.run(scan())
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! bluetooth scan: {e}")
+        return None
+    if not heard:
+        return None
+    return [_reading("ble", n, pct, True, model="bluetooth") for n, pct in heard.items()]
+
+
 BATTERY_READERS = {"ha": battery_ha, "tuya": battery_tuya,
                    "blink": battery_blink, "flume": battery_flume}
 
 
-def batteries(providers=None, log=print):
-    """Battery/online readings from every configured cloud that has them.
-    One failing cloud is reported and skipped, never fatal."""
+def batteries(providers=None, log=print, ble=True):
+    """Battery/online readings from every configured cloud that has them,
+    plus this Mac's Bluetooth scan. One failing source is reported and
+    skipped, never fatal. A scan that heard nothing adds no readings, so any
+    'ble' reading means it ran: how a 'ble' monitor tells 'not heard' from
+    'not asked'."""
     out = []
     for p in providers or [p for p in BATTERY_READERS if creds(p) is not None]:
         c = creds(p)
@@ -1202,6 +1260,13 @@ def batteries(providers=None, log=print):
             log(f"  ! {p} batteries: {e}")
             continue
         out += got
+    if ble:
+        got = battery_ble()
+        if got is None:
+            log("  ! bluetooth: scan unavailable (pip install bleak; allow Bluetooth "
+                "for this Python in System Settings > Privacy)")
+        else:
+            out += got
     return out
 
 

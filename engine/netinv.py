@@ -2044,8 +2044,8 @@ def monitor_pass(master, seen_online=None, *, do_email=False, do_notify=False,
     now = dt.datetime.now().replace(microsecond=0)
     last = monitor._parse(meta.get("cloud_at"))
     every = monitor.parse_duration(MONITOR_CLOUD_EVERY) or 3600
-    wants_cloud = any(m["BatteryBelow"] or monitor.check_of(m, monitor.rows_for(m, master)) == "cloud"
-                      for m in mons)
+    wants_cloud = any(m["BatteryBelow"] or monitor.check_of(m, monitor.rows_for(m, master))
+                      in ("cloud", "ble") for m in mons)
     readings = None
     if wants_cloud and (cloud == "now" or (cloud == "auto" and (
             last is None or (now - last).total_seconds() >= every))):
@@ -3917,7 +3917,7 @@ def main():
                     help="on: alert after this long offline (30m, 2h, 1d; 'off' = never)")
     mo.add_argument("--battery", metavar="PCT",
                     help="on: alert at or below this battery percent ('off' = never)")
-    mo.add_argument("--check", help="on: ping | tcp:PORT | cloud | none")
+    mo.add_argument("--check", help="on: ping | tcp:PORT | cloud | ble | none")
     mo.add_argument("--match", help="on: cloud reading to use, provider=name "
                                     "(e.g. flume=Flume Sensor)")
     mo.add_argument("--apply", action="store_true", help="suggest: add them to monitors.csv")

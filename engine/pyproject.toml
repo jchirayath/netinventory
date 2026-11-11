@@ -26,8 +26,9 @@ tuya = ["tinytuya"]
 wyze = ["wyze-sdk"]
 blink = ["blinkpy", "aiohttp"]
 apple = ["pyicloud"]
+ble = ["bleak"]
 # Everything (cloud connectors + xlsx report)
-all = ["xlsxwriter", "tinytuya", "wyze-sdk", "blinkpy", "aiohttp", "pyicloud"]
+all = ["xlsxwriter", "tinytuya", "wyze-sdk", "blinkpy", "aiohttp", "pyicloud", "bleak"]
 
 [project.urls]
 Homepage = "https://github.com/jchirayath/netinventory"
