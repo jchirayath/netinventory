@@ -291,12 +291,19 @@ class TestGoveeApp(unittest.TestCase):
         self.assertEqual((rd["provider"], rd["pct"], rd["online"]), ("govee-app", 80, False))
         self.assertTrue(rd["seen"].startswith("2026-01-0"))
 
-    def test_thermometer_online(self):
+    def test_leak_sensor_online_no_alert_yet(self):
         rd = connectors.govee_app_reading(govee_dev(
-            "Display-Humidor", "H5101", {"battery": 15}, {"online": True, "tem": 2030}))
+            "H5058_0EB3_AC2", "H5058", {"battery": 15},
+            {"online": True, "gwonline": True, "lastTime": 0}))
         self.assertEqual((rd["pct"], rd["online"], rd["seen"]), (15, True, ""))
 
-    def test_non_sensor_skipped(self):
+    def test_bluetooth_thermometer_and_appliance_skipped(self):
+        # synced only via a phone: 'offline' and battery may be years old
+        self.assertIsNone(connectors.govee_app_reading(govee_dev(
+            "Display-Humidor", "H5101", {"battery": 80},
+            {"online": False, "tem": 2200, "lastTime": 1729495800000})))
+        self.assertIsNone(connectors.govee_app_reading(govee_dev(
+            "Smart Ice Maker", "H717D", {}, {"online": False})))
         self.assertIsNone(connectors.govee_app_reading(govee_dev("Lamp", "H6008")))
         self.assertIsNone(connectors.govee_app_reading({"deviceName": "x", "deviceExt": {
             "deviceSettings": "not json", "lastDeviceData": None}}))
@@ -325,7 +332,8 @@ class TestGoveeApp(unittest.TestCase):
                 if path.endswith("/login"):
                     return {"client": {"token": "new"}}
                 if token == "new":
-                    return {"data": {"devices": [govee_dev("S", "H5054", {"battery": 50})]}}
+                    return {"data": {"devices": [govee_dev("S", "H5054", {"battery": 50},
+                                                           {"online": True, "gwonline": True})]}}
                 return {"status": 401, "message": "token expired"}
             with mock.patch.object(connectors, "GOVEE_TOKEN_FILE", tok), \
                     mock.patch.object(connectors, "_govee_app_call", fake):

@@ -1074,21 +1074,23 @@ def _json_field(s):
 
 
 def govee_app_reading(d):
-    """One Govee app device -> a monitor reading, or None for devices
-    without sensor data (lights, plugs). A sensor behind a hub is online only
-    while the hub is too (gwonline), as in the Govee app."""
+    """One Govee app device -> a monitor reading, or None. Only sensors
+    behind a Govee hub (those reporting gwonline: leak sensors) are live
+    here; online only while the hub is too, as in the Govee app. Bluetooth
+    thermometers sync only when a phone's Govee app is near, so their
+    'offline' and battery can be years old (the Bluetooth scan reads them
+    live), and Wi-Fi appliances are better judged on the network."""
     ext = d.get("deviceExt") or {}
     settings = _json_field(ext.get("deviceSettings"))
     data = _json_field(ext.get("lastDeviceData"))
-    if "online" not in data and "battery" not in settings:
+    if "gwonline" not in data:
         return None
-    online = data.get("online")
-    if online is not None and "gwonline" in data:
-        online = bool(online) and bool(data["gwonline"])
+    online = bool(data.get("online")) and bool(data["gwonline"])
+    # lastTime is the last leak alert, not a check-in: shown, never a heartbeat.
     last = data.get("lastTime") or 0
     seen = _epoch_iso(int(last) // 1000) if isinstance(last, (int, float)) and last > 0 else ""
-    return _reading("govee-app", d.get("deviceName"), settings.get("battery"),
-                    None if online is None else bool(online), model=d.get("sku", ""), seen=seen)
+    return _reading("govee-app", d.get("deviceName"), settings.get("battery"), online,
+                    model=d.get("sku", ""), seen=seen)
 
 
 def battery_govee_app(c):

@@ -225,10 +225,12 @@ broadcasts (`H5101_4670`). Rename the `Device` and keep
 
 **Govee sensors through the Govee app's account** (`govee-app`): the
 developer API key reports every Bluetooth and hub sensor as offline, but
-the account API the Govee app itself uses has each sensor's battery,
-online state and last report. That includes H5054/H5058 leak sensors,
-which talk only to their hub and can't be heard over Bluetooth. A sensor
-counts as online only while its hub is too, as in the app.
+the account API the Govee app itself uses has the real battery and online
+state of sensors behind a Govee hub: the H5054/H5058 leak sensors, which
+talk only to their hub and can't be heard over Bluetooth. A sensor counts
+as online only while its hub is too, as in the app. Bluetooth thermometers
+are left out: they sync to the cloud only when a phone's Govee app is
+near, so their status there can be years old.
 
 ```bash
 ./netinv.py set-cloud govee-app     # Govee email + password (Keychain)
