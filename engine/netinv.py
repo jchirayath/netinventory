@@ -2794,6 +2794,30 @@ def cmd_blink_login(args):
     connectors.blink_login_interactive()
 
 
+def cmd_govee_login(args):
+    """Log in to the Govee app API once, entering the emailed code if Govee
+    asks for one, and cache the token so monitor runs need no code."""
+    import connectors
+    c = connectors.creds("govee-app")
+    if not c:
+        sys.exit("  govee-app not configured: run  netinv set-cloud govee-app")
+    try:
+        connectors.govee_app_login(c)
+    except connectors.GoveeCodeRequired:
+        code = input("  Govee emailed you a verification code. Enter it: ").strip()
+        if not code:
+            sys.exit("  aborted (no code)")
+        connectors.govee_app_login(c, code)
+    except RuntimeError as e:
+        sys.exit(f"  ! {e}")
+    readings = connectors.battery_govee_app(c)
+    print(f"  logged in; {len(readings)} Govee sensor(s):")
+    for rd in readings:
+        state = "online" if rd["online"] else "OFFLINE" if rd["online"] is False else "?"
+        print(f"    {rd['name'][:30]:30} {rd['model']:6} {state:7} battery "
+              f"{rd['level'] if rd['level'] is not None else '-'}  last report {rd['seen'] or '-'}")
+
+
 def cmd_set_cloud(args):
     """Store a cloud connector's credentials in the macOS Keychain."""
     import getpass
@@ -2919,7 +2943,8 @@ def cmd_blink_locate(args):
 
 def cmd_cloud(args):
     import connectors
-    providers = args.providers or connectors.configured_providers()
+    providers = args.providers or [p for p in connectors.configured_providers()
+                                   if p in connectors.DISCOVERERS]
     unknown = [p for p in providers if p not in connectors.DISCOVERERS]
     if unknown:
         print(f"  unknown provider(s): {', '.join(unknown)}. "
@@ -3993,6 +4018,9 @@ def main():
 
     bl = sub.add_parser("blink-login", help="interactive Blink 2FA login (run in a terminal)")
     bl.set_defaults(func=cmd_blink_login)
+    gl = sub.add_parser("govee-login", help="log in to the Govee app API, entering the "
+                                            "emailed code if asked (run in a terminal)")
+    gl.set_defaults(func=cmd_govee_login)
 
     bk = sub.add_parser("blink-locate",
                         help="wake each Blink camera in turn to learn its MAC/IP")

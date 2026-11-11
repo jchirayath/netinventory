@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import monitor  # noqa: E402
@@ -273,6 +274,78 @@ class TestBluetooth(unittest.TestCase):
                          ("ble", "20"))
         self.assertEqual(got["H5043_7038"]["BatteryBelow"], "20")
         self.assertNotIn("Jacob's Keys", got)
+
+
+def govee_dev(name, sku, settings=None, data=None):
+    import json
+    return {"deviceName": name, "sku": sku, "device": "AABBCCDDEEFF0011",
+            "deviceExt": {"deviceSettings": json.dumps(settings or {}),
+                          "lastDeviceData": json.dumps(data or {})}}
+
+
+class TestGoveeApp(unittest.TestCase):
+    def test_leak_sensor_offline_when_hub_is(self):
+        rd = connectors.govee_app_reading(govee_dev(
+            "H5054_A00A_Washer", "H5054", {"battery": 80},
+            {"online": True, "gwonline": False, "lastTime": 1767268800000}))
+        self.assertEqual((rd["provider"], rd["pct"], rd["online"]), ("govee-app", 80, False))
+        self.assertTrue(rd["seen"].startswith("2026-01-0"))
+
+    def test_thermometer_online(self):
+        rd = connectors.govee_app_reading(govee_dev(
+            "Display-Humidor", "H5101", {"battery": 15}, {"online": True, "tem": 2030}))
+        self.assertEqual((rd["pct"], rd["online"], rd["seen"]), (15, True, ""))
+
+    def test_non_sensor_skipped(self):
+        self.assertIsNone(connectors.govee_app_reading(govee_dev("Lamp", "H6008")))
+        self.assertIsNone(connectors.govee_app_reading({"deviceName": "x", "deviceExt": {
+            "deviceSettings": "not json", "lastDeviceData": None}}))
+
+    def test_login_asks_for_code(self):
+        calls = []
+
+        def fake(path, email, token=None, body=None):
+            calls.append(path)
+            return {"status": 454, "message": "need code"}
+        with mock.patch.object(connectors, "_govee_app_call", fake):
+            with self.assertRaises(connectors.GoveeCodeRequired):
+                connectors.govee_app_login({"email": "a@example.com", "password": "p"})
+            with self.assertRaises(RuntimeError):     # a code given and still 454: rejected
+                connectors.govee_app_login({"email": "a@example.com", "password": "p"}, "123")
+        self.assertEqual(calls[:2], ["/account/rest/account/v2/login",
+                                     "/account/rest/account/v1/verification"])
+
+    def test_devices_relogin_once_on_stale_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            tok = os.path.join(d, "tok.json")
+            with open(tok, "w") as f:
+                f.write('{"email": "a@example.com", "token": "old"}')
+
+            def fake(path, email, token=None, body=None):
+                if path.endswith("/login"):
+                    return {"client": {"token": "new"}}
+                if token == "new":
+                    return {"data": {"devices": [govee_dev("S", "H5054", {"battery": 50})]}}
+                return {"status": 401, "message": "token expired"}
+            with mock.patch.object(connectors, "GOVEE_TOKEN_FILE", tok), \
+                    mock.patch.object(connectors, "_govee_app_call", fake):
+                devs = connectors.govee_app_devices({"email": "a@example.com", "password": "p"})
+            self.assertEqual(len(devs), 1)
+            with open(tok) as f:
+                self.assertIn('"new"', f.read())
+            self.assertEqual(os.stat(tok).st_mode & 0o777, 0o600)
+
+    def test_matches_govee_app_name(self):
+        home_rows = [{"Device": "Washer Leak", "AppNames": "govee=H5054_A00A_Washer"}]
+        rds = [reading("govee-app", "H5054_A00A_Washer", 80)]
+        self.assertIsNotNone(monitor.match_reading(mon("Washer Leak"), [], rds, home_rows))
+
+    def test_suggest_leak_sensor_without_battery(self):
+        rds = [reading("govee-app", "H5058_5E1B_1", None, online=True)]
+        got = {m["Device"]: m for m, _ in monitor.suggest({}, rds, [])}
+        m = got["H5058_5E1B_1"]
+        self.assertEqual((m["Check"], m["Match"], m["BatteryBelow"]),
+                         ("cloud", "govee-app=H5058_5E1B_1", "20"))
 
 
 class TestSuggest(unittest.TestCase):

@@ -27,6 +27,7 @@ import json
 import os
 import re
 import subprocess
+import urllib.error
 import urllib.request
 
 # provider -> ordered (field, is_secret, prompt) describing required credentials
@@ -61,6 +62,12 @@ PROVIDERS = {
         ("client_secret", True,  "Flume API Client Secret"),
         ("username",      False, "Flume account email"),
         ("password",      True,  "Flume account password"),
+    ],
+    # The Govee app's own account API: the only place leak sensors behind a
+    # Govee hub report battery and online. Unofficial; see govee_app_login.
+    "govee-app": [
+        ("email",    False, "Govee account email"),
+        ("password", True,  "Govee account password"),
     ],
     "kasa": [],   # local LAN protocol, no account needed
     "ha": [
@@ -961,6 +968,135 @@ def kasa_rename(ip, alias, timeout=4, port=KASA_PORT):
     return False, str(reply)
 
 
+# --------------------------------------------------------------------------- #
+# Govee app account API (app2.govee.com). Undocumented: the endpoints and
+# headers follow homebridge-govee. The developer API key above reports every
+# Bluetooth and hub sensor offline; this one has their real state.
+# --------------------------------------------------------------------------- #
+GOVEE_APP = "https://app2.govee.com"
+GOVEE_APP_VERSION = "7.4.10"
+GOVEE_TOKEN_FILE = os.path.expanduser("~/.netinv_govee.json")
+
+
+class GoveeCodeRequired(RuntimeError):
+    """Govee emailed a verification code; finish with `netinv govee-login`."""
+
+
+def _govee_app_headers(email, token=None):
+    import time
+    import uuid
+    # Stable per account, like the app's install id: a new id every run
+    # would look like a new phone logging in each time.
+    client = "ni" + uuid.uuid5(uuid.NAMESPACE_URL, "netinv:" + email.lower()).hex[:30]
+    h = {"appVersion": GOVEE_APP_VERSION, "clientId": client, "clientType": "1",
+         "iotVersion": "0", "timestamp": str(int(time.time() * 1000)),
+         "Content-Type": "application/json",
+         "User-Agent": f"GoveeHome/{GOVEE_APP_VERSION} (com.ihoment.GoVeeSensor; build:8; "
+                       "iOS 26.5.0) Alamofire/5.11.0"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h, client
+
+
+def _govee_app_call(path, email, token=None, body=None):
+    h, _client = _govee_app_headers(email, token)
+    req = urllib.request.Request(GOVEE_APP + path, headers=h, method="POST" if body is not None else "GET",
+                                 data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode("utf-8", "replace") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return {**json.loads(e.read().decode("utf-8", "replace") or "{}"), "_http": e.code}
+        except ValueError:
+            return {"_http": e.code, "message": str(e)}
+
+
+def govee_app_login(c, code=None):
+    """Log in to the Govee app API and cache the token (owner-only file).
+    Raises GoveeCodeRequired after asking Govee to email a code, when the
+    account wants one and none was given."""
+    _h, client = _govee_app_headers(c["email"])
+    body = {"email": c["email"], "password": c["password"], "client": client}
+    if code:
+        body["code"] = code
+    j = _govee_app_call("/account/rest/account/v2/login", c["email"], body=body)
+    if j.get("status") == 454:
+        if code:
+            raise RuntimeError("Govee rejected the verification code")
+        _govee_app_call("/account/rest/account/v1/verification", c["email"],
+                        body={"type": 8, "email": c["email"]})
+        raise GoveeCodeRequired("Govee emailed a verification code; run: netinv govee-login")
+    token = (j.get("client") or {}).get("token")
+    if not token:
+        raise RuntimeError(f"Govee login failed: {j.get('message') or j.get('status') or j}")
+    with open(os.open(GOVEE_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump({"email": c["email"], "token": token}, f)
+    os.chmod(GOVEE_TOKEN_FILE, 0o600)     # the mode above only applies to a new file
+    return token
+
+
+def _govee_cached_token(email):
+    try:
+        with open(GOVEE_TOKEN_FILE) as f:
+            d = json.load(f)
+        return d["token"] if d.get("email") == email else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def govee_app_devices(c):
+    """The account's devices with their deviceExt, logging in only when
+    there's no cached token or it has expired."""
+    def fetch(token):
+        j = _govee_app_call("/bff-app/v1/device/list", c["email"], token=token)
+        devs = (j.get("data") or {}).get("devices")
+        return devs, j
+    token = _govee_cached_token(c["email"])
+    if token:
+        devs, _j = fetch(token)
+        if devs is not None:
+            return devs
+    devs, j = fetch(govee_app_login(c))      # stale or no token: one fresh login
+    if devs is None:
+        raise RuntimeError(f"Govee device list failed: {j.get('message') or j.get('status') or j}")
+    return devs
+
+
+def _json_field(s):
+    if isinstance(s, dict):
+        return s
+    try:
+        v = json.loads(s or "{}")
+        return v if isinstance(v, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def govee_app_reading(d):
+    """One Govee app device -> a monitor reading, or None for devices
+    without sensor data (lights, plugs). A sensor behind a hub is online only
+    while the hub is too (gwonline), as in the Govee app."""
+    ext = d.get("deviceExt") or {}
+    settings = _json_field(ext.get("deviceSettings"))
+    data = _json_field(ext.get("lastDeviceData"))
+    if "online" not in data and "battery" not in settings:
+        return None
+    online = data.get("online")
+    if online is not None and "gwonline" in data:
+        online = bool(online) and bool(data["gwonline"])
+    last = data.get("lastTime") or 0
+    seen = _epoch_iso(int(last) // 1000) if isinstance(last, (int, float)) and last > 0 else ""
+    return _reading("govee-app", d.get("deviceName"), settings.get("battery"),
+                    None if online is None else bool(online), model=d.get("sku", ""), seen=seen)
+
+
+def battery_govee_app(c):
+    """Govee sensors' battery and online state from the app API: one call
+    with a cached token. Covers H5054/H5058 leak sensors behind a hub."""
+    return [r for r in (govee_app_reading(d) for d in govee_app_devices(c)) if r]
+
+
 def discover_kasa(_c):
     """Kasa app names (aliases) by MAC, straight from the devices on the LAN."""
     return [_item("kasa", d["alias"], mac=d["mac"], ip=d["ip"], model=d["model"])
@@ -1239,8 +1375,8 @@ def battery_ble(_c=None, seconds=30):
     return [_reading("ble", n, pct, True, model="bluetooth") for n, pct in heard.items()]
 
 
-BATTERY_READERS = {"ha": battery_ha, "tuya": battery_tuya,
-                   "blink": battery_blink, "flume": battery_flume}
+BATTERY_READERS = {"ha": battery_ha, "tuya": battery_tuya, "blink": battery_blink,
+                   "flume": battery_flume, "govee-app": battery_govee_app}
 
 
 def batteries(providers=None, log=print, ble=True):
@@ -1285,8 +1421,8 @@ DISCOVERERS = {
 
 def discover(providers=None):
     """Run the given (or all configured) connectors; return normalized items."""
-    if providers is None:
-        providers = configured_providers()
+    if providers is None:     # battery-only providers (govee-app) name nothing
+        providers = [p for p in configured_providers() if p in DISCOVERERS]
     items = []
     for p in providers:
         c = creds(p)

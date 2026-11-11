@@ -149,6 +149,12 @@ def names_for(m, rows, home_rows=()):
     return names
 
 
+# Reading providers that go by another provider's AppNames: Govee devices
+# advertise over Bluetooth, and appear in the Govee app API, under the name
+# the Govee app (AppNames 'govee=...') gives them.
+ALIASES = {"ble": "govee", "govee-app": "govee"}
+
+
 def match_reading(m, rows, readings, home_rows=()):
     """The cloud reading for monitor m, or None. An explicit Match wins; then
     a MAC; then the provider's own name for the device; then any name."""
@@ -164,9 +170,7 @@ def match_reading(m, rows, readings, home_rows=()):
             return rd
     names = names_for(m, rows, home_rows)
     for rd in readings:
-        # Govee devices advertise over Bluetooth under the Govee app's name.
-        own = names.get(rd["provider"], set()) | (names.get("govee", set())
-                                                  if rd["provider"] == "ble" else set())
+        own = names.get(rd["provider"], set()) | names.get(ALIASES.get(rd["provider"]), set())
         if norm(rd["name"]) in own:
             return rd
     for rd in readings:
@@ -482,13 +486,14 @@ def suggest(master, readings, existing, home_rows=(), self_macs=()):
         ble = rd["provider"] == "ble"
         if id(rd) in used or norm(rd["name"]) in have:
             continue
-        if rd.get("pct") is None and not (ble and re.match(r"H\d{4}", rd["name"])):
+        sensor = (ble and re.match(r"H\d{4}", rd["name"])) or rd["provider"] == "govee-app"
+        if rd.get("pct") is None and not sensor:
             continue
         has_batt = rd.get("pct") is not None
         # Not every Govee broadcast carries the battery, so a scan may miss it;
         # set the threshold anyway (a model that never reports just never fires).
         add({"Device": rd["name"], "Enabled": "yes", "OfflineAfter": "1d",
-             "BatteryBelow": str(DEFAULT_BATTERY) if has_batt or ble else "",
+             "BatteryBelow": str(DEFAULT_BATTERY) if has_batt or sensor else "",
              "Check": "ble" if ble else "cloud",
              "Match": f"{rd['provider']}={rd['name']}", "Notes": rd.get("model", "")},
             (f"{rd['provider']} battery {rd['pct']}%" if has_batt else "heard over bluetooth")

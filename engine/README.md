@@ -218,12 +218,28 @@ directly by this Mac in a 30-second passive scan each hour (`pip install
 bleak`; macOS asks once to allow Bluetooth). It only listens, so it uses no
 network. A sensor counts as online when the scan hears it, and Govee
 H5074 / H507x / H510x / H517x broadcasts carry the battery. One scan can
-miss a sensor, so give `ble` monitors a limit of hours, not minutes. The
-Govee cloud is no help here: it reports every Bluetooth and hub sensor as
-offline. Leak sensors that talk only to their Govee hub (H5054, H5058)
-can't be heard, so watch the hub. macOS hides Bluetooth MACs, so a
-monitor is named after what the sensor broadcasts (`H5101_4670`). Rename
-the `Device` and keep `Match ble=H5101_4670`.
+miss a sensor, so give `ble` monitors a limit of hours, not minutes.
+macOS hides Bluetooth MACs, so a monitor is named after what the sensor
+broadcasts (`H5101_4670`). Rename the `Device` and keep
+`Match ble=H5101_4670`.
+
+**Govee sensors through the Govee app's account** (`govee-app`): the
+developer API key reports every Bluetooth and hub sensor as offline, but
+the account API the Govee app itself uses has each sensor's battery,
+online state and last report. That includes H5054/H5058 leak sensors,
+which talk only to their hub and can't be heard over Bluetooth. A sensor
+counts as online only while its hub is too, as in the app.
+
+```bash
+./netinv.py set-cloud govee-app     # Govee email + password (Keychain)
+./netinv.py govee-login             # once, in a terminal: enters the emailed code if asked
+```
+
+The token is cached in `~/.netinv_govee.json` (owner-only), so the hourly
+check makes one call and logs in again only when the token expires. If
+Govee wants a new code, the monitor log says so; run `govee-login`
+again. This API is undocumented (the calls follow homebridge-govee) and
+can change. If it breaks, its readings stop and nothing is marked offline.
 
 It costs very little bandwidth. `watch` decides presence from the sweep it
 already does and sends nothing extra, except one TCP connect for a
@@ -311,6 +327,7 @@ WiFi, so they land in `cloud_devices.csv` as a name reference.
 | **govee** | API key (Govee Home app → Profile → Settings → Apply for API Key) | app name + model; MAC + IP with LAN Control on | direct² / reference |
 | **kasa** | none: local protocol on port 9999, always on | app name + MAC + IP | direct |
 | **flume** | API client id + secret (portal.flumewater.com) + login | bridge/sensor + sensor battery | reference |
+| **govee-app** | Govee account email + password (`govee-login` for the emailed code) | sensor battery + online (monitors only) | — |
 
 ² Govee devices answer a LAN scan (UDP 4001/4002) only with **LAN Control** switched
 on per device in the Govee app; others are matched by a MAC guessed from the device id,
