@@ -56,6 +56,12 @@ PROVIDERS = {
     "govee": [
         ("api_key", True, "Govee API key (Govee Home app > Profile > Settings > Apply for API Key)"),
     ],
+    "flume": [
+        ("client_id",     False, "Flume API Client ID (portal.flumewater.com > Settings > API Access)"),
+        ("client_secret", True,  "Flume API Client Secret"),
+        ("username",      False, "Flume account email"),
+        ("password",      True,  "Flume account password"),
+    ],
     "kasa": [],   # local LAN protocol, no account needed
     "ha": [
         ("url",   False, "Home Assistant URL (e.g. http://192.168.1.204:8123)"),
@@ -1029,8 +1035,179 @@ def discover_ha(c):
             for d in devs if d["name"] and d["mac"]]
 
 
+def flume_devices(c):
+    """Flume devices from its REST API: the Wi-Fi bridge (type 1) and the
+    battery sensor on the water meter (type 2). Two calls: token, device list."""
+    import base64
+    body = json.dumps({"grant_type": "password", "client_id": c["client_id"],
+                       "client_secret": c["client_secret"], "username": c["username"],
+                       "password": c["password"]}).encode()
+    req = urllib.request.Request("https://api.flumewater.com/oauth/token", data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        token = json.loads(r.read())["data"][0]["access_token"]
+    # The user id is in the JWT's payload; no extra call needed.
+    payload = token.split(".")[1]
+    uid = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["user_id"]
+    req = urllib.request.Request(
+        f"https://api.flumewater.com/users/{uid}/devices?user=false&location=true",
+        headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read()).get("data", [])
+
+
+def discover_flume(c):
+    """Flume names for the cloud reference list (the bridge is on Wi-Fi with
+    no MAC in the API; the meter sensor is radio-only)."""
+    try:
+        devs = flume_devices(c)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! flume: {e}")
+        return []
+    return [_item("flume", _flume_name(d), model="bridge" if d.get("type") == 1 else "sensor",
+                  online=bool(d.get("connected", True))) for d in devs]
+
+
+def _flume_name(d):
+    return "Flume Bridge" if d.get("type") == 1 else "Flume Sensor"
+
+
+# --------------------------------------------------------------------------- #
+# Battery + cloud-online readings, for monitors (see monitor.py). Each returns
+# [{provider, name, mac, level, pct, online, model, seen}] with one or two
+# calls per cloud: level is what the cloud said ('low', 84), pct its percent.
+# --------------------------------------------------------------------------- #
+def _reading(provider, name, level, online=None, mac="", model="", seen=""):
+    from monitor import battery_pct
+    return {"provider": provider, "name": (name or "").strip(), "mac": mac,
+            "level": level, "pct": battery_pct(level), "online": online,
+            "model": model, "seen": seen}
+
+
+def battery_ha(c):
+    """Every Home Assistant battery entity (whatever integration feeds it:
+    SmartThings, Zigbee, BLE...), named after its device. One local call."""
+    states, ents, devs = ha_call(c, [{"type": "get_states"},
+                                     {"type": "config/entity_registry/list"},
+                                     {"type": "config/device_registry/list"}], timeout=30)
+    dev_name = {d["id"]: d.get("name_by_user") or d.get("name") or "" for d in devs or []}
+    dev_mac = {d["id"]: next((_norm_mac(v) for k, v in d.get("connections") or [] if k == "mac"), "")
+               for d in devs or []}
+    ent_dev = {e["entity_id"]: e.get("device_id") for e in ents or []}
+    out = []
+    for s in states or []:
+        a = s.get("attributes") or {}
+        eid = s["entity_id"]
+        if a.get("device_class") != "battery" or not eid.startswith(("sensor.", "binary_sensor.")):
+            continue
+        did = ent_dev.get(eid)
+        name = dev_name.get(did) or re.sub(r"\s*battery$", "", a.get("friendly_name", ""), flags=re.I)
+        online = s["state"] not in ("unavailable", "unknown")
+        level = s["state"] if online else None
+        if eid.startswith("binary_sensor."):          # on = battery low
+            level = ("low" if s["state"] == "on" else "ok") if online else None
+        out.append(_reading("ha", name, level, online, mac=dev_mac.get(did, ""),
+                            seen=s.get("last_reported") or s.get("last_changed", "")))
+    return out
+
+
+# Tuya status codes that carry a battery, best first. residual_electricity is
+# a percent on some locks and a stuck 0 on others, so a battery_state label
+# beside it wins (see _tuya_level).
+TUYA_PCT = ("battery_percentage", "residual_electricity", "va_battery", "battery")
+
+
+def _tuya_level(status):
+    codes = {x.get("code"): x.get("value") for x in status or []}
+    pct = next((codes[k] for k in TUYA_PCT if isinstance(codes.get(k), (int, float))
+                and not isinstance(codes.get(k), bool)), None)
+    label = codes.get("battery_state")
+    if label and (pct is None or pct == 0):
+        return label
+    return pct
+
+
+def battery_tuya(c):
+    """Tuya/Smart Life battery devices (locks, door and flood sensors). The
+    device list carries each one's status, so this is a single call."""
+    resp = _tuya_cloud(c).getdevices(True)
+    devs = resp.get("result", []) if isinstance(resp, dict) else []
+    out = []
+    for d in devs:
+        level = _tuya_level(d.get("status"))
+        if level is None:
+            continue
+        seen = d.get("update_time")
+        out.append(_reading("tuya", d.get("name"), level, bool(d.get("online")),
+                            model=d.get("product_name", ""),
+                            seen=_epoch_iso(seen) if seen else ""))
+    return out
+
+
+def _epoch_iso(t):
+    import datetime as dt
+    try:
+        return dt.datetime.fromtimestamp(int(t)).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def battery_blink(c):
+    """Blink battery cameras and doorbells from the homescreen the login
+    already fetched: 'ok' or 'low', and offline when Blink says so or the
+    camera's sync module is down."""
+    async def work(blink):
+        hs = blink.homescreen or {}
+        sync_up = {s.get("network_id"): s.get("status") == "online"
+                   for s in hs.get("sync_modules", [])}
+        out = []
+        for d in hs.get("cameras", []) + hs.get("doorbells", []):
+            if not d.get("battery"):
+                continue                       # wired: Minis, some doorbells
+            bars = (d.get("signals") or {}).get("battery")
+            online = d.get("status") != "offline" and sync_up.get(d.get("network_id"), True)
+            out.append(_reading("blink", d.get("name"), d["battery"], online,
+                                model=d.get("type", "") + (f" {bars}/3 bars" if bars else ""),
+                                seen=d.get("updated_at", "")))
+        return out
+    return blink_run(c, work) or []
+
+
+def battery_flume(c):
+    """Flume sensor battery ('high' / 'medium' / 'low') and connection."""
+    out = []
+    for d in flume_devices(c):
+        if d.get("type") != 2:
+            continue                          # the bridge is mains powered
+        out.append(_reading("flume", _flume_name(d), d.get("battery_level"), d.get("connected"),
+                            model="sensor", seen=d.get("last_seen", "")))
+    return out
+
+
+BATTERY_READERS = {"ha": battery_ha, "tuya": battery_tuya,
+                   "blink": battery_blink, "flume": battery_flume}
+
+
+def batteries(providers=None, log=print):
+    """Battery/online readings from every configured cloud that has them.
+    One failing cloud is reported and skipped, never fatal."""
+    out = []
+    for p in providers or [p for p in BATTERY_READERS if creds(p) is not None]:
+        c = creds(p)
+        if c is None or p not in BATTERY_READERS:
+            continue
+        try:
+            got = BATTERY_READERS[p](c)
+        except Exception as e:  # noqa: BLE001
+            log(f"  ! {p} batteries: {e}")
+            continue
+        out += got
+    return out
+
+
 DISCOVERERS = {
     "ha": discover_ha,
+    "flume": discover_flume,
     "kasa": discover_kasa,
     "tuya": discover_tuya,
     "wyze": discover_wyze,

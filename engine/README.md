@@ -91,6 +91,7 @@ overwrites a name you set.
 ```
 ./netinv.py update [--scan] [--router] [--cloud] [--auto-name] [--notify]   # gather + merge + report
 ./netinv.py watch [--interval 300] [--notify] [--once]           # poll & alert on new devices
+./netinv.py monitor [list|on|off|check|suggest|batteries]        # offline / low-battery alerts
 ./netinv.py name "Friendly Name" <mac> [<mac> ...]               # group MAC(s) under a name
 ./netinv.py show [filter]                                        # print inventory
 ./netinv.py alerts [--rule id] [--notify]                        # evaluate alert rules
@@ -177,6 +178,56 @@ at login, restarted if it dies), use `scan-jobs.sh` at the repo root:
 ../scan-jobs.sh stop         # also stops a watch started by hand
 ```
 
+## Device monitors (offline too long, battery low)
+
+Pick the devices you care about (the NAS, a desktop Mac, door locks, battery
+cameras, the water meter) and get one email when one stays offline past its
+limit or its battery drops to a threshold, and one more when it recovers:
+
+```bash
+./netinv.py monitor suggest             # propose monitors from your inventory + clouds
+./netinv.py monitor suggest --apply     # add them to monitors.csv
+./netinv.py monitor                     # list: on/off, limits, live status
+./netinv.py monitor on "QNAP NAS" --offline 30m --check tcp:8080
+./netinv.py monitor on "Garage door" --battery 25
+./netinv.py monitor off "Foscam Camera"           # keeps its settings
+./netinv.py monitor batteries           # every battery level the clouds report
+./netinv.py monitor check --email       # one pass on its own, no network sweep
+```
+
+`monitors.csv` is one row per device, editable by hand:
+
+| Column | Meaning |
+|---|---|
+| `Device` | name in `devices.csv` (or its hostname), or a cloud's name for a device with no MAC |
+| `Enabled` | `yes` / `no`: the toggle |
+| `OfflineAfter` | `30m`, `2h`, `1d`: alert once it has been gone this long (blank = never) |
+| `BatteryBelow` | percent: alert at or below it (blank = never) |
+| `Check` | `ping` (default with a MAC), `tcp:PORT` (the service is up, not just the box), `cloud` (the vendor's online flag, for battery devices that sleep off Wi-Fi; default with no MAC), `none` |
+| `Match` | optional `provider=name` when the cloud calls it something else (`flume=Flume Sensor`) |
+
+Battery levels come from **Home Assistant** (every `battery` entity, so
+SmartThings, Zigbee and BLE sensors too), **Tuya / Smart Life** (locks,
+door and flood sensors), **Blink** (`ok` / `low` per battery camera and
+doorbell) and **Flume** (`set-cloud flume` with an API client id and secret
+from portal.flumewater.com). Labels map to percents: `low` = 10,
+`middle`/`medium` = 50, `ok`/`high` = 100.
+
+It costs very little bandwidth. `watch` decides presence from the sweep it
+already does and sends nothing extra, except one TCP connect for a
+`tcp:PORT` check. `monitor check` sends one ping per device, then up to five
+single TCP connects if the ping goes unanswered (a reset proves a host is up
+when it drops pings). The clouds are asked once an hour
+(`monitor_cloud_every`), at one call each for Tuya and Flume and a local
+call for Home Assistant. Alerts go to email (`watch --email`), macOS
+notifications (`--notify`) and `events.csv` (`offline`, `online`,
+`battery-low`, `battery-ok`). `GET /api/monitors` serves the list with live
+status.
+
+The Mac running the watch can't report its own outage. Set `heartbeat_url`
+to a dead-man check (e.g. a free healthchecks.io URL). Each poll pings it,
+and the service emails you when the pings stop.
+
 For a periodic full refresh instead, install the update LaunchAgent:
 
 ```bash
@@ -247,6 +298,7 @@ WiFi, so they land in `cloud_devices.csv` as a name reference.
 | **apple** | Apple ID + app-specific password | device roster (name + model) | reference¹ |
 | **govee** | API key (Govee Home app → Profile → Settings → Apply for API Key) | app name + model; MAC + IP with LAN Control on | direct² / reference |
 | **kasa** | none: local protocol on port 9999, always on | app name + MAC + IP | direct |
+| **flume** | API client id + secret (portal.flumewater.com) + login | bridge/sensor + sensor battery | reference |
 
 ² Govee devices answer a LAN scan (UDP 4001/4002) only with **LAN Control** switched
 on per device in the Govee app; others are matched by a MAC guessed from the device id,
@@ -270,6 +322,8 @@ non-`192.168.1.x` networks work by setting it.
 | `NETINV_STALE_DAYS` | `stale_days` | `30` | Days unseen before a device is `defunct` |
 | `NETINV_ROUTER_COOLDOWN_MIN` | `router_cooldown_min` | `30` | Lockout back-off minutes |
 | `NETINV_HOME_SSIDS` | `home_ssids` | — | Comma-separated home SSIDs for `wifi-scan` |
+| `NETINV_MONITOR_CLOUD_EVERY` | `monitor_cloud_every` | `1h` | How often monitors ask the clouds for batteries |
+| `NETINV_HEARTBEAT_URL` | `heartbeat_url` | — | Dead-man URL fetched after each watch poll / monitor check |
 
 ## Tests
 

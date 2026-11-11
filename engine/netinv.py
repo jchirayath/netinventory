@@ -56,6 +56,8 @@ HOME_CSV = os.path.join(DATA_DIR, "home.csv")
 APP_ROOMS_CSV = os.path.join(DATA_DIR, "app_rooms.csv")  # written by `home rooms`
 TYPES_CSV = os.path.join(DATA_DIR, "types.csv")  # board edits; built-in list until then
 APPS_CSV = os.path.join(DATA_DIR, "apps.csv")
+MONITORS_CSV = os.path.join(DATA_DIR, "monitors.csv")    # see monitor.py
+MONITOR_STATE = os.path.join(DATA_DIR, "monitor_state.json")
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 def _load_config():
@@ -91,6 +93,11 @@ STALE_DAYS = int(_cfg("stale_days", "NETINV_STALE_DAYS", "30"))
 # events.csv join-history retention.
 EVENTS_RETENTION_DAYS = int(_cfg("events_retention_days",
                                  "NETINV_EVENTS_RETENTION_DAYS", "365"))
+# Device monitors (monitor.py): how often to ask the clouds for batteries,
+# and an optional dead-man URL (e.g. healthchecks.io) pinged after each pass,
+# which mails you itself if this Mac or the watch stops checking in.
+MONITOR_CLOUD_EVERY = _cfg("monitor_cloud_every", "NETINV_MONITOR_CLOUD_EVERY", "1h")
+HEARTBEAT_URL = _cfg("heartbeat_url", "NETINV_HEARTBEAT_URL", "")
 
 
 def subnet_prefix(subnet=None):
@@ -2006,9 +2013,222 @@ def cmd_watch(args):
               f"{len(changes)} changed, {len(left)} left, {len(back)} back")
         if args.email:
             email_events(master, new, changes, long_absent(back, before_seen))
+        if not args.no_monitor:
+            monitor_pass(master, seen, do_email=args.email, do_notify=args.notify)
+        heartbeat()
         if args.once:
             break
         time.sleep(args.interval)
+
+
+# --------------------------------------------------------------------------- #
+# device monitors: offline too long, battery low  (rules in monitor.py)
+# --------------------------------------------------------------------------- #
+MONITOR_WORD = {"offline": "OFFLINE", "online": "BACK ONLINE",
+                "battery-low": "BATTERY LOW", "battery-ok": "BATTERY OK"}
+
+
+def monitor_pass(master, seen_online=None, *, do_email=False, do_notify=False,
+                 cloud="auto"):
+    """Check the enabled monitors once and deliver what crossed a threshold.
+    seen_online: MACs a sweep just saw (watch); None probes each device
+    itself. cloud: 'auto' asks the battery clouds every MONITOR_CLOUD_EVERY,
+    'now' always, 'skip' never. Returns [(device, kind, message)]."""
+    import home
+    import monitor
+    mons = [m for m in monitor.load(MONITORS_CSV) if monitor.enabled(m)]
+    if not mons:
+        return []
+    state = monitor.load_state(MONITOR_STATE)
+    meta = state.setdefault("_meta", {})
+    now = dt.datetime.now().replace(microsecond=0)
+    last = monitor._parse(meta.get("cloud_at"))
+    every = monitor.parse_duration(MONITOR_CLOUD_EVERY) or 3600
+    wants_cloud = any(m["BatteryBelow"] or monitor.check_of(m, monitor.rows_for(m, master)) == "cloud"
+                      for m in mons)
+    readings = None
+    if wants_cloud and (cloud == "now" or (cloud == "auto" and (
+            last is None or (now - last).total_seconds() >= every))):
+        import connectors
+        readings = connectors.batteries()
+        meta["cloud_at"] = monitor._iso(now)
+        print(f"  monitors: {len(readings)} battery reading(s) from the clouds")
+    home_rows = home.load_home(HOME_CSV)
+    alerts = monitor.run(mons, master, state, readings, home_rows=home_rows, now=now,
+                         seen_online=seen_online, arp=arp_table())
+    # forget devices taken out of monitors.csv
+    names = {m["Device"] for m in monitor.load(MONITORS_CSV)}
+    for k in [k for k in state if k != "_meta" and k not in names]:
+        del state[k]
+    monitor.save_state(MONITOR_STATE, state)
+    deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify)
+    return alerts
+
+
+def deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify):
+    """Print, log to events.csv, and optionally notify / email monitor alerts."""
+    if not alerts:
+        return
+    import monitor
+    room_of = {h["Device"]: h["Room"] for h in home_rows if h["Device"]}
+    lines = [f"Device alerts at {now_stamp()}", ""]
+    for dev, kind, msg in alerts:
+        print(f"    ! {dev}: {msg}")
+        rows = monitor.rows_for({"Device": dev}, master)
+        r = dict(rows[0]) if rows else {k: "" for k in FIELDS}
+        r["Device"], r["Source"] = dev, f"monitor: {msg}"
+        log_events([r], kind=kind)
+        if do_notify:
+            notify(f"{dev}: {MONITOR_WORD[kind].lower()}", msg)
+        lines += [f"{MONITOR_WORD[kind]}: {dev}", f"  {msg}",
+                  f"  Room: {room_of.get(dev) or '-'}   IP: {r['IP'] or '-'}   MAC: {r['MAC'] or '-'}", ""]
+    if do_email:
+        counts = {}
+        for _d, kind, _m in alerts:
+            counts[kind] = counts.get(kind, 0) + 1
+        subject = (f"netinventory: {alerts[0][0]} {alerts[0][2]}" if len(alerts) == 1 else
+                   "netinventory: " + ", ".join(f"{n} {MONITOR_WORD[k].lower()}"
+                                                for k, n in counts.items()))
+        ok, msg = send_email(subject, "\n".join(lines))
+        print(f"  email: {msg}")
+
+
+def heartbeat():
+    """GET HEARTBEAT_URL (if set) so an outside service notices when this
+    Mac, its network, or the watch stops: the one failure it can't report
+    itself. A failed ping never stops the watch."""
+    if not HEARTBEAT_URL:
+        return
+    try:
+        urllib.request.urlopen(HEARTBEAT_URL, timeout=10).close()
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! heartbeat: {e}")
+
+
+def local_macs():
+    """MACs of this machine's own interfaces: it can't report itself offline."""
+    try:
+        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:  # noqa: BLE001
+        return set()
+    return {norm_mac(m) for m in re.findall(r"ether ([0-9a-f:]{17})", out)}
+
+
+def cmd_monitor(args):
+    import monitor
+    mons = monitor.load(MONITORS_CSV)
+    act = args.action
+    if act in ("on", "off"):
+        if not args.device:
+            sys.exit(f"  usage: netinv monitor {act} \"Device name\"")
+        master = load_master()
+        key = monitor.norm(args.device)
+        m = next((x for x in mons if monitor.norm(x["Device"]) == key), None)
+        if m is None and act == "off":
+            sys.exit(f"  '{args.device}' is not in {MONITORS_CSV}")
+        if m is None:
+            rows = monitor.rows_for({"Device": args.device}, master)
+            name = rows[0]["Device"] if rows and rows[0]["Device"] else args.device
+            m = {k: "" for k in monitor.FIELDS}
+            m["Device"] = name
+            m["OfflineAfter"] = "" if args.battery and not args.offline else "1h"
+            mons.append(m)
+            if not rows:
+                print(f"  note: '{args.device}' is not in devices.csv; it will be matched "
+                      f"to a cloud battery reading by name (or set --match provider=name)")
+        m["Enabled"] = "yes" if act == "on" else "no"
+        for field, val in (("OfflineAfter", args.offline), ("BatteryBelow", args.battery),
+                           ("Check", args.check), ("Match", args.match)):
+            if val is not None:
+                m[field] = "" if val in ("off", "-") else str(val)
+        bad = monitor.validate(m)
+        if bad:
+            sys.exit("  " + "; ".join(bad))
+        monitor.save(MONITORS_CSV, mons)
+        print(f"  {m['Device']}: {'on' if act == 'on' else 'off'}  "
+              f"offline after {m['OfflineAfter'] or '-'}, battery below "
+              f"{(m['BatteryBelow'] + '%') if m['BatteryBelow'] else '-'}, "
+              f"check {m['Check'] or 'auto'}")
+        return
+    if act == "check":
+        alerts = monitor_pass(load_master(), None, do_email=args.email, do_notify=args.notify,
+                              cloud="now" if args.cloud_now else "skip" if args.no_cloud else "auto")
+        heartbeat()
+        if not alerts:
+            print("  monitors: nothing new to report")
+        if not args.quiet:
+            _print_monitors(monitor.load(MONITORS_CSV))
+        return
+    if act == "batteries":
+        import connectors
+        readings = connectors.batteries()
+        for rd in sorted(readings, key=lambda r: (r["pct"] if r["pct"] is not None else 999)):
+            pct = f"{rd['pct']}%" if rd["pct"] is not None else "?"
+            print(f"  {pct:>5}  {rd['provider']:6} {rd['name'][:34]:34} {str(rd['level'])[:8]:8} "
+                  f"{'online' if rd['online'] else 'OFFLINE' if rd['online'] is False else '':7} "
+                  f"{rd['model'][:24]}")
+        print(f"\n  {len(readings)} reading(s). Watch one: netinv monitor on \"<name>\" --battery 20")
+        return
+    if act == "suggest":
+        import connectors
+        import home
+        master = load_master()
+        print("  asking the clouds for battery levels…")
+        rows = monitor.suggest(master, connectors.batteries(), mons,
+                               home.load_home(HOME_CSV), local_macs())
+        if not rows:
+            print("  nothing new to suggest")
+            return
+        for m, why in rows:
+            print(f"  + {m['Device'][:34]:34} offline>{m['OfflineAfter'] or '-':4} "
+                  f"battery<={m['BatteryBelow'] or '-':3} check={m['Check'] or 'auto':6}  ({why})")
+        if args.apply:
+            monitor.save(MONITORS_CSV, mons + [m for m, _ in rows])
+            print(f"\n  added {len(rows)} monitor(s) to {MONITORS_CSV}; "
+                  f"turn any off with: netinv monitor off \"<name>\"")
+        else:
+            print(f"\n  {len(rows)} suggestion(s). Re-run with --apply to add them "
+                  f"(then edit {os.path.basename(MONITORS_CSV)} or use monitor on/off)")
+        return
+    _print_monitors(mons)
+
+
+def _print_monitors(mons):
+    import monitor
+    if not mons:
+        print(f"  no monitors yet. Start with: netinv monitor suggest   "
+              f"or: netinv monitor on \"QNAP NAS\" --offline 30m")
+        return
+    state = monitor.load_state(MONITOR_STATE)
+    master = load_master()
+    now = dt.datetime.now()
+    print(f"  {'':3} {'Device':34} {'Offline>':8} {'Batt<=':6} {'Check':8} Status")
+    for m in mons:
+        rows = monitor.rows_for(m, master)
+        print(f"  {'on ' if monitor.enabled(m) else 'off'} {m['Device'][:34]:34} "
+              f"{m['OfflineAfter'] or '-':8} {(m['BatteryBelow'] + '%') if m['BatteryBelow'] else '-':6} "
+              f"{monitor.check_of(m, rows):8} {monitor.status_line(state.get(m['Device'], {}), now)}")
+        for problem in monitor.validate(m):
+            print(f"      ! {problem}")
+    print(f"\n  edit {MONITORS_CSV}, or: netinv monitor on|off \"<name>\" "
+          f"[--offline 2h] [--battery 20] [--check tcp:443]")
+
+
+def api_monitors():
+    """Monitors with their live state, for GET /api/monitors."""
+    import monitor
+    state = monitor.load_state(MONITOR_STATE)
+    master = load_master()
+    now = dt.datetime.now()
+    out = []
+    for m in monitor.load(MONITORS_CSV):
+        st = state.get(m["Device"], {})
+        out.append({**m, "enabled": monitor.enabled(m),
+                    "check": monitor.check_of(m, monitor.rows_for(m, master)),
+                    "up": st.get("up"), "last_ok": st.get("last_ok", ""),
+                    "battery": st.get("battery"), "status": monitor.status_line(st, now),
+                    "alerting": bool(st.get("offline_alerted") or st.get("battery_alerted"))})
+    return out
 
 
 def cmd_wifi_scan(args):
@@ -3333,6 +3553,8 @@ def cmd_serve(args):
             return evaluate_alerts(master)
         if path == "/api/events":
             return device_history("")  # all
+        if path == "/api/monitors":
+            return api_monitors()
         if path == "/api/board":
             import home
             return home.board(list(master.values()), home.load_rooms(ROOMS_CSV),
@@ -3679,7 +3901,33 @@ def main():
     w.add_argument("--email", action="store_true",
                    help="email new devices, IP/hostname changes, and devices "
                         f"back after {STALE_DAYS}+ days away (set up with set-email)")
+    w.add_argument("--no-monitor", action="store_true",
+                   help="skip the device monitors (monitors.csv) each poll")
     w.set_defaults(func=cmd_watch)
+
+    mo = sub.add_parser("monitor", help="alert when a device stays offline or its battery "
+                                        "runs low (monitors.csv)")
+    mo.add_argument("action", nargs="?", default="list",
+                    choices=["list", "on", "off", "check", "suggest", "batteries"],
+                    help="list (default); on/off \"Device\": toggle (on adds it); "
+                         "check: one low-bandwidth pass; suggest: propose monitors; "
+                         "batteries: every battery the clouds report")
+    mo.add_argument("device", nargs="?", help="on/off: device name")
+    mo.add_argument("--offline", metavar="DURATION",
+                    help="on: alert after this long offline (30m, 2h, 1d; 'off' = never)")
+    mo.add_argument("--battery", metavar="PCT",
+                    help="on: alert at or below this battery percent ('off' = never)")
+    mo.add_argument("--check", help="on: ping | tcp:PORT | cloud | none")
+    mo.add_argument("--match", help="on: cloud reading to use, provider=name "
+                                    "(e.g. flume=Flume Sensor)")
+    mo.add_argument("--apply", action="store_true", help="suggest: add them to monitors.csv")
+    mo.add_argument("--email", action="store_true", help="check: email alerts")
+    mo.add_argument("--notify", action="store_true", help="check: macOS notifications")
+    mo.add_argument("--cloud-now", action="store_true",
+                    help="check: ask the battery clouds now, not on the hourly schedule")
+    mo.add_argument("--no-cloud", action="store_true", help="check: network probes only")
+    mo.add_argument("--quiet", action="store_true", help="check: print alerts only")
+    mo.set_defaults(func=cmd_monitor)
     se = sub.add_parser("set-email", help="store SMTP settings for email alerts in Keychain")
     se.set_defaults(func=cmd_set_email)
 

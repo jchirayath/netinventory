@@ -11,3 +11,7 @@ stale_days = 30
 router_cooldown_min = 30
 # Home Wi-Fi network name(s) for `wifi-scan`, comma-separated
 home_ssids = MyHomeWiFi
+# Device monitors: how often to ask the clouds for battery levels
+monitor_cloud_every = 1h
+# Dead-man URL fetched after each poll, so you hear when this Mac goes quiet
+# heartbeat_url = https://hc-ping.com/your-uuid

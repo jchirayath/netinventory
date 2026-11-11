@@ -10,6 +10,8 @@ home_ssids.txt
 rooms.csv
 home.csv
 app_rooms.csv
+monitors.csv
+monitor_state.json
 
 # Cached/scraped pages and any raw captures
 *.html
