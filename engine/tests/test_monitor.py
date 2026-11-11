@@ -233,7 +233,8 @@ class TestBluetooth(unittest.TestCase):
         self.assertIsNone(connectors.govee_ble_battery({0x004C: b"\x02\x15"}))
 
     def test_ble_check(self):
-        mons = [mon("H5074_0447", Check="ble", OfflineAfter="1h", BatteryBelow="20")]
+        mons = [mon("H5074_0447", Check="ble", OfflineAfter="1h", BatteryBelow="20",
+                    Match="ble=H5074_0447")]
         heard = [reading("ble", "H5074_0447", 15), reading("ha", "H5074_0447", None, online=False)]
         other = [reading("ble", "Keys", None)]
         state = {}
@@ -252,6 +253,17 @@ class TestBluetooth(unittest.TestCase):
         home_rows = [{"Device": "Office Thermometer", "AppNames": "govee=H5101_4670"}]
         rd = monitor.match_reading(m, [], [reading("ble", "H5101_4670", 86)], home_rows)
         self.assertIsNotNone(rd)
+
+    def test_spoofed_ble_name_is_not_trusted(self):
+        # A phone renamed 'Front Door' must not feed a cloud monitor or an
+        # unmatched ble monitor a battery or presence.
+        spoof = [reading("ble", "Front Door", 100)]
+        state = {}
+        monitor.run([mon("Front Door", Check="cloud", BatteryBelow="20")], {}, state, spoof, now=T0)
+        self.assertNotIn("battery", state["Front Door"])
+        self.assertIsNone(state["Front Door"].get("up"))
+        rd = monitor.match_reading(mon("Front Door", Check="ble"), [], spoof)
+        self.assertIsNone(rd)
 
     def test_suggest_ble(self):
         rds = [reading("ble", "H5074_0447", 100), reading("ble", "H5043_7038", None),

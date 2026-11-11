@@ -170,7 +170,8 @@ def match_reading(m, rows, readings, home_rows=()):
         if norm(rd["name"]) in own:
             return rd
     for rd in readings:
-        if norm(rd["name"]) in names[""]:
+        # Never by a bare name for Bluetooth: it would trust any broadcaster.
+        if rd["provider"] != "ble" and norm(rd["name"]) in names[""]:
             return rd
     return None
 
@@ -376,9 +377,11 @@ def run(monitors, master, state, readings=None, *, home_rows=(), now=None,
                 continue
             rows = rows_for(m, master)
             check = check_of(m, rows)
-            pool_rd = readings or []
-            if check == "ble":     # only Bluetooth counts: HA's copy may be stale
-                pool_rd = [rd for rd in pool_rd if rd["provider"] == "ble"]
+            # Bluetooth names are unauthenticated (anything nearby can broadcast
+            # 'Front Door'), so ble readings serve ble monitors only, and only
+            # by an explicit Match or the Govee app's name (see match_reading).
+            # A ble monitor ignores the clouds: HA's copy may be stale.
+            pool_rd = [rd for rd in readings or [] if (rd["provider"] == "ble") == (check == "ble")]
             reading = match_reading(m, rows, pool_rd, home_rows) if pool_rd else None
             present = None
             if check == "ble":
