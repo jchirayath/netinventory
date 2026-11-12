@@ -24,7 +24,8 @@ jobs:
         run: |
           for f in devices.csv report.md report-by-device.csv inventory.xlsx \
                    wifi_scan.csv cloud_devices.csv events.csv home_ssids.txt \
-                   router_cookies.txt monitors.csv monitor_state.json; do
+                   router_cookies.txt monitors.csv monitor_state.json \
+                   battery_log.csv battery_history.csv; do
             if git ls-files --error-unmatch "engine/$f" >/dev/null 2>&1; then
               echo "::error::network-data file is tracked: engine/$f"; exit 1
             fi

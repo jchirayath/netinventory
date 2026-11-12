@@ -58,6 +58,8 @@ TYPES_CSV = os.path.join(DATA_DIR, "types.csv")  # board edits; built-in list un
 APPS_CSV = os.path.join(DATA_DIR, "apps.csv")
 MONITORS_CSV = os.path.join(DATA_DIR, "monitors.csv")    # see monitor.py
 MONITOR_STATE = os.path.join(DATA_DIR, "monitor_state.json")
+BATTERY_LOG = os.path.join(DATA_DIR, "battery_log.csv")         # see battery.py
+BATTERY_HISTORY = os.path.join(DATA_DIR, "battery_history.csv")
 DEFAULT_IMPORT = os.path.expanduser("~/Documents/DevicesMacs.csv")
 
 def _load_config():
@@ -2054,8 +2056,12 @@ def monitor_pass(master, seen_online=None, *, do_email=False, do_notify=False,
         meta["cloud_at"] = monitor._iso(now)
         print(f"  monitors: {len(readings)} battery reading(s) from the clouds")
     home_rows = home.load_home(HOME_CSV)
+    before = {k: dict(v.get("battery") or {}) for k, v in state.items() if k != "_meta"}
     alerts = monitor.run(mons, master, state, readings, home_rows=home_rows, now=now,
                          seen_online=seen_online, arp=arp_table())
+    if readings is not None:
+        record_battery_levels(before, {k: v.get("battery") for k, v in state.items()
+                                       if k != "_meta"})
     # forget devices taken out of monitors.csv
     names = {m["Device"] for m in monitor.load(MONITORS_CSV)}
     for k in [k for k in state if k != "_meta" and k not in names]:
@@ -2063,6 +2069,125 @@ def monitor_pass(master, seen_online=None, *, do_email=False, do_notify=False,
     monitor.save_state(MONITOR_STATE, state)
     deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify)
     return alerts
+
+
+def record_battery_levels(before, after):
+    """Append changed battery levels to battery_history.csv, and log a
+    detected replacement when a level jumps from low to high."""
+    import battery
+    log = battery.load_log(BATTERY_LOG, include_deleted=True)
+    hist = battery.load_history(BATTERY_HISTORY)
+    new_hist, new_log = battery.record_levels(log, hist, before, after)
+    if new_hist:
+        battery._write(BATTERY_HISTORY, battery.HISTORY_FIELDS, hist)
+    if new_log:
+        battery.save_log(BATTERY_LOG, log)
+        for e in new_log:
+            print(f"    + battery log: {e['Device']}: {e['Notes']}")
+
+
+def battery_levels():
+    """{device: battery reading} from the monitors' last pass."""
+    import monitor
+    return {k: v["battery"] for k, v in monitor.load_state(MONITOR_STATE).items()
+            if k != "_meta" and isinstance(v, dict) and v.get("battery")}
+
+
+def api_batteries():
+    """Every battery device with its level, last change and log, for
+    GET /api/batteries and the Batteries page."""
+    import battery
+    import monitor
+    levels = battery_levels()
+    devices = [m["Device"] for m in monitor.load(MONITORS_CSV)
+               if m["BatteryBelow"] or m["Device"] in levels]
+    log = battery.load_log(BATTERY_LOG)
+    return {"devices": battery.summarize(devices, log, battery.load_history(BATTERY_HISTORY),
+                                         levels),
+            "log": sorted(log, key=lambda r: (r["Date"], r["Updated"]), reverse=True),
+            "events": list(battery.EVENTS)}
+
+
+def api_battery(device):
+    """One device's summary, log and full level history (GET /api/battery)."""
+    import battery
+    log = [r for r in battery.load_log(BATTERY_LOG) if r["Device"] == device]
+    hist = [h for h in battery.load_history(BATTERY_HISTORY) if h["Device"] == device]
+    summary = battery.summarize([device], log, hist, battery_levels())
+    return {"summary": summary[0] if summary else None,
+            "log": sorted(log, key=lambda r: (r["Date"], r["Updated"]), reverse=True),
+            "history": hist}
+
+
+def battery_write(action, req):
+    """add / edit / delete one battery_log.csv entry from a request dict
+    (the API's and the CLI's shared path). Returns the entry, or raises
+    ValueError / KeyError."""
+    import battery
+    rows = battery.load_log(BATTERY_LOG, include_deleted=True)
+    pick = lambda *ks: {k.capitalize(): req[k] for k in ks if k in req}  # noqa: E731
+    if action == "add":
+        f = pick("device", "event", "date", "battery", "level", "notes")
+        e = battery.add_entry(rows, f.get("Device", ""), f.get("Event", "replaced"),
+                              f.get("Date", ""), f.get("Battery", ""), f.get("Level", ""),
+                              f.get("Notes", ""))
+    elif action == "edit":
+        e = battery.edit_entry(rows, str(req.get("id", "")),
+                               pick("device", "event", "date", "battery", "level", "notes"))
+        if e is None:
+            raise KeyError("unknown battery log entry")
+    else:
+        if not battery.delete_entry(rows, str(req.get("id", ""))):
+            raise KeyError("unknown battery log entry")
+        e = {"Id": str(req.get("id", ""))}
+    battery.save_log(BATTERY_LOG, rows)
+    return e
+
+
+def cmd_battery(args):
+    import battery
+    act = args.action
+    if act in ("log", "edit", "delete"):
+        req = {k: v for k, v in (("device", args.device), ("event", args.event),
+                                 ("date", args.date), ("battery", args.type),
+                                 ("level", args.level), ("notes", args.note),
+                                 ("id", args.id)) if v is not None}
+        if act == "log" and not args.device:
+            sys.exit('  usage: netinv battery log "Device" [--type "2x AA"] [--note ...]')
+        if act != "log" and not args.id:
+            sys.exit(f"  usage: netinv battery {act} --id <entry id>   (ids: netinv battery history)")
+        try:
+            e = battery_write({"log": "add"}.get(act, act), req)
+        except (ValueError, KeyError) as err:
+            sys.exit(f"  ! {err}")
+        print(f"  {act}: {e['Id']}" + (f"  {e['Date']} {e['Device']}: {e['Event']}"
+                                      f"{' (' + e['Battery'] + ')' if e['Battery'] else ''}"
+                                      if act != "delete" else " deleted"))
+        return
+    if act == "history":
+        if not args.device:
+            sys.exit('  usage: netinv battery history "Device"')
+        d = api_battery(args.device)
+        s = d["summary"] or {}
+        lvl = f"{s['pct']}%" if s.get("pct") is not None else "unknown"
+        print(f"  {args.device}: level {lvl} · battery {s.get('battery') or '-'} · "
+              f"last changed {s.get('last_changed') or '-'}"
+              + (f" · every ~{s['avg_days']} days, next ~{s['next_due']}" if s.get("avg_days") else ""))
+        for e in d["log"]:
+            print(f"    {e['Date']}  {e['Event']:8} {e['Battery'][:18]:18} "
+                  f"{(e['Level'] + '%') if e['Level'] else '':5} {e['Notes'][:50]:50} "
+                  f"[{e['Source']} {e['Id']}]")
+        for h in d["history"][-15:]:
+            print(f"    {h['Time'].replace('T', ' ')}  level {h['Level']} ({h['Provider']})")
+        return
+    data = api_batteries()
+    print(f"  {'Device':32} {'Level':>6}  {'Battery':16} {'Changed':10} {'Days':>5} {'Every':>6}  Next")
+    for s in data["devices"]:
+        lvl = f"{s['pct']}%" if s["pct"] is not None else "?"
+        print(f"  {s['device'][:32]:32} {lvl:>6}  {s['battery'][:16]:16} "
+              f"{s['last_changed'] or '-':10} {s['days_since'] if s['days_since'] is not None else '-':>5} "
+              f"{(str(s['avg_days']) + 'd') if s['avg_days'] else '-':>6}  {s['next_due'] or '-'}")
+    print(f"\n  log a change: netinv battery log \"<device>\" --type \"2x AA\" --note \"...\"")
 
 
 def deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify):
@@ -3011,11 +3136,13 @@ tr.dim td{color:#9aa}
  <span class=chip id=cd>Hide defunct</span>
  <span class=spacer></span>
  <a class=btn href="/rooms" style="text-decoration:none;color:inherit">Rooms</a>
+ <a class=btn href="/batteries" style="text-decoration:none;color:inherit">Batteries</a>
  <button class=btn id=rst>Reset</button>
 </div>
 <div class=wrap><table><thead><tr id=hr></tr><tr class=f id=fr></tr></thead><tbody id=t></tbody></table></div>
 <script>
 const WRITABLE=__WRITABLE__;
+__AUTHJS__
 const COLS=[
  {k:'Status',l:'Status',t:'status'},
  {k:'IP',l:'IP',t:'ip'},
@@ -3124,8 +3251,7 @@ function tog(f){ST[f]=!ST[f];({weak:cw,off:co,unnamed:cu,def:cd})[f].classList.t
 async function rename(mac){const d=D.find(x=>x.MAC==mac);if(!d)return;
  const name=prompt('Device name for '+mac+' (blank to clear):',d.Device||'');
  if(name==null)return;
- try{const r=await fetch('/api/name',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({mac,name})});
+ try{const r=await apiPost('/api/name',{mac,name});
   if(!r.ok){const e=await r.json().catch(()=>({}));alert('Rename failed: '+(e.error||r.status));return}
   const j=await r.json();d.Device=j.name;renderBody()}
  catch(e){alert('Rename failed: '+e)}}
@@ -3230,6 +3356,7 @@ h1{font-size:1.2rem;margin:.2rem 0}
   <button class=btn id=add type=submit>+ Room</button>
  </form>
  <a class=btn href="/">Devices</a>
+ <a class=btn href="/batteries">Batteries</a>
 </div>
 <div id=msg class=ro style=display:none></div>
 <div class=grid id=g></div>
@@ -3335,8 +3462,9 @@ function render(){
  byapp.classList.toggle('on',mode()=='app');
  addf.style.display=WRITABLE?'flex':'none';
  newroom.placeholder='new '+mode()+' name';add.textContent='+ '+{room:'Room',type:'Type',app:'App'}[mode()]}
+__AUTHJS__
 async function post(path,body){
- const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const r=await apiPost(path,body);
  const j=await r.json().catch(()=>({}));
  if(!r.ok)throw new Error(j.error||r.status);return j}
 async function move(id,room){
@@ -3562,8 +3690,199 @@ async function load(force){if(!force&&(dragId!=null||editing||menu.style.display
 load();setInterval(load,15000)</script>"""
 
 
+def _local_client(addr):
+    """True for a request from this machine itself, which needs no passcode."""
+    return addr in ("127.0.0.1", "::1")
+
+
+def serve_passcode():
+    """The passcode other devices need to edit through serve, or ''."""
+    import connectors
+    return connectors.kc_get("serve", "passcode") or ""
+
+
+def _lan_ip():
+    """This machine's LAN address (no packet is sent: UDP connect only picks
+    the route), or '' if there is none."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((SUBNET.split("/")[0], 9))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
+
+
+def cmd_set_passcode(args):
+    import getpass
+    import connectors
+    p = getpass.getpass("Passcode for edits from other devices (blank = remove): ")
+    if not p:
+        connectors.kc_delete("serve", "passcode")
+        print("  passcode removed; serve --lan --allow-write will refuse to start")
+        return
+    if len(p) < 6:
+        sys.exit("  ! use at least 6 characters")
+    if getpass.getpass("Again: ") != p:
+        sys.exit("  ! the two entries differ")
+    connectors.kc_set("serve", "passcode", p)
+    print("  stored in Keychain. Restart serve; each phone or browser asks for it once.")
+
+
+# Shared by every page: send a write, and when the server wants the passcode
+# (a device other than this Mac, see cmd_serve) ask for it once and keep it
+# in this browser.
+_AUTH_JS = """function getPass(){try{return localStorage.getItem('netinvPass')||''}catch(e){return ''}}
+function setPass(p){try{localStorage.setItem('netinvPass',p)}catch(e){}}
+async function apiPost(path,body){
+ for(let i=0;i<3;i++){
+  const h={'Content-Type':'application/json'};const pc=getPass();if(pc)h['X-Netinv-Passcode']=pc;
+  const r=await fetch(path,{method:'POST',headers:h,body:JSON.stringify(body)});
+  if(r.status!=401)return r;
+  const p=prompt(i?'Wrong passcode. Try again:':'Passcode to make changes (set it with: netinv set-passcode):');
+  if(p==null)return r;setPass(p)}
+ return fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Netinv-Passcode':getPass()},
+  body:JSON.stringify(body)})}"""
+
+
+# Battery changes and levels (battery.py). Same look as _DASHBOARD.
+_BATTERY_PAGE = """<!doctype html><meta charset=utf-8><title>netinventory batteries</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+:root{--head:#1F4E78}
+*{box-sizing:border-box}
+body{font:13px system-ui;margin:1rem;color:#111}
+h1{font-size:1.2rem;margin:.2rem 0}h2{font-size:1rem;margin:1.2rem 0 .4rem}
+#sum{color:#555;margin:.2rem 0 .6rem}
+.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:.5rem}
+input,select,textarea{padding:5px 8px;font:13px system-ui;border:1px solid #cdd;border-radius:6px}
+.spacer{flex:1}
+.btn{border:1px solid #ccd;border-radius:6px;padding:4px 9px;background:#fff;cursor:pointer;color:inherit;text-decoration:none}
+.btn.pri{background:var(--head);color:#fff;border-color:var(--head)}
+.wrap{overflow-x:auto;border:1px solid #eee;border-radius:6px}
+table{border-collapse:collapse;width:100%}
+th,td{padding:4px 8px;border-bottom:1px solid #eee;text-align:left;white-space:nowrap}
+thead th{background:var(--head);color:#fff;position:sticky;top:0}
+tbody tr:hover{background:#f0f6ff}
+td.notes{white-space:normal;min-width:16rem}
+.lvl{display:inline-block;width:70px;height:9px;background:#eee;border-radius:5px;vertical-align:middle;margin-right:6px;overflow:hidden}
+.lvl i{display:block;height:100%}
+.low{color:#c5221f;font-weight:600}.due{color:#b06000}
+.pill{background:#eef;border-radius:8px;padding:1px 6px;font-size:12px}
+.auto{background:#fef7e0}
+.edit{cursor:pointer;opacity:.4;margin-left:4px}.edit:hover{opacity:1}
+#form{display:none;border:1px solid #cdd;border-radius:8px;padding:10px;margin:.5rem 0;background:#f8fafd;max-width:44rem}
+#form label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#444}
+#form .row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+#form .row>label{flex:1 1 9rem}
+#msg{margin:.4rem 0;color:#137333}
+.ro{color:#777;font-size:12px}
+svg.spark{vertical-align:middle}
+@media (max-width:600px){body{margin:.6rem}th,td{padding:4px 5px}}
+</style>
+<h1>Batteries</h1><div id=sum>loading…</div>
+<div class=bar>
+ <input id=q placeholder="search devices and notes…" style="width:16rem">
+ <span class=spacer></span>
+ <button class="btn pri" id=newb>+ Log battery change</button>
+ <a class=btn href="/">Devices</a>
+ <a class=btn href="/rooms">Rooms</a>
+</div>
+<div id=msg></div>
+<form id=form>
+ <div class=row>
+  <label>Device<input id=f_dev list=devs required maxlength=80></label>
+  <label>What happened<select id=f_ev></select></label>
+  <label>Date<input id=f_date type=date required></label>
+ </div>
+ <div class=row>
+  <label>Battery<input id=f_bat placeholder="e.g. 2x CR123A" maxlength=60></label>
+  <label>Level %<input id=f_lvl type=number min=0 max=100 placeholder="optional"></label>
+ </div>
+ <div class=row><label style="flex:1 1 100%">Notes<textarea id=f_note rows=2 maxlength=500></textarea></label></div>
+ <button class="btn pri" type=submit id=f_save>Save</button>
+ <button class=btn type=button id=f_cancel>Cancel</button>
+ <input type=hidden id=f_id>
+</form>
+<datalist id=devs></datalist>
+<div class=wrap><table><thead><tr><th>Device</th><th>Level</th><th>Trend</th><th>Battery</th>
+ <th>Last changed</th><th>Days</th><th>Every</th><th>Next due</th><th></th></tr></thead><tbody id=t></tbody></table></div>
+<h2>Change log</h2>
+<div class=wrap><table><thead><tr><th>Date</th><th>Device</th><th>Event</th><th>Battery</th><th>Level</th>
+ <th>Notes</th><th>Source</th><th></th></tr></thead><tbody id=lg></tbody></table></div>
+<p class=ro id=ro></p>
+<script>
+const WRITABLE=__WRITABLE__;
+__AUTHJS__
+let B={devices:[],log:[],events:[]};
+const esc=s=>(''+ (s==null?'':s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const today=()=>new Date(Date.now()-new Date().getTimezoneOffset()*6e4).toISOString().slice(0,10);
+function color(p){return p==null?'#bbb':p<=20?'#c5221f':p<=50?'#e08600':'#137333'}
+function lvl(s){if(s.pct==null)return '<span class=ro>no reading</span>';
+ const lab=s.label&&s.label!=String(s.pct)?` <span class=ro>${esc(s.label)}</span>`:'';
+ return `<span class=lvl><i style="width:${s.pct}%;background:${color(s.pct)}"></i></span>`+
+  `<span class="${s.pct<=20?'low':''}">${s.pct}%</span>${lab}`}
+function spark(tr){if(!tr||tr.length<2)return '';const w=80,h=18;
+ const pts=tr.map((p,i)=>`${(i/(tr.length-1)*w).toFixed(1)},${(h-p.pct/100*h).toFixed(1)}`).join(' ');
+ return `<svg class=spark width=${w} height=${h} aria-label="level trend"><polyline fill=none stroke="${color(tr[tr.length-1].pct)}" stroke-width=1.5 points="${pts}"/></svg>`}
+function due(s){if(!s.next_due)return '-';const late=s.next_due<=today();
+ return `<span class="${late?'due':''}">${esc(s.next_due)}</span>`}
+function pass(txt){const q=document.getElementById('q').value.toLowerCase();return !q||txt.toLowerCase().includes(q)}
+function render(){
+ const lowN=B.devices.filter(s=>s.pct!=null&&s.pct<=20).length;
+ sum.innerHTML=`<b>${B.devices.length}</b> battery devices · <span class=${lowN?'low':''}>${lowN} at or below 20%</span> · ${B.log.length} logged changes`;
+ const rows=B.devices.filter(s=>pass(s.device+' '+s.battery));
+ t.innerHTML=rows.map(s=>`<tr><td>${esc(s.device)}</td><td>${lvl(s)}</td><td>${spark(s.trend)}</td>`+
+  `<td>${esc(s.battery)||'<span class=ro>-</span>'}</td><td>${esc(s.last_changed)||'-'}</td>`+
+  `<td>${s.days_since??'-'}</td><td>${s.avg_days?s.avg_days+'d':'-'}</td><td>${due(s)}</td>`+
+  `<td>${WRITABLE?`<button class=btn data-log="${esc(s.device)}">Log change</button>`:''}</td></tr>`).join('')
+  ||'<tr><td colspan=9 class=ro style=padding:12px>No battery devices yet: add monitors with a battery threshold (netinv monitor suggest).</td></tr>';
+ const lrows=B.log.filter(e=>pass(e.Device+' '+e.Notes+' '+e.Battery));
+ lg.innerHTML=lrows.map(e=>`<tr class="${e.Source=='auto'?'auto':''}"><td>${esc(e.Date)}</td><td>${esc(e.Device)}</td>`+
+  `<td><span class=pill>${esc(e.Event)}</span></td><td>${esc(e.Battery)}</td><td>${e.Level?esc(e.Level)+'%':''}</td>`+
+  `<td class=notes>${esc(e.Notes)}</td><td>${esc(e.Source)}</td><td>`+
+  (WRITABLE?`<span class=edit title=edit data-edit="${esc(e.Id)}">&#9998;</span><span class=edit title=delete data-del="${esc(e.Id)}">&#10005;</span>`:'')+
+  `</td></tr>`).join('')||'<tr><td colspan=8 class=ro style=padding:12px>Nothing logged yet.</td></tr>';
+ devs.innerHTML=[...new Set([...B.devices.map(s=>s.device),...B.log.map(e=>e.Device)])].sort()
+  .map(d=>`<option value="${esc(d)}">`).join('');
+ f_ev.innerHTML=B.events.map(v=>`<option>${esc(v)}</option>`).join('');
+ ro.textContent=WRITABLE?'':'Read-only: start the server with --allow-write to log changes here, or use: netinv battery log "<device>"';
+ newb.style.display=WRITABLE?'':'none'}
+function openForm(dev,e){form.style.display='block';f_id.value=e?e.Id:'';
+ f_dev.value=e?e.Device:(dev||'');f_ev.value=e?e.Event:'replaced';f_date.value=e?e.Date:today();
+ const s=B.devices.find(x=>x.device==f_dev.value);
+ f_bat.value=e?e.Battery:(s&&s.battery)||'';f_lvl.value=e?e.Level:'';f_note.value=e?e.Notes:'';
+ f_save.textContent=e?'Save changes':'Save';f_dev.focus();form.scrollIntoView({block:'nearest'})}
+function say(m,bad){msg.textContent=m;msg.style.color=bad?'#c5221f':'#137333'}
+async function send(path,body){const r=await apiPost(path,body);const j=await r.json().catch(()=>({}));
+ if(!r.ok)throw new Error(j.error||r.status);return j}
+form.addEventListener('submit',async ev=>{ev.preventDefault();
+ const body={device:f_dev.value,event:f_ev.value,date:f_date.value,battery:f_bat.value,level:f_lvl.value,notes:f_note.value};
+ try{if(f_id.value)await send('/api/battery-edit',{id:f_id.value,...body});else await send('/api/battery-log',body);
+  form.style.display='none';say((f_id.value?'Updated ':'Logged ')+body.event+' for '+body.device+'.');await load()}
+ catch(e){say('Not saved: '+e.message,true)}});
+f_cancel.onclick=()=>{form.style.display='none'};
+newb.onclick=()=>openForm('');
+document.addEventListener('click',async ev=>{const el=ev.target;
+ if(el.dataset.log!=null)openForm(el.dataset.log);
+ else if(el.dataset.edit)openForm('',B.log.find(e=>e.Id==el.dataset.edit));
+ else if(el.dataset.del){const e=B.log.find(x=>x.Id==el.dataset.del);
+  if(!e||!confirm(`Delete the ${e.Event} entry for ${e.Device} on ${e.Date}?`))return;
+  try{await send('/api/battery-delete',{id:e.Id});say('Deleted.');await load()}catch(x){say('Not deleted: '+x.message,true)}}});
+q.addEventListener('input',render);
+async function load(){B=await (await fetch('/api/batteries')).json();if(form.style.display!='block')render()}
+load();setInterval(load,60000)</script>"""
+
+
 def cmd_serve(args):
-    """Read-only JSON API + a tiny dashboard for a GUI/iOS companion to consume."""
+    srv = make_server(args)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  stopped")
+
+
+def make_server(args):
+    """JSON API + dashboard pages for the browser and the companion app."""
     import http.server
     import json as _json
 
@@ -3580,6 +3899,8 @@ def cmd_serve(args):
             return device_history("")  # all
         if path == "/api/monitors":
             return api_monitors()
+        if path == "/api/batteries":
+            return api_batteries()
         if path == "/api/board":
             import home
             return home.board(list(master.values()), home.load_rooms(ROOMS_CSV),
@@ -3588,9 +3909,20 @@ def cmd_serve(args):
         return None
 
     allow_write = getattr(args, "allow_write", False)
+    if getattr(args, "lan", False):
+        args.host = "0.0.0.0"
+    local_only = args.host in ("127.0.0.1", "localhost", "::1")
+    # Edits from any device but this Mac need the passcode (set-passcode);
+    # serving writes to the LAN without one would let anyone there edit.
+    passcode = serve_passcode()
+    if allow_write and not local_only and not passcode:
+        sys.exit("  ! --allow-write on the LAN needs a passcode first: netinv set-passcode")
     # Category edits on the board: types, apps, and a room's floor and aliases.
     CATEGORY_PATHS = ("/api/type-add", "/api/type-edit", "/api/type-delete",
                       "/api/app-add", "/api/app-edit", "/api/app-delete", "/api/room-edit")
+    BATTERY_PATHS = {"/api/battery-log": "add", "/api/battery-edit": "edit",
+                     "/api/battery-delete": "delete"}
+    import hmac
     import threading
     write_lock = threading.Lock()
 
@@ -3611,11 +3943,18 @@ def cmd_serve(args):
         def do_GET(self):
             path = self.path.split("?")[0]
             page = {"/": _DASHBOARD, "/index.html": _DASHBOARD,
-                    "/rooms": _ROOMS_PAGE}.get(path)
+                    "/rooms": _ROOMS_PAGE, "/batteries": _BATTERY_PAGE}.get(path)
             if page:
                 # inject whether writes are enabled so the UI shows edit controls
-                html = page.replace("__WRITABLE__", "true" if allow_write else "false")
+                html = (page.replace("__WRITABLE__", "true" if allow_write else "false")
+                        .replace("__AUTHJS__", _AUTH_JS))
                 _send(self, 200, html.encode(), "text/html; charset=utf-8", cors=True)
+                return
+            if path == "/api/battery":
+                from urllib.parse import parse_qs, urlparse
+                dev = (parse_qs(urlparse(self.path).query).get("device") or [""])[0]
+                _send(self, 200, _json.dumps(api_battery(dev)).encode(), "application/json",
+                      cors=True)
                 return
             data = payload(path)
             if data is None:
@@ -3627,13 +3966,21 @@ def cmd_serve(args):
             path = self.path.split("?")[0]
             if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
                             "/api/type", "/api/app", "/api/delete", "/api/room-delete",
-                            "/api/room-rename", *CATEGORY_PATHS):
+                            "/api/room-rename", *CATEGORY_PATHS, *BATTERY_PATHS):
                 self.send_error(404)
                 return
             if not allow_write:
                 _send(self, 403, b'{"error":"read-only; start with --allow-write"}',
                       "application/json")
                 return
+            if passcode and not _local_client(self.client_address[0]):
+                given = self.headers.get("X-Netinv-Passcode", "")
+                if not hmac.compare_digest(given.encode(), passcode.encode()):
+                    import time
+                    time.sleep(1)          # slows guessing; the threaded server stays up
+                    _send(self, 401, b'{"error":"passcode required","auth":true}',
+                          "application/json")
+                    return
             # CSRF defense for the state-changing write. Requiring a strict
             # application/json body forces a CORS preflight for any cross-origin
             # caller (which this server never approves), so a malicious page
@@ -3661,7 +4008,9 @@ def cmd_serve(args):
                 _send(self, 400, b'{"error":"bad JSON"}', "application/json")
                 return
             with write_lock:   # one read-modify-write of the CSVs at a time
-                if path == "/api/name":
+                if path in BATTERY_PATHS:
+                    self._battery(BATTERY_PATHS[path], req)
+                elif path == "/api/name":
                     self._name(req)
                 elif path == "/api/rename":
                     self._rename(req)
@@ -3671,6 +4020,17 @@ def cmd_serve(args):
                     self._category(path, req)
                 else:
                     self._room(path, req)
+
+        def _battery(self, action, req):
+            try:
+                e = battery_write(action, req)
+            except ValueError as err:
+                _send(self, 400, _json.dumps({"error": str(err)}).encode(), "application/json")
+                return
+            except KeyError as err:
+                _send(self, 404, _json.dumps({"error": err.args[0]}).encode(), "application/json")
+                return
+            _send(self, 200, _json.dumps({"ok": True, "entry": e}).encode(), "application/json")
 
         def _category(self, path, req):
             """Add, edit or delete a type or an app, or edit a room's floor and
@@ -3827,16 +4187,15 @@ def cmd_serve(args):
 
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
-          f"(/, /rooms, /api/devices, /api/summary, /api/alerts, /api/events, /api/board)")
-    print(f"  writes: {'ENABLED (POST /api/name, /api/room, /api/room-add, /api/room-rename, /api/room-delete, /api/rename, /api/type, /api/app, /api/delete, /api/{type,app}-{add,edit,delete}, /api/room-edit)' if allow_write else 'disabled (read-only)'}")
-    if args.host not in ("127.0.0.1", "localhost"):
-        print("  ! bound beyond localhost — data is served to the LAN unauthenticated")
-        if allow_write:
-            print("  ! --allow-write + LAN bind: anyone on the network can rename devices")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        print("\n  stopped")
+          f"(/, /rooms, /batteries, /api/devices, /api/summary, /api/alerts, /api/events, "
+          f"/api/board, /api/batteries, /api/battery?device=)")
+    print(f"  writes: {'ENABLED' if allow_write else 'disabled (read-only)'}"
+          + (f"; other devices need the passcode" if allow_write and passcode else ""))
+    if not local_only:
+        ip = _lan_ip()
+        print(f"  on your network: http://{ip or '<this-mac-ip>'}:{args.port}/batteries")
+        print("  ! the inventory is readable by anyone on the LAN (edits need the passcode)")
+    return srv
 
 
 def cmd_alerts(args):
@@ -3953,6 +4312,20 @@ def main():
     mo.add_argument("--no-cloud", action="store_true", help="check: network probes only")
     mo.add_argument("--quiet", action="store_true", help="check: print alerts only")
     mo.set_defaults(func=cmd_monitor)
+
+    bt = sub.add_parser("battery", help="battery changes and levels (battery_log.csv)")
+    bt.add_argument("action", nargs="?", default="list",
+                    choices=["list", "log", "history", "edit", "delete"],
+                    help="list (default); log \"Device\": record a change; history \"Device\"; "
+                         "edit/delete --id <entry id>")
+    bt.add_argument("device", nargs="?", help="log/history: device name")
+    bt.add_argument("--event", help="replaced (default) | charged | checked | note")
+    bt.add_argument("--type", help="battery type, e.g. '2x CR123A'")
+    bt.add_argument("--level", help="level in percent at the time")
+    bt.add_argument("--date", help="YYYY-MM-DD (default today)")
+    bt.add_argument("--note", help="notes")
+    bt.add_argument("--id", help="edit/delete: the entry id (shown by history)")
+    bt.set_defaults(func=cmd_battery)
     se = sub.add_parser("set-email", help="store SMTP settings for email alerts in Keychain")
     se.set_defaults(func=cmd_set_email)
 
@@ -4053,10 +4426,14 @@ def main():
     sv.add_argument("--host", default="127.0.0.1", help="bind host (default localhost)")
     sv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
     sv.add_argument("--allow-write", action="store_true",
-                    help="enable POST /api/name and /api/room so the dashboard/app "
-                         "can rename devices and move them between rooms "
-                         "(default: read-only)")
+                    help="let the dashboard/app rename devices, move them between rooms "
+                         "and log battery changes (default: read-only)")
+    sv.add_argument("--lan", action="store_true",
+                    help="serve to the whole network (same as --host 0.0.0.0); "
+                         "with --allow-write, edits need the passcode (set-passcode)")
     sv.set_defaults(func=cmd_serve)
+    spc = sub.add_parser("set-passcode", help="passcode other devices need to edit via serve")
+    spc.set_defaults(func=cmd_set_passcode)
 
     args = p.parse_args()
     args.func(args)
