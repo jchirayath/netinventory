@@ -71,6 +71,16 @@ void main() {
     ));
     expect(find.text('Flume Sensor'), findsOneWidget);
     expect(find.text('10% (low)'), findsOneWidget);
+    // group by type from the menu: a header per type appears
+    await tester.tap(find.byTooltip('Group by'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Group: Type').last);
+    await tester.pumpAndSettle();
+    expect(find.text('(no type)'), findsOneWidget);
+    await tester.tap(find.byTooltip('Group by'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Group: None').last);
+    await tester.pumpAndSettle();
     expect(find.text('no reading'), findsOneWidget);
     await tester.enterText(find.byType(TextField).first, 'lock');
     await tester.pump();
@@ -81,6 +91,29 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Change log'), findsOneWidget);
     expect(find.textContaining('Energizer'), findsOneWidget);
+  });
+
+  test('grouping by room: headers in order, unknown last, collapse keeps the header', () {
+    final rows = [
+      {'device': 'Garage door', 'name': 'Garage Door Lock', 'room': 'Garage', 'type': 'lock',
+       'app_label': 'Smart Life (Tuya)', 'pct': 100},
+      {'device': 'U-Bolt WiFi Smart Lock', 'name': 'Garage Lock', 'room': 'Garage', 'type': 'lock',
+       'app_label': 'U-tec (U-Bolt)', 'pct': null},
+      {'device': 'Front Door', 'name': 'Front Door Contact', 'room': 'Entry', 'type': 'sensor',
+       'app_label': 'Samsung SmartThings', 'pct': 0},
+      {'device': 'H5101_4670', 'name': 'H5101_4670', 'room': '', 'type': '', 'app_label': 'Govee'},
+    ];
+    final g = groupBatteries(rows, 'room');
+    expect(g.where((r) => r['__grp'] != null).map((r) => r['__grp']),
+        ['Entry', 'Garage', '(no room)']);
+    expect(g.length, 7); // 3 headers + 4 devices
+    final collapsed = groupBatteries(rows, 'room', collapsed: {'room:Garage'});
+    expect(collapsed.length, 5);
+    expect(groupBatteries(rows, ''), rows);
+    // the two garage locks are told apart by name, and found by app or room
+    expect(filterBatteries(rows, 'u-tec').single['name'], 'Garage Lock');
+    expect(filterBatteries(rows, 'garage').length, 2);
+    expect(batteryName({'device': 'Garage door', 'name': ''}), 'Garage door');
   });
 
   test('write result flags', () {

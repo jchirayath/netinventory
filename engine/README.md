@@ -288,7 +288,16 @@ replacement.
 
 Events are `replaced`, `charged`, `checked` and `note`. With two or more
 changes logged, the list shows how long a set lasts and when the next is
-due. The dashboard's **Batteries** page (`/batteries`) and the app's
+due.
+
+Each battery device is shown as what it is: its `home.csv` name, room,
+type and app, plus the model ("Garage Door Lock · Garage · lock · Smart Life
+DY QSLOCK"). It's found by the monitor's name, then by the cloud name it is
+matched by (`tuya=Garage door`), then by its network row; without a
+`home.csv` row, the room comes from the vendor app and the type is guessed
+from the name. The page and the app can group the list by room, type or
+app. Monitored locks are listed even with no battery reading (a U-Bolt
+reports none), so their changes can be logged by hand. The dashboard's **Batteries** page (`/batteries`) and the app's
 **Batteries** tab show the same data, with a form to log changes;
 `GET /api/batteries` and `GET /api/battery?device=` serve it.
 

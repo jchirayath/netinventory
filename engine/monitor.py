@@ -330,7 +330,8 @@ def evaluate(m, st, present, reading, now):
     pct = reading.get("pct") if reading else None
     if pct is not None:
         st["battery"] = {"pct": pct, "label": str(reading.get("level", "")),
-                         "provider": reading["provider"], "at": _iso(now)}
+                         "provider": reading["provider"], "model": reading.get("model", ""),
+                         "at": _iso(now)}
         below = battery_below(m)
         if below is not None:
             src = f"{reading['provider']}: {reading.get('level')}" \
