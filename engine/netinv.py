@@ -4095,9 +4095,19 @@ svg.spark{vertical-align:middle}
 .sub{color:#777;font-size:11.5px;margin-top:1px}
 tr.grp td{background:#e2eaf5;font-weight:600;cursor:pointer}
 tr.grp .roll{font-weight:400;color:#3a516b;margin-left:10px}
+tr[data-dev]{cursor:pointer}
+dialog#dv{border:1px solid #cdd;border-radius:10px;padding:14px 16px;width:min(46rem,calc(100vw - 32px));max-height:calc(100vh - 48px)}
+dialog#dv::backdrop{background:rgba(0,0,0,.25)}
+#dv .hd{display:flex;gap:8px;align-items:flex-start}
+#dv .hd b{font-size:1.05rem}
+#dv dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;margin:.6rem 0}
+#dv dt{color:#666}#dv dd{margin:0}
+#dv svg.chart{width:100%;height:130px;display:block}
+#dv h3{font-size:.9rem;margin:.9rem 0 .3rem}
 @media (max-width:600px){body{margin:.6rem}th,td{padding:4px 5px}}
 </style>
 <h1>Batteries</h1><div id=sum>loading…</div>
+<p class=ro style="margin:0 0 .5rem">Click a device for its level history and every battery change.</p>
 <div class=bar>
  <input id=q placeholder="search devices, rooms, notes…" style="width:16rem">
  <label>Group <select id=gb><option value="">(none)</option><option value=room>Room</option>
@@ -4144,6 +4154,7 @@ tr.grp .roll{font-weight:400;color:#3a516b;margin-left:10px}
 <div class=wrap><table><thead><tr><th>Date</th><th>Device</th><th>Event</th><th>Battery</th><th>Level</th>
  <th>Notes</th><th>Source</th><th></th></tr></thead><tbody id=lg></tbody></table></div>
 <p class=ro id=ro></p>
+<dialog id=dv><div id=dvb></div></dialog>
 <script>
 const WRITABLE=__WRITABLE__;
 __AUTHJS__
@@ -4178,8 +4189,49 @@ function openDetails(dev){const s=B.devices.find(x=>x.device==dev);if(!s)return;
  d_room.innerHTML=opt('',s.room,'(none)')+(B.rooms||[]).map(r=>opt(r,s.room)).join('');
  d_type.innerHTML=opt('',s.type,'(none)')+(B.types||[]).map(t=>opt(t,s.type)).join('');
  d_track.checked=!!s.tracked;d_name.focus();dform.scrollIntoView({block:'nearest'})}
+// One device's history: the change log and every level reading. A live server
+// answers api/battery?device= with the full history; a static snapshot can't,
+// so it falls back to the list's own data (the last 60 readings).
+let dvDev=null;
+function chart(hist,log){if(hist.length<1)return '<p class=ro>No level readings yet.</p>';
+ const W=600,H=120,L=30,R=6,T=6,Bm=18,ts=hist.map(h=>Date.parse(h.t)),
+  t0=Math.min(...ts),t1=Math.max(...ts,t0+36e5),x=t=>L+(t-t0)/(t1-t0)*(W-L-R),y=p=>T+(1-p/100)*(H-T-Bm);
+ let g='';for(const p of [0,20,50,100])g+=`<line x1=${L} x2=${W-R} y1=${y(p)} y2=${y(p)} stroke="#eee"/>`+
+  `<text x=${L-4} y=${y(p)+3} font-size=9 fill="#888" text-anchor=end>${p}</text>`;
+ for(const e of log){const t=Date.parse(e.Date);if(isNaN(t)||t<t0||t>t1)continue;
+  g+=`<line x1=${x(t)} x2=${x(t)} y1=${T} y2=${H-Bm} stroke="#1F4E78" stroke-dasharray="3 3"><title>${esc(e.Date+' '+e.Event)}</title></line>`}
+ const pts=hist.map((h,i)=>`${x(ts[i]).toFixed(1)},${y(h.pct).toFixed(1)}`).join(' ');
+ g+=`<polyline fill=none stroke="${color(hist[hist.length-1].pct)}" stroke-width=1.8 points="${pts}"/>`;
+ if(hist.length==1)g+=`<circle cx=${x(ts[0])} cy=${y(hist[0].pct)} r=3 fill="${color(hist[0].pct)}"/>`;
+ const d=t=>new Date(t).toISOString().slice(0,10);
+ g+=`<text x=${L} y=${H-4} font-size=9 fill="#888">${d(t0)}</text><text x=${W-R} y=${H-4} font-size=9 fill="#888" text-anchor=end>${d(t1)}</text>`;
+ return `<svg class=chart viewBox="0 0 ${W} ${H}" preserveAspectRatio=none role=img aria-label="battery level over time">${g}</svg>`}
+function logRows(log){return log.length?`<div class=wrap><table><thead><tr><th>Date</th><th>Event</th><th>Battery</th><th>Level</th><th>Notes</th><th></th></tr></thead><tbody>`+
+ log.map(e=>`<tr class="${e.Source=='auto'?'auto':''}"><td>${esc(e.Date)}</td><td><span class=pill>${esc(e.Event)}</span>${e.Source=='auto'?' <span class=ro>detected</span>':''}</td>`+
+  `<td>${esc(e.Battery)}</td><td>${e.Level?esc(e.Level)+'%':''}</td><td class=notes>${esc(e.Notes)}</td><td>`+
+  (WRITABLE?`<span class=edit title=edit data-edit="${esc(e.Id)}">&#9998;</span><span class=edit title=delete data-del="${esc(e.Id)}">&#10005;</span>`:'')+
+  `</td></tr>`).join('')+'</tbody></table></div>':'<p class=ro>No battery changes logged yet.</p>'}
+function readRows(hist){if(!hist.length)return '';const r=[...hist].reverse();
+ return `<details><summary>${hist.length} level reading${hist.length!=1?'s':''}</summary><div class=wrap style="max-height:14rem;overflow:auto"><table><thead><tr><th>Time</th><th>Level</th><th>Reported</th><th>By</th></tr></thead><tbody>`+
+  r.map(h=>`<tr><td>${esc((h.t||'').replace('T',' ').slice(0,16))}</td><td>${h.pct}%</td><td>${h.label&&h.label!=String(h.pct)?esc(h.label):''}</td><td>${esc(h.by||'')}</td></tr>`).join('')+'</tbody></table></div></details>'}
+async function openDevice(dev){const s=B.devices.find(x=>x.device==dev);if(!s)return;dvDev=dev;
+ let log=B.log.filter(e=>e.Device==dev),hist=(s.trend||[]).map(p=>({t:p.t,pct:p.pct})),full=false;
+ const draw=()=>{if(dvDev!=dev)return;const kv=(k,v)=>v||v===0?`<dt>${k}</dt><dd>${esc(v)}</dd>`:'';
+  const sub=[s.model,s.name!=s.device?s.device:''].filter(Boolean).join(' · ');
+  dvb.innerHTML=`<div class=hd><div style=flex:1><b>${esc(s.name||s.device)}</b>${sub?`<div class=sub>${esc(sub)}</div>`:''}</div>`+
+   (WRITABLE?`<button class="btn pri" data-log="${esc(dev)}">Log change</button>`:'')+`<button class=btn id=dvx>Close</button></div>`+
+   `<div style=margin-top:.5rem>${lvl(s)}</div><dl>`+kv('Room',s.room)+kv('Type',s.type)+kv('App',s.app_label)+
+   kv('Battery',s.battery)+kv('Last changed',s.last_changed)+kv('Days since',s.days_since)+
+   kv('Lasts about',s.avg_days?s.avg_days+' days':'')+kv('Next due',s.next_due)+kv('Reported by',s.provider)+`</dl>`+
+   `<h3>Level over time</h3>`+chart(hist,log)+(full||hist.length<2?'':'<p class=ro>Showing the latest readings.</p>')+readRows(hist)+
+   `<h3>Battery changes (${log.length})</h3>`+logRows(log);
+  dvx.onclick=()=>dv.close()};
+ draw();if(!dv.open)dv.showModal();
+ try{const r=await fetch('api/battery?device='+encodeURIComponent(dev));if(!r.ok)return;const j=await r.json();
+  log=j.log||log;hist=(j.history||[]).map(h=>({t:h.Time,pct:+h.Pct,label:h.Level,by:h.Provider}));full=true;draw()}catch(e){}}
+dv.addEventListener('close',()=>{dvDev=null});
 function rowHtml(s){
- return `<tr><td>${devCell(s)}</td><td>${esc(s.room)||'<span class=ro>-</span>'}</td>`+
+ return `<tr data-dev="${esc(s.device)}"><td>${devCell(s)}</td><td>${esc(s.room)||'<span class=ro>-</span>'}</td>`+
   `<td>${esc(s.type)||'<span class=ro>-</span>'}</td><td>${esc(s.app_label)||'<span class=ro>-</span>'}</td>`+
   `<td>${lvl(s)}</td><td>${spark(s.trend)}</td>`+
   `<td>${esc(s.battery)||'<span class=ro>-</span>'}</td><td>${esc(s.last_changed)||'-'}</td>`+
@@ -4238,12 +4290,16 @@ newb.onclick=()=>openForm('');
 document.addEventListener('click',async ev=>{const el=ev.target;
  const grp=el.closest&&el.closest('tr.grp');
  if(grp){collapsed[grp.dataset.grp]=!collapsed[grp.dataset.grp];render();return}
+ const inDv=dv.contains(el),acts=['details','log','edit','del'].some(k=>el.dataset[k]!=null);
+ if(inDv&&acts&&el.dataset.del==null)dv.close();
  if(el.dataset.details!=null){openDetails(el.dataset.details);return}
  if(el.dataset.log!=null)openForm(el.dataset.log);
  else if(el.dataset.edit)openForm('',B.log.find(e=>e.Id==el.dataset.edit));
  else if(el.dataset.del){const e=B.log.find(x=>x.Id==el.dataset.del);
   if(!e||!confirm(`Delete the ${e.Event} entry for ${e.Device} on ${e.Date}?`))return;
-  try{await send('/api/battery-delete',{id:e.Id});say('Deleted.');await load()}catch(x){say('Not deleted: '+x.message,true)}}});
+  try{await send('/api/battery-delete',{id:e.Id});say('Deleted.');await load();if(dvDev)openDevice(dvDev)}catch(x){say('Not deleted: '+x.message,true)}}
+ else if(!inDv&&!acts&&el.tagName!='BUTTON'){const row=el.closest&&el.closest('tr[data-dev]');if(row)openDevice(row.dataset.dev)}});
+dv.addEventListener('click',ev=>{if(ev.target===dv)dv.close()});
 q.addEventListener('input',render);
 gb.addEventListener('change',()=>{store('netinvBattGroup',gb.value);render()});
 async function load(){B=await (await fetch('api/batteries')).json();if(form.style.display!='block')render()}

@@ -17,6 +17,71 @@ Color batteryColor(int? pct) => pct == null
 
 int? batteryPct(Map s) => s['pct'] is int ? s['pct'] as int : null;
 
+/// One level reading from battery_history.csv.
+class LevelReading {
+  final DateTime time;
+  final int pct;
+  final String label, by;
+  const LevelReading(this.time, this.pct, this.label, this.by);
+}
+
+/// The readings in a GET /api/battery answer ({history: [{Time, Pct, Level,
+/// Provider}]}), oldest first, skipping rows with no usable time or percent.
+List<LevelReading> levelReadings(Map? battery) {
+  final out = <LevelReading>[];
+  for (final h in (battery?['history'] as List?) ?? const []) {
+    if (h is! Map) continue;
+    final t = DateTime.tryParse('${h['Time'] ?? ''}');
+    final p = int.tryParse('${h['Pct'] ?? ''}');
+    if (t == null || p == null) continue;
+    out.add(LevelReading(t, p.clamp(0, 100), '${h['Level'] ?? ''}', '${h['Provider'] ?? ''}'));
+  }
+  out.sort((a, b) => a.time.compareTo(b.time));
+  return out;
+}
+
+/// Level over time, with 20% and 50% guide lines.
+class LevelChart extends StatelessWidget {
+  final List<LevelReading> readings;
+  const LevelChart(this.readings, {super.key});
+  @override
+  Widget build(BuildContext context) => SizedBox(
+      height: 90, width: double.infinity, child: CustomPaint(painter: _LevelPainter(readings)));
+}
+
+class _LevelPainter extends CustomPainter {
+  final List<LevelReading> r;
+  _LevelPainter(this.r);
+  @override
+  void paint(Canvas c, Size s) {
+    final guide = Paint()
+      ..color = Brand.line
+      ..strokeWidth = 1;
+    double y(int p) => (1 - p / 100) * (s.height - 4) + 2;
+    for (final p in [0, 20, 50, 100]) {
+      c.drawLine(Offset(0, y(p)), Offset(s.width, y(p)), guide);
+    }
+    if (r.isEmpty) return;
+    final t0 = r.first.time.millisecondsSinceEpoch.toDouble();
+    var span = r.last.time.millisecondsSinceEpoch - t0;
+    if (span < 3600000) span = 3600000;
+    double x(LevelReading e) => (e.time.millisecondsSinceEpoch - t0) / span * s.width;
+    final line = Paint()
+      ..color = batteryColor(r.last.pct)
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+    final path = Path()..moveTo(x(r.first), y(r.first.pct));
+    for (final e in r.skip(1)) {
+      path.lineTo(x(e), y(e.pct));
+    }
+    c.drawPath(path, line);
+    if (r.length == 1) c.drawCircle(Offset(x(r.first), y(r.first.pct)), 3, line);
+  }
+
+  @override
+  bool shouldRepaint(_LevelPainter old) => old.r != r;
+}
+
 /// Devices whose name, room, type, app, model or battery type contains [q]
 /// (case-insensitive), keeping the agent's order (worst level first).
 List<Map> filterBatteries(List devices, String q) {
@@ -364,6 +429,11 @@ class _BatteriesTabState extends State<BatteriesTab> {
     final name = '${s['device']}'; // the monitor's name: what log entries use
     final entries = _log.cast<Map>().where((e) => e['Device'] == name).toList();
     final cs = Theme.of(context).colorScheme;
+    // Full level history; an older agent without /api/battery shows none.
+    final readings = widget.api
+        .battery(name)
+        .then((m) => levelReadings(m))
+        .catchError((_) => <LevelReading>[]);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -406,6 +476,54 @@ class _BatteriesTabState extends State<BatteriesTab> {
             _kv('Next due', '${s['next_due'] ?? ''}'),
             _kv('Reported by', '${s['provider'] ?? ''}'),
             const SizedBox(height: 12),
+            FutureBuilder<List<LevelReading>>(
+              future: readings,
+              builder: (c, snap) {
+                final r = snap.data;
+                if (r == null) return const LinearProgressIndicator(minHeight: 2);
+                final muted = TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: .6));
+                String when(DateTime t) => t.toIso8601String().replaceFirst('T', ' ').substring(0, 16);
+                return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Level over time',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  if (r.isEmpty)
+                    Text('No level readings yet.',
+                        style: TextStyle(fontSize: 12.5, color: Brand.offline))
+                  else ...[
+                    LevelChart(r),
+                    Row(children: [
+                      Text(when(r.first.time).substring(0, 10), style: muted),
+                      const Spacer(),
+                      Text(when(r.last.time).substring(0, 10), style: muted),
+                    ]),
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      title: Text('${r.length} level reading${r.length == 1 ? '' : 's'}',
+                          style: const TextStyle(fontSize: 13)),
+                      children: [
+                        for (final e in r.reversed)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: Row(children: [
+                              SizedBox(width: 130, child: Text(when(e.time), style: muted)),
+                              SizedBox(
+                                  width: 50,
+                                  child: Text('${e.pct}%',
+                                      style: TextStyle(
+                                          fontSize: 12.5, color: batteryColor(e.pct)))),
+                              Text(e.label != '${e.pct}' ? e.label : '', style: muted),
+                              const Spacer(),
+                              Text(e.by, style: muted),
+                            ]),
+                          ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                ]);
+              },
+            ),
             Row(children: [
               const Text('Change log',
                   style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),

@@ -327,7 +327,10 @@ of a device `home.csv` already has links it to that row instead of adding a
 second one, which is how you tell netinventory which Bluetooth sensor is the
 Govee app's "Display-Humidor". Unticking **Track its battery** removes a
 plugged-in device (a Govee hub) from the list. The dashboard's **Batteries** page (`/batteries`) and the app's
-**Batteries** tab show the same data, with a form to log changes;
+**Batteries** tab show the same data, with a form to log changes.
+Click (or tap) a device for its history: a chart of its level over time
+with battery changes marked, every level reading, and every logged change
+(edit or delete them there);
 `GET /api/batteries` and `GET /api/battery?device=` serve it.
 
 ## Dashboard and API

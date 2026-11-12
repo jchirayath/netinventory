@@ -121,6 +121,22 @@ void main() {
     expect(batteryName({'device': 'Garage door', 'name': ''}), 'Garage door');
   });
 
+  test('level readings from /api/battery: oldest first, bad rows skipped', () {
+    final r = levelReadings({
+      'history': [
+        {'Time': '2026-11-12T08:36:00', 'Pct': '33', 'Level': '33', 'Provider': 'ha'},
+        {'Time': '2026-11-11T23:27:40', 'Pct': '100', 'Level': 'ok', 'Provider': 'blink'},
+        {'Time': 'junk', 'Pct': '50'},
+        {'Time': '2026-11-12T09:00:00', 'Pct': ''},
+      ]
+    });
+    expect(r.map((e) => e.pct), [100, 33]);
+    expect(r.first.label, 'ok');
+    expect(r.last.by, 'ha');
+    expect(levelReadings(null), isEmpty);
+    expect(levelReadings({'history': null}), isEmpty);
+  });
+
   test('write result flags', () {
     expect(const WriteResult(401, {}).needsPasscode, isTrue);
     expect(const WriteResult(200, {}).ok, isTrue);

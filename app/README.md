@@ -46,8 +46,9 @@ write comes back 401.
 The **Batteries** tab lists battery devices worst first, with level, battery
 type, last change and next expected change. Each shows its name, room, type,
 app and model ("Garage Door Lock · Garage · lock · Smart Life"). The list
-groups by room, type or app, and filters as you type. Tap one for its change
-log (edit or delete entries). **Log change** records a replacement, charge,
+groups by room, type or app, and filters as you type. Tap one for its history:
+a chart of its level over time, every level reading, and its change log
+(edit or delete entries). **Log change** records a replacement, charge,
 check or note. **Edit details** sets a device's name, room and type (for a
 Flume sensor or a Govee Bluetooth thermometer nothing names) or stops
 tracking a plugged-in device.
