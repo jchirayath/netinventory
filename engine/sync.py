@@ -283,6 +283,28 @@ def agent_import(data_dir, files, expect):
     import_dir(data_dir, files)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The agent's token must reach only the URL it was given: a redirect
+    (to http://, or another host) would carry it along, so none is followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, f"refusing redirect to {newurl}",
+                                     headers, fp)
+
+
+def agent_opener():
+    return urllib.request.build_opener(_NoRedirect)
+
+
+def check_agent_url(url):
+    """https only (http just for this machine, in tests): the bearer token
+    rides on every request."""
+    m = re.fullmatch(r"(https?)://([A-Za-z0-9.-]+)(:\d+)?(/[A-Za-z0-9._/-]*)?", url or "")
+    if not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost")):
+        raise ValueError(f"agent url must be https://host[/path], not {url!r}")
+    return url.rstrip("/")
+
+
 class HttpTarget:
     """A copy reached over HTTPS: the agent on the Pi calling the server
     (net.aspl.net) at /api/agent/sync with a bearer token. The Pi connects
@@ -290,12 +312,11 @@ class HttpTarget:
     differ from the last synced copy travel."""
 
     def __init__(self, url, token, timeout=60):
-        if not re.fullmatch(r"https?://[A-Za-z0-9.-]+(:\d+)?(/[A-Za-z0-9._/-]*)?", url or ""):
-            raise ValueError(f"bad agent url {url!r}")
+        url = check_agent_url(url)
         if not token:
             raise ValueError("no agent token: netinv agent-token")
-        self.url, self.token, self.timeout = url.rstrip("/"), token, timeout
-        self.label, self._seen = url, {}
+        self.url, self.token, self.timeout = url, token, timeout
+        self.label, self._seen, self._open = url, {}, agent_opener().open
 
     def _post(self, body):
         req = urllib.request.Request(
@@ -303,7 +324,7 @@ class HttpTarget:
             headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json",
                      "Content-Encoding": "gzip", "User-Agent": "netinv-agent"})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with self._open(req, timeout=self.timeout) as r:
                 data = r.read()
         except urllib.error.HTTPError as e:
             if e.code == 409:

@@ -116,6 +116,9 @@ SERVE_HOSTS = _cfg("serve_hosts", "NETINV_SERVE_HOSTS", "")
 # (https://net.aspl.net) and keeps the two in step; nothing connects in.
 AGENT_URL = _cfg("agent_url", "NETINV_AGENT_URL", "")
 AGENT_EVERY = _cfg("agent_every", "NETINV_AGENT_EVERY", "5m")
+# Reverse proxies (addresses or CIDRs) whose X-Forwarded-For names the real
+# client, besides loopback: e.g. the Docker network Caddy reaches serve over.
+TRUSTED_PROXIES = _cfg("trusted_proxies", "NETINV_TRUSTED_PROXIES", "")
 
 
 def subnet_prefix(subnet=None):
@@ -2445,8 +2448,11 @@ def cmd_agent(args):
     scan); edits merge both ways (sync.py). Prints only changes and errors."""
     import sync
     import monitor
-    url = (args.url or AGENT_URL).rstrip("/")
-    tgt = sync.HttpTarget(url, agent_token())   # raises on a bad url / no token
+    try:
+        tgt = sync.HttpTarget(args.url or AGENT_URL, agent_token())
+    except ValueError as e:
+        sys.exit(f"  ! {e}")
+    url = tgt.url
     every = monitor.parse_duration(args.every or AGENT_EVERY) or 300
     last_err = [""]
 
@@ -2487,7 +2493,7 @@ def cmd_agent(args):
                 "Authorization": "Bearer " + tgt.token, "Accept": "text/event-stream",
                 "User-Agent": "netinv-agent"})
             # the server pings every 25s, so 90s of silence means a dead link
-            with urllib.request.urlopen(req, timeout=90) as r:
+            with sync.agent_opener().open(req, timeout=90) as r:
                 backoff = 5
                 for line in r:
                     if line.startswith(b"event: sync") or time.time() - last >= every:
@@ -4080,9 +4086,24 @@ def _client_key(addr, headers):
     """Who to count wrong passcodes against. Behind a reverse proxy on this
     machine every request comes from loopback, so use the address the proxy
     reports (the last X-Forwarded-For entry, the one the proxy itself added).
-    A direct client's own X-Forwarded-For is ignored: it could forge it."""
-    xff = headers.get("X-Forwarded-For", "") if addr in ("127.0.0.1", "::1") else ""
+    A direct client's own X-Forwarded-For is ignored: it could forge it.
+    A proxy elsewhere (Caddy in another container) is trusted only when its
+    address is in trusted_proxies; otherwise every client would share the
+    proxy's address, and one stranger's misses would lock everyone out."""
+    xff = headers.get("X-Forwarded-For", "") if _trusted_proxy(addr) else ""
     return xff.split(",")[-1].strip() or addr
+
+
+def _trusted_proxy(addr):
+    import ipaddress
+    if addr in ("127.0.0.1", "::1"):
+        return True
+    try:
+        ip = ipaddress.ip_address(addr)
+        return any(ip in ipaddress.ip_network(n.strip(), strict=False)
+                   for n in TRUSTED_PROXIES.split(",") if n.strip())
+    except ValueError:
+        return False
 
 
 def _local_client(addr, headers=None):
@@ -4499,6 +4520,7 @@ def make_server(args):
     # The agent (the Pi) connects to /api/agent/* with this token; unset, those
     # paths don't exist. `changed` wakes its stream after an edit made here.
     agent_secret = agent_token()
+    agent_guard = PasscodeGuard()        # its own count: token misses never lock out edits
     changed = threading.Condition()
     generation = [0]
 
@@ -4568,7 +4590,11 @@ def make_server(args):
             except ValueError:
                 n = -1
             agent_call = self.path.split("?")[0] == "/api/agent/sync"
-            if not 0 <= n <= (64_000_000 if agent_call and agent_secret else 1_000_000):
+            # Over 1 MB only from the agent, and only once its token checks
+            # out: nobody else can make this server read a 64 MB body.
+            big_ok = (agent_call and agent_secret and
+                      hmac.compare_digest(self._bearer().encode(), agent_secret.encode()))
+            if not 0 <= n <= (64_000_000 if big_ok else 1_000_000):
                 self.close_connection = True
                 _send(self, 413, b'{"error":"body too large"}', "application/json")
                 return
@@ -4649,6 +4675,10 @@ def make_server(args):
                     self._room(path, req)
             bump()   # tell a connected agent to sync now
 
+        def _bearer(self):
+            auth = self.headers.get("Authorization", "")
+            return auth[7:] if auth.startswith("Bearer ") else ""
+
         def _agent_ok(self):
             """Bearer token from the agent, compared in constant time; wrong
             ones count toward the same per-client lockout as passcodes."""
@@ -4656,14 +4686,17 @@ def make_server(args):
                 self.send_error(404)
                 return False
             client = _client_key(self.client_address[0], self.headers)
-            if guard.locked(client):
+            if agent_guard.locked(client):
                 _send(self, 429, b'{"error":"too many bad tokens; try again later"}',
                       "application/json")
                 return False
-            auth = self.headers.get("Authorization", "")
-            given = auth[7:] if auth.startswith("Bearer ") else ""
+            given = self._bearer()
             if not hmac.compare_digest(given.encode(), agent_secret.encode()):
-                guard.fail(client)
+                # Only a wrong token is a guess. Counting requests with none
+                # would let a stray probe from home (the Pi's own public IP
+                # behind the router) lock the agent out.
+                if given:
+                    agent_guard.fail(client)
                 _send(self, 401, b'{"error":"bad agent token"}', "application/json")
                 return False
             return True

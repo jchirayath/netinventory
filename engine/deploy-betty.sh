@@ -44,9 +44,10 @@ for a in "$@"; do
   esac
 done
 
-probe() {  # path [header] -> "code redirect"
+probe() {  # path [header] [POST body] -> "code redirect"
   curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 25 --path-as-is \
-       ${2:+-H "$2"} --resolve "$SITE:443:$HOST_IP" "https://$SITE$1" || echo "000"
+       ${2:+-H "$2"} ${3:+-H "Content-Type: application/json" --data "$3"} \
+       --resolve "$SITE:443:$HOST_IP" "https://$SITE$1" || echo "000"
 }
 
 # People: 302 to the Entra sign-in on every page and data path, plain and with
@@ -64,11 +65,13 @@ gated() {
       [[ "$out" == 30[23]\ *"/oauth2/start"* ]] || { echo "  ungated: $p [$h] -> $out" >&2; bad=1; }
     done
   done
-  for p in /api/agent/stream /api/agent/sync; do
-    for h in "X-Probe: 1" "Authorization: Bearer wrong"; do
-      out="$(probe "$p" "$h")"
-      [[ "$out" == 401\ * || "$out" == 405\ * || "$out" == 501\ * ]] || { echo "  agent path: $p [$h] -> $out (want 401)" >&2; bad=1; }
-    done
+  # One wrong token only: each counts toward the per-client lockout, and from
+  # home this machine shares the Pi's public IP.
+  for pr in "/api/agent/stream|X-Probe: 1|" "/api/agent/sync|X-Probe: 1|{\"op\":\"export\"}" \
+            "/api/agent/stream|Authorization: Bearer wrong|"; do
+    IFS='|' read -r p h body <<<"$pr"
+    out="$(probe "$p" "$h" "$body")"
+    [[ "$out" == 401\ * ]] || { echo "  agent path: $p [$h] -> $out (want 401)" >&2; bad=1; }
   done
   return $bad
 }

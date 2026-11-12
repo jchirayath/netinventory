@@ -655,6 +655,51 @@ class TestAgent(_ServerCase):
             with self.assertRaises(ValueError):
                 sync.agent_import(d, {"../evil.csv": "x"}, {})
 
+    def test_big_body_needs_the_token_first(self):
+        self.start_agent_server()
+        big = b"x" * 1_500_000
+        try:   # refused unread: 413, or the connection closes mid-upload
+            self.assertEqual(self.raw("/api/agent/sync", big, token="wrong"), 413)
+        except urllib.error.URLError as e:
+            self.assertIsInstance(e.reason, (BrokenPipeError, ConnectionResetError))
+        self.assertEqual(self.raw("/api/agent/sync", big), 400)   # read, then bad JSON
+
+    def test_agent_url_https_only_and_no_redirects(self):
+        import sync
+        for bad in ("http://net.aspl.net", "ftp://x", "https://a b", ""):
+            with self.assertRaises(ValueError):
+                sync.HttpTarget(bad, "tok")
+        sync.HttpTarget("https://net.aspl.net", "tok")
+        sync.HttpTarget("http://127.0.0.1:8787", "tok")
+        import http.server
+        import socketserver
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(307)
+                self.send_header("Location", "http://127.0.0.1:9/steal")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = socketserver.TCPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        tgt = sync.HttpTarget(f"http://127.0.0.1:{srv.server_address[1]}", "tok")
+        with self.assertRaises(RuntimeError) as e:
+            tgt.export()
+        self.assertIn("307", str(e.exception))
+
+    def test_client_key_trusts_only_configured_proxies(self):
+        h = {"X-Forwarded-For": "203.0.113.9"}
+        self.assertEqual(netinv._client_key("172.30.0.3", h), "172.30.0.3")
+        with mock.patch.object(netinv, "TRUSTED_PROXIES", "172.30.0.0/16"):
+            self.assertEqual(netinv._client_key("172.30.0.3", h), "203.0.113.9")
+            self.assertEqual(netinv._client_key("10.0.0.5", h), "10.0.0.5")
+        self.assertEqual(netinv._client_key("127.0.0.1", h), "203.0.113.9")
+
     def test_stream_nudges_after_an_edit(self):
         self.start_agent_server()
         req = urllib.request.Request(self.base + "/api/agent/stream",
