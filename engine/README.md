@@ -92,6 +92,10 @@ overwrites a name you set.
 ./netinv.py update [--scan] [--router] [--cloud] [--auto-name] [--notify]   # gather + merge + report
 ./netinv.py watch [--interval 300] [--notify] [--once]           # poll & alert on new devices
 ./netinv.py monitor [list|on|off|check|suggest|batteries]        # offline / low-battery alerts
+./netinv.py battery [list|log|history|edit|delete]               # battery changes + levels
+./netinv.py serve --lan --allow-write                            # dashboard for phones (set-passcode)
+./netinv.py sync user@host[:path]                                # merge edits with another copy
+../deploy.sh user@host [--copy-credentials]                      # install/update on a Pi
 ./netinv.py name "Friendly Name" <mac> [<mac> ...]               # group MAC(s) under a name
 ./netinv.py show [filter]                                        # print inventory
 ./netinv.py alerts [--rule id] [--notify]                        # evaluate alert rules
@@ -265,6 +269,84 @@ For a periodic full refresh instead, install the update LaunchAgent:
 ./contrib/install-launchagent.sh uninstall
 ```
 
+## Battery changes and levels
+
+`battery_log.csv` records when batteries were changed, with the battery
+type and your notes. `battery_history.csv` records each monitored device's
+level whenever the hourly check sees it change. When a level jumps from 50%
+or less to 40+ points higher, the change is logged for you as a detected
+replacement.
+
+```bash
+./netinv.py battery                                   # every battery device, worst first
+./netinv.py battery log "Front Door Lock" --type "4x AA" --note "Energizer lithium"
+./netinv.py battery log "Flume Sensor" --event checked --level 60 --date 2026-11-01
+./netinv.py battery history "Front Door Lock"         # its log, with entry ids, and levels
+./netinv.py battery edit --id 538f40cacb64 --note "..."
+./netinv.py battery delete --id 538f40cacb64
+```
+
+Events are `replaced`, `charged`, `checked` and `note`. With two or more
+changes logged, the list shows how long a set lasts and when the next is
+due. The dashboard's **Batteries** page (`/batteries`) and the app's
+**Batteries** tab show the same data, with a form to log changes;
+`GET /api/batteries` and `GET /api/battery?device=` serve it.
+
+## Using the dashboard from your phone or another computer
+
+```bash
+./netinv.py set-passcode                    # 8+ characters, kept in Keychain
+./netinv.py serve --lan --allow-write       # prints the address to open
+```
+
+`--lan` serves the dashboard to your whole network. With `--allow-write`,
+edits from any device other than this Mac need the passcode. Browsers ask
+for it once, and the app takes it in its host dialog. `serve` refuses LAN
+writes until a passcode is set. It answers only requests addressed to this
+machine (its LAN IP, its name, `localhost`, plus any names in
+`serve_hosts`), which blocks DNS-rebinding pages. Ten wrong passcodes in
+ten minutes lock that device out of editing for ten minutes. Reading the
+inventory needs no passcode on your LAN, so don't use `--lan` on a network
+you don't trust.
+
+## Keeping two copies in step (a Raspberry Pi)
+
+**Deploy** this checkout to another machine over ssh (key login):
+
+```bash
+../deploy.sh pi@192.168.1.50                       # code + venv + services
+../deploy.sh pi@192.168.1.50 --copy-credentials    # also logins, email, passcode, tokens
+../deploy.sh pi@192.168.1.50 apps/netinventory --watch-args "--interval 300 --no-router"
+```
+
+It copies only committed code (never your data), creates a venv with the
+cloud and Bluetooth libraries, and runs `watch` and `serve --lan` as
+systemd user services (on a Mac it uses `scan-jobs.sh`). The watch there
+doesn't email by default, so alerts don't arrive twice. Run `deploy.sh`
+again after pulling new code. On the Pi, first run
+`sudo apt install python3-venv nmap net-tools` and
+`sudo loginctl enable-linger $USER` (so it keeps running after reboots).
+Credentials there live in `~/.netinv/credentials.json` (owner-only).
+Home Assistant OS can't run this, so use a Pi with Raspberry Pi OS.
+
+**Sync** the files you edit, either way:
+
+```bash
+./netinv.py sync pi@192.168.1.50            # or a path: pi@host:apps/netinventory
+./netinv.py sync pi@192.168.1.50 --dry-run
+```
+
+| File | How both sides' edits combine |
+|---|---|
+| `battery_log.csv` | per entry, the newer edit wins; deletions sync; nothing is lost |
+| `battery_history.csv` | union |
+| `monitors.csv`, `home.csv`, `rooms.csv`, `types.csv`, `apps.csv` | three-way against the last sync: a field edited on one side carries over; edited on both, the side whose file was written last wins |
+| `devices.csv` | names and notes only; each copy keeps its own scan data; a sync never deletes a device |
+
+Set `sync_target = pi@192.168.1.50` in `~/.netinv/config` and the watch
+syncs every `sync_every` (default 15 minutes). Each copy keeps its own
+live levels and monitor state.
+
 ## Identifying unknown devices (fingerprinting)
 
 Two layers, both built in:
@@ -355,6 +437,10 @@ non-`192.168.1.x` networks work by setting it.
 | `NETINV_HOME_SSIDS` | `home_ssids` | — | Comma-separated home SSIDs for `wifi-scan` |
 | `NETINV_MONITOR_CLOUD_EVERY` | `monitor_cloud_every` | `1h` | How often monitors ask the clouds for batteries |
 | `NETINV_HEARTBEAT_URL` | `heartbeat_url` | — | Dead-man URL fetched after each watch poll / monitor check |
+| `NETINV_SYNC_TARGET` | `sync_target` | — | Copy the watch syncs with (`user@host[:path]` or a directory) |
+| `NETINV_SYNC_EVERY` | `sync_every` | `15m` | How often the watch syncs |
+| `NETINV_SERVE_HOSTS` | `serve_hosts` | — | Extra names `serve` answers to (e.g. `mac-studio.lan`), comma-separated |
+| `NETINV_CREDENTIALS` | — | `~/.netinv/credentials.json` | Credential file where there's no Keychain (Linux) |
 
 ## Tests
 

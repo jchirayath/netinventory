@@ -30,13 +30,18 @@ netinventory/
 The engine is the scanner (Python + nmap/arp/SSDP/router scrape/cloud). It can't
 run on iOS, so the split is deliberate:
 
-- **`engine/`** runs on a Mac. `netinv serve` exposes a read-only JSON API
-  (`/api/devices|summary|alerts|events`) plus a web dashboard. Renaming from the
-  dashboard/app is opt-in: `netinv serve --allow-write` enables `POST /api/name`
-  (off by default; the write path sends no CORS header, so cross-site pages
-  can't reach it).
+- **`engine/`** runs on a Mac or a Raspberry Pi. `netinv serve` exposes a JSON
+  API (`/api/devices|summary|alerts|events|batteries`) plus a web dashboard
+  (devices, rooms, batteries). Editing from the dashboard/app is opt-in:
+  `netinv serve --allow-write` (off by default; the write path sends no CORS
+  header, so cross-site pages can't reach it). `serve --lan` shares it with
+  your phone; edits from other devices then need the passcode
+  (`netinv set-passcode`).
 - **`app/`** is the viewer. On macOS it reads `http://127.0.0.1:8787`; on iOS
-  (which can't scan) it points at the Mac's LAN IP.
+  (which can't scan) it points at the agent's LAN IP.
+- **`deploy.sh`** installs or updates the engine on another machine (a Pi) over
+  ssh, and `netinv sync` keeps your edits in step between the copies. See
+  [`engine/README.md`](engine/README.md#keeping-two-copies-in-step-a-raspberry-pi).
 
 ## Quick start
 

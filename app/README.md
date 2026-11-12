@@ -33,9 +33,17 @@ cd ../engine && python3 netinv.py serve        # http://127.0.0.1:8787
 flutter run -d macos        # or: flutter run -d <iphone>
 ```
 
-Renaming a device from the app needs the agent's opt-in write path:
-`netinv serve --allow-write`. Without it the rename returns 403 and the app
-says so rather than failing silently.
+Renaming a device or logging a battery change from the app needs the agent's
+opt-in write path: `netinv serve --allow-write`. Without it the write returns
+403 and the app says so rather than failing silently. From an iPhone, run the
+agent with `netinv serve --lan --allow-write`, and enter its passcode
+(`netinv set-passcode`) in the host dialog; the app also asks for it when a
+write comes back 401.
+
+The **Batteries** tab lists battery devices worst first, with level, battery
+type, last change and next expected change. Tap one for its change log
+(edit or delete entries); **Log change** records a replacement, charge, check
+or note.
 
 ## The interface
 
