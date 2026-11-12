@@ -4075,13 +4075,14 @@ def make_server(args):
     guard = PasscodeGuard()
     hosts = None                         # HostCheck, once the port is bound (below)
 
-    def _send(self, code, body, ctype, cors=False):
+    def _send(self, code, body, ctype):
+        # No Access-Control-Allow-Origin: the pages are same-origin and the app
+        # isn't a browser, so a CORS header would only let other websites open
+        # in a browser on the LAN read the inventory through this machine's IP.
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        if cors:  # only GET reads are cross-origin shareable; writes are
-            # same-origin-gated in do_POST (CORS headers alone don't stop CSRF)
-            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -4109,21 +4110,32 @@ def make_server(args):
                 # inject whether writes are enabled so the UI shows edit controls
                 html = (page.replace("__WRITABLE__", "true" if allow_write else "false")
                         .replace("__AUTHJS__", _AUTH_JS))
-                _send(self, 200, html.encode(), "text/html; charset=utf-8", cors=True)
+                _send(self, 200, html.encode(), "text/html; charset=utf-8")
                 return
             if path == "/api/battery":
                 from urllib.parse import parse_qs, urlparse
                 dev = (parse_qs(urlparse(self.path).query).get("device") or [""])[0]
-                _send(self, 200, _json.dumps(api_battery(dev)).encode(), "application/json",
-                      cors=True)
+                _send(self, 200, _json.dumps(api_battery(dev)).encode(), "application/json")
                 return
             data = payload(path)
             if data is None:
                 self.send_error(404)
                 return
-            _send(self, 200, _json.dumps(data).encode(), "application/json", cors=True)
+            _send(self, 200, _json.dumps(data).encode(), "application/json")
 
         def do_POST(self):
+            # Read the body before any reply: answering a client that is still
+            # sending (e.g. a 401) makes the close look like a connection reset
+            # to many HTTP clients, the app's included.
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if not 0 <= n <= 1_000_000:
+                self.close_connection = True
+                _send(self, 413, b'{"error":"body too large"}', "application/json")
+                return
+            raw = self.rfile.read(n) if n else b""
             if not self._host_ok():
                 return
             path = self.path.split("?")[0]
@@ -4169,8 +4181,7 @@ def make_server(args):
                           "application/json")
                     return
             try:
-                n = int(self.headers.get("Content-Length", 0))
-                req = _json.loads(self.rfile.read(n) or b"{}")
+                req = _json.loads(raw or b"{}")
                 if not isinstance(req, dict):
                     raise ValueError
             except (ValueError, TypeError):

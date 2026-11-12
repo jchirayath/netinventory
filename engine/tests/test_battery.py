@@ -62,12 +62,21 @@ class TestLevels(unittest.TestCase):
         before = {"Lock": {"pct": 10, "provider": "tuya"}, "Cam": {"pct": 100}}
         after = {"Lock": {"pct": 100, "label": "high", "provider": "tuya"},
                  "Cam": {"pct": 100}, "New": {"pct": 80, "provider": "ha"}, "None": None}
+        hist.append({"Time": "2026-02-01T00:00:00", "Device": "Cam", "Provider": "", "Level": "100",
+                     "Pct": "100"})
         nh, nl = battery.record_levels(log, hist, before, after, now="2026-03-01T10:00:00")
         self.assertEqual(sorted(h["Device"] for h in nh), ["Lock", "New"])  # Cam unchanged
         self.assertEqual(len(nl), 1)
         self.assertEqual((nl[0]["Device"], nl[0]["Event"], nl[0]["Source"], nl[0]["Date"]),
                          ("Lock", "replaced", "auto", "2026-03-01"))
         self.assertIn("10% to 100%", nl[0]["Notes"])
+
+    def test_first_reading_is_a_baseline_then_only_changes(self):
+        hist = []
+        battery.record_levels([], hist, {"Cam": {"pct": 100}}, {"Cam": {"pct": 100}})
+        self.assertEqual([h["Pct"] for h in hist], ["100"])          # baseline
+        battery.record_levels([], hist, {"Cam": {"pct": 100}}, {"Cam": {"pct": 100}})
+        self.assertEqual(len(hist), 1)                               # unchanged: nothing
 
     def test_small_rise_or_high_start_is_not_a_replacement(self):
         log = []
@@ -219,6 +228,12 @@ class TestServer(unittest.TestCase):
             self.assertNotIn("__AUTHJS__", html, page)
             self.assertNotIn("__WRITABLE__", html, page)
 
+    def test_no_cors_header_so_other_sites_cannot_read(self):
+        self.start()
+        with urllib.request.urlopen(self.base + "/api/batteries", timeout=10) as r:
+            self.assertIsNone(r.headers.get("Access-Control-Allow-Origin"))
+            self.assertEqual(r.headers.get("X-Content-Type-Options"), "nosniff")
+
     def test_read_only_server_refuses(self):
         self.start(allow_write=False)
         self.assertEqual(self.post("/api/battery-log", {"device": "x"})[0], 403)
@@ -280,6 +295,34 @@ class TestServer(unittest.TestCase):
         self.assertFalse(h.ok("127.0.0.1:9999"))             # another port
         self.assertFalse(h.ok("evil.example:8787"))
         self.assertFalse(h.ok(""))
+
+    def test_rejection_reads_the_body_first(self):
+        # A large body refused with 401 must still be read, so the client
+        # gets the 401 instead of a connection reset mid-upload.
+        import socket
+        self.start(passcode="hunter22", local=False)
+        body = json.dumps({"device": "x", "notes": "y" * 200_000}).encode()
+        with mock.patch("time.sleep"), socket.create_connection(
+                ("127.0.0.1", self.srv.server_address[1]), timeout=10) as s:
+            s.sendall(b"POST /api/battery-log HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                      b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+                      % (self.srv.server_address[1], len(body)) + body)
+            self.assertIn(b" 401 ", s.recv(200))
+
+    def test_oversized_body_refused(self):
+        self.start()
+        req = urllib.request.Request(self.base + "/api/battery-log", data=b"x",
+                                     headers={"Content-Type": "application/json",
+                                              "Content-Length": "5000000"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+            e.close()
+        except (urllib.error.URLError, ConnectionError):
+            code = 413          # some stacks see the close before the reply
+        self.assertEqual(code, 413)
 
     def test_this_mac_needs_no_passcode(self):
         self.start(passcode="hunter22", local=True)

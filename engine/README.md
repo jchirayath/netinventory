@@ -297,6 +297,7 @@ due. The dashboard's **Batteries** page (`/batteries`) and the app's
 ```bash
 ./netinv.py set-passcode                    # 8+ characters, kept in Keychain
 ./netinv.py serve --lan --allow-write       # prints the address to open
+../scan-jobs.sh serve-start                 # or keep it running: starts at login
 ```
 
 `--lan` serves the dashboard to your whole network. With `--allow-write`,

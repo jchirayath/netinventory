@@ -14,8 +14,9 @@ battery_log.csv (semicolon CSV next to devices.csv), one row per event:
     Updated  when the row was last written (sync: the newer edit wins)
     Deleted  'yes' marks a removed entry, so the removal syncs too
 
-battery_history.csv gets a row whenever a monitored device's reported
-level changes (Time;Device;Provider;Level;Pct), so it stays small. A rise
+battery_history.csv gets a row for a monitored device's first reading and
+whenever its reported level changes (Time;Device;Provider;Level;Pct), so it
+stays small. A rise
 from low to high is logged as an automatic 'replaced' entry. Standard
 library only."""
 import csv
@@ -141,11 +142,12 @@ def record_levels(log_rows, history_rows, before, after, now=None):
     rows, new log entries)."""
     now = now or now_iso()
     new_hist, new_log = [], []
+    known = {h["Device"] for h in history_rows}   # a first reading is always kept
     for dev, b in after.items():
         if not b or b.get("pct") is None:
             continue
         old = (before.get(dev) or {}).get("pct")
-        if old == b["pct"]:
+        if old == b["pct"] and dev in known:
             continue
         h = {"Time": now, "Device": dev, "Provider": b.get("provider", ""),
              "Level": str(b.get("label") or b["pct"]), "Pct": str(b["pct"])}
