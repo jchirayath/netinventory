@@ -17,16 +17,53 @@ Color batteryColor(int? pct) => pct == null
 
 int? batteryPct(Map s) => s['pct'] is int ? s['pct'] as int : null;
 
-/// Devices whose name or battery type contains [q] (case-insensitive),
-/// keeping the agent's order (worst level first).
+/// Devices whose name, room, type, app, model or battery type contains [q]
+/// (case-insensitive), keeping the agent's order (worst level first).
 List<Map> filterBatteries(List devices, String q) {
   final needle = q.trim().toLowerCase();
   return devices
       .map((d) => d as Map)
       .where((d) =>
           needle.isEmpty ||
-          '${d['device']} ${d['battery'] ?? ''}'.toLowerCase().contains(needle))
+          [d['device'], d['name'], d['room'], d['type'], d['app_label'], d['model'],
+                  d['battery']]
+              .map((v) => '${v ?? ''}')
+              .join(' ')
+              .toLowerCase()
+              .contains(needle))
       .toList();
+}
+
+/// The name to show: the friendly home.csv name, else the monitor's.
+String batteryName(Map s) =>
+    '${s['name'] ?? ''}'.isNotEmpty ? '${s['name']}' : '${s['device']}';
+
+const batteryGroups = {'': 'None', 'room': 'Room', 'type': 'Type', 'app_label': 'App'};
+
+/// Rows for the list: with [groupBy] ('room' / 'type' / 'app_label'), a
+/// header map {'__grp': label, 'items': [...]} before each group's devices
+/// (groups sorted by name, '(no room)' and the like last; a collapsed group
+/// keeps only its header). Without, just [devices].
+List groupBatteries(List<Map> devices, String groupBy, {Set<String> collapsed = const {}}) {
+  if (groupBy.isEmpty) return devices;
+  final none = '(no ${batteryGroups[groupBy]!.toLowerCase()})';
+  final groups = <String, List<Map>>{};
+  for (final d in devices) {
+    final k = '${d[groupBy] ?? ''}';
+    groups.putIfAbsent(k.isEmpty ? none : k, () => []).add(d);
+  }
+  final keys = groups.keys.toList()
+    ..sort((a, b) => a == none
+        ? 1
+        : b == none
+            ? -1
+            : a.toLowerCase().compareTo(b.toLowerCase()));
+  return [
+    for (final k in keys) ...[
+      {'__grp': k, 'items': groups[k]!},
+      if (!collapsed.contains('$groupBy:$k')) ...groups[k]!,
+    ]
+  ];
 }
 
 /// "84%", "10% (low)", or "no reading".
@@ -69,6 +106,8 @@ class BatteriesTab extends StatefulWidget {
 
 class _BatteriesTabState extends State<BatteriesTab> {
   String _q = '';
+  String _groupBy = '';
+  final Set<String> _collapsed = {};
 
   List get _devices => (widget.data['devices'] as List?) ?? const [];
   List get _log => (widget.data['log'] as List?) ?? const [];
@@ -256,7 +295,7 @@ class _BatteriesTabState extends State<BatteriesTab> {
   }
 
   void _showDevice(Map s) {
-    final name = '${s['device']}';
+    final name = '${s['device']}'; // the monitor's name: what log entries use
     final entries = _log.cast<Map>().where((e) => e['Device'] == name).toList();
     final cs = Theme.of(context).colorScheme;
     showModalBottomSheet(
@@ -269,10 +308,18 @@ class _BatteriesTabState extends State<BatteriesTab> {
           controller: scroll,
           padding: const EdgeInsets.fromLTRB(18, 14, 18, 24),
           children: [
-            Text(name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+            Text(batteryName(s),
+                style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+            if ('${s['model'] ?? ''}'.isNotEmpty)
+              Text('${s['model']}',
+                  style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: .55))),
             const SizedBox(height: 10),
             _levelBar(s, width: 220),
             const SizedBox(height: 10),
+            _kv('Room', '${s['room'] ?? ''}'),
+            _kv('Type', '${s['type'] ?? ''}'),
+            _kv('App', '${s['app_label'] ?? ''}'),
+            if (batteryName(s) != name) _kv('Monitor', name),
             _kv('Battery', '${s['battery'] ?? ''}'),
             _kv('Last changed', '${s['last_changed'] ?? ''}'),
             _kv('Days since', s['days_since'] == null ? '' : '${s['days_since']}'),
@@ -371,9 +418,37 @@ class _BatteriesTabState extends State<BatteriesTab> {
     ]);
   }
 
+  Widget _groupHeader(String label, List<Map> items) {
+    final cs = Theme.of(context).colorScheme;
+    final id = '$_groupBy:$label';
+    final low = lowBatteryCount(items);
+    return InkWell(
+      onTap: () => setState(() => _collapsed.contains(id) ? _collapsed.remove(id) : _collapsed.add(id)),
+      child: Container(
+        color: Brand.surfaceAlt,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        child: Row(children: [
+          Icon(_collapsed.contains(id) ? Icons.chevron_right_rounded : Icons.expand_more_rounded,
+              size: 18),
+          const SizedBox(width: 4),
+          Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+          const SizedBox(width: 10),
+          Text('${items.length} device${items.length == 1 ? '' : 's'}',
+              style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: .55))),
+          if (low > 0) ...[
+            const SizedBox(width: 8),
+            Text('$low low',
+                style: TextStyle(
+                    fontSize: 12, color: Brand.weak, fontWeight: FontWeight.w600)),
+          ],
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final rows = filterBatteries(_devices, _q);
+    final rows = groupBatteries(filterBatteries(_devices, _q), _groupBy, collapsed: _collapsed);
     final today = isoDate(DateTime.now());
     final cs = Theme.of(context).colorScheme;
     return Column(children: [
@@ -385,14 +460,32 @@ class _BatteriesTabState extends State<BatteriesTab> {
               decoration: const InputDecoration(
                   isDense: true,
                   prefixIcon: Icon(Icons.search_rounded, size: 18),
-                  hintText: 'Search batteries'),
+                  hintText: 'Search name, room, app'),
               onChanged: (v) => setState(() => _q = v),
             ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
+          PopupMenuButton<String>(
+            tooltip: 'Group by',
+            initialValue: _groupBy,
+            onSelected: (v) => setState(() => _groupBy = v),
+            itemBuilder: (c) => [
+              for (final e in batteryGroups.entries)
+                PopupMenuItem(value: e.key, child: Text('Group: ${e.value}')),
+            ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.segment_rounded, size: 18),
+                const SizedBox(width: 4),
+                Text(batteryGroups[_groupBy]!, style: const TextStyle(fontSize: 12.5)),
+              ]),
+            ),
+          ),
+          const SizedBox(width: 6),
           FilledButton.icon(
             icon: const Icon(Icons.battery_charging_full_rounded, size: 18),
-            label: const Text('Log change'),
+            label: const Text('Log'),
             onPressed: () => _openForm(),
           ),
         ]),
@@ -418,10 +511,18 @@ class _BatteriesTabState extends State<BatteriesTab> {
                   itemCount: rows.length,
                   separatorBuilder: (c, i) => const Divider(),
                   itemBuilder: (c, i) {
-                    final s = rows[i];
+                    final row = rows[i] as Map;
+                    if (row['__grp'] != null) {
+                      return _groupHeader('${row['__grp']}', (row['items'] as List).cast<Map>());
+                    }
+                    final s = row;
                     final due = batteryDue(s, today);
                     final last = '${s['last_changed'] ?? ''}';
+                    // Where and what first, so two 'Garage door' locks read differently.
                     final sub = [
+                      if ('${s['room'] ?? ''}'.isNotEmpty && _groupBy != 'room') '${s['room']}',
+                      if ('${s['app_label'] ?? ''}'.isNotEmpty && _groupBy != 'app_label')
+                        '${s['app_label']}',
                       if ('${s['battery'] ?? ''}'.isNotEmpty) '${s['battery']}',
                       last.isEmpty ? 'no change logged' : 'changed $last',
                       if ('${s['next_due'] ?? ''}'.isNotEmpty)
@@ -443,7 +544,7 @@ class _BatteriesTabState extends State<BatteriesTab> {
                               mainAxisAlignment: MainAxisAlignment.center,
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('${s['device']}',
+                                Text(batteryName(s),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(

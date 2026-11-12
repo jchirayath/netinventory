@@ -105,6 +105,93 @@ class TestSummary(unittest.TestCase):
         self.assertIsNone(out[0]["avg_days"])
 
 
+class TestDetails(unittest.TestCase):
+    """battery_details: telling two 'Garage door' / 'Front Door' devices apart."""
+    HOME = [
+        {"Device": "", "Room": "Garage", "Type": "lock", "Name": "Garage Door Lock",
+         "Description": "Smart Life DY QSLOCK id eb0f664qmit1aowt", "Native": "smartlife",
+         "Expose": "", "Via": "", "AppNames": "tuya=Garage door"},
+        {"Device": "U-Bolt WiFi Smart Lock", "Room": "Garage", "Type": "lock",
+         "Name": "Garage Lock", "Description": "Espressif U-Bolt WiFi Smart Lock", "Native": "",
+         "Expose": "", "Via": "", "AppNames": ""},
+        {"Device": "", "Room": "Entry", "Type": "sensor", "Name": "Front Door Contact",
+         "Description": "SmartThings zigbee 'Front Door' eui 000D6F000E49AC0F",
+         "Native": "smartthings", "Expose": "", "Via": "", "AppNames": "smartthings=Front Door"},
+        {"Device": "Front Door Camera", "Room": "Entry", "Type": "camera",
+         "Name": "Front Door Camera", "Description": "Blink catalina 'Front Door'", "Native": "blink",
+         "Expose": "", "Via": "", "AppNames": ""},
+    ]
+    MASTER = {
+        "AA:BB:CC:00:00:01": {"Device": "Front Door Camera", "MAC": "AA:BB:CC:00:00:01", "IP": "",
+                              "Vendor": "Amazon", "Hostname": "Front Door", "Status": "offline",
+                              "AppNames": "blink=Front Door"},
+        "AA:BB:CC:00:00:02": {"Device": "U-Bolt WiFi Smart Lock", "MAC": "AA:BB:CC:00:00:02",
+                              "IP": "", "Vendor": "Espressif", "Hostname": "U-Bolt-WiFi",
+                              "Status": "online", "AppNames": ""},
+    }
+
+    def details(self, device, match="", provider=""):
+        import home
+        mon = {"Device": device, "Enabled": "yes", "OfflineAfter": "", "BatteryBelow": "20",
+               "Check": "cloud" if match else "", "Match": match, "Notes": ""}
+        level = {"pct": 50, "provider": provider} if provider else None
+        return netinv.battery_details(device, mon, level, self.MASTER, self.HOME,
+                                      {"Kitchen Sensor": "Kitchen"},
+                                      [{"Room": "Kitchen", "Floor": "", "Aliases": ""}],
+                                      home.default_apps())
+
+    def test_tuya_lock_found_by_cloud_name(self):
+        d = self.details("Garage door", "tuya=Garage door", "tuya")
+        self.assertEqual((d["name"], d["room"], d["type"], d["app"], d["model"]),
+                         ("Garage Door Lock", "Garage", "lock", "smartlife", "Smart Life DY QSLOCK"))
+
+    def test_ubolt_lock_by_device_name_and_app_guessed(self):
+        d = self.details("U-Bolt WiFi Smart Lock")
+        self.assertEqual((d["name"], d["type"], d["app"]), ("Garage Lock", "lock", "utec"))
+        self.assertEqual(d["app_label"], "U-tec (U-Bolt)")
+
+    def test_ha_front_door_is_the_smartthings_contact_not_the_camera(self):
+        # The camera's hostname is also 'Front Door'; the HA reading is the contact.
+        d = self.details("Front Door", "ha=Front Door", "ha")
+        self.assertEqual((d["name"], d["type"], d["app"]),
+                         ("Front Door Contact", "sensor", "smartthings"))
+        self.assertNotIn("eui", d["model"])
+
+    def test_unknown_device_falls_back_to_app_room_and_guessed_type(self):
+        d = self.details("Kitchen Sensor", "tuya=Kitchen Sensor", "tuya")
+        self.assertEqual((d["name"], d["room"], d["app"]), ("Kitchen Sensor", "Kitchen",
+                                                            "smartlife"))
+        self.assertEqual(d["type"], "sensor")
+
+
+class TestApiBatteries(unittest.TestCase):
+    def test_locks_listed_without_a_reading_and_rows_carry_details(self):
+        import home
+        import monitor
+        with tempfile.TemporaryDirectory() as d:
+            paths = {k: os.path.join(d, v) for k, v in {
+                "BATTERY_LOG": "battery_log.csv", "BATTERY_HISTORY": "battery_history.csv",
+                "MONITORS_CSV": "monitors.csv", "MONITOR_STATE": "monitor_state.json",
+                "HOME_CSV": "home.csv", "ROOMS_CSV": "rooms.csv", "APP_ROOMS_CSV": "app_rooms.csv",
+                "APPS_CSV": "apps.csv", "MASTER": "devices.csv"}.items()}
+            m = lambda dev, **kw: {**{k: "" for k in monitor.FIELDS}, "Device": dev,  # noqa: E731
+                                   "Enabled": "yes", **kw}
+            monitor.save(paths["MONITORS_CSV"], [m("U-Bolt WiFi Smart Lock", OfflineAfter="2h"),
+                                                 m("QNAP NAS", OfflineAfter="30m"),
+                                                 m("Garage door", BatteryBelow="20",
+                                                   Match="tuya=Garage door")])
+            home.write_csv(paths["HOME_CSV"], home.HOME_FIELDS, TestDetails.HOME)
+            with mock.patch.multiple(netinv, **paths):
+                out = netinv.api_batteries()["devices"]
+        got = {s["device"]: s for s in out}
+        self.assertEqual(set(got), {"U-Bolt WiFi Smart Lock", "Garage door"})  # not the NAS
+        self.assertIsNone(got["U-Bolt WiFi Smart Lock"]["pct"])
+        for s in out:
+            for k in ("name", "room", "type", "app", "app_label", "model"):
+                self.assertIn(k, s)
+        self.assertEqual(got["Garage door"]["name"], "Garage Door Lock")
+
+
 class TestCredentialFile(unittest.TestCase):
     def test_file_store_without_keychain(self):
         with tempfile.TemporaryDirectory() as d:

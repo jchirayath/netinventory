@@ -2112,17 +2112,81 @@ def battery_levels():
             if k != "_meta" and isinstance(v, dict) and v.get("battery")}
 
 
+# Battery reading providers as home.csv app keys (AppNames / Native).
+READING_APP = {"tuya": "smartlife", "govee-app": "govee", "ble": "govee",
+               "blink": "blink", "flume": "flume", "ha": "ha"}
+
+
+def battery_details(device, mon, level, master, home_rows, device_rooms, rooms, apps):
+    """What a battery device is, so two 'Garage door' entries can be told
+    apart: {name, room, type, app, app_label, model} from its home.csv row
+    (found by name, then by the cloud name it is matched by, then by its
+    network row), else the vendor app's room and a type guessed from its
+    name. mon: its monitors.csv row or None; level: its battery reading."""
+    import home
+    import monitor
+    norm = monitor.norm
+    provider = (level or {}).get("provider", "")
+    via, _, cloud_name = ((mon or {}).get("Match") or "").partition("=")
+    cloud_name = cloud_name.strip() if cloud_name.strip() not in ("", "*") else device
+    provider = provider or via.strip()
+
+    def names(h):
+        return {(home.app_key(p), norm(n)) for p, n in home.parse_app_names(h["AppNames"]).items()}
+
+    h = next((h for h in home_rows if h["Device"] and norm(h["Device"]) == norm(device)), None)
+    if h is None:                         # exact provider and name: tuya=Garage door
+        want = (home.app_key(READING_APP.get(provider, provider)), norm(cloud_name))
+        h = next((h for h in home_rows if want in names(h)), None)
+    if h is None:                         # same name under another app (HA relays SmartThings)
+        h = next((h for h in home_rows if any(n == norm(cloud_name) for _, n in names(h))), None)
+    net = monitor.rows_for(mon, master) if mon else []
+    if h is None and net:                 # its network row's name
+        devs = {norm(r["Device"]) for r in net if r["Device"]}
+        h = next((h for h in home_rows if h["Device"] and norm(h["Device"]) in devs), None)
+    h = h or {}
+    known = lambda v: v if v and v != home.TODO else ""  # noqa: E731
+    room = known(h.get("Room")) or known(home.app_room(cloud_name, device_rooms, rooms))
+    typ = known(h.get("Type")) or known(home.guess_type({"Device": device})[0])
+    app = home.app_key(h.get("Native", "")) if h.get("Native") else \
+        home.app_key(READING_APP.get(provider, provider))
+    if not app:                           # guessed from name, hostname, vendor ('U-Bolt' -> U-tec)
+        app = home.guess_app(net[0] if net else {"Device": device}, apps)
+    if app == home.NO_APP:
+        app = ""
+    label = next((a["Label"] for a in apps if a["Key"] == app), app)
+    # 'Smart Life DY QSLOCK id eb0f...' -> 'Smart Life DY QSLOCK'
+    model = re.sub(r"\s+(id|serial|eui)\s+\S+.*$", "", h.get("Description", "")) or \
+        (level or {}).get("model", "")
+    return {"name": h.get("Name") or device, "room": room, "type": typ,
+            "app": app, "app_label": label, "model": model}
+
+
 def api_batteries():
     """Every battery device with its level, last change and log, for
-    GET /api/batteries and the Batteries page."""
+    GET /api/batteries and the Batteries page. Each device also carries
+    what it is (name, room, type, app, model) for grouping."""
     import battery
+    import home
     import monitor
     levels = battery_levels()
-    devices = [m["Device"] for m in monitor.load(MONITORS_CSV)
-               if m["BatteryBelow"] or m["Device"] in levels]
+    mons = {m["Device"]: m for m in monitor.load(MONITORS_CSV)}
     log = battery.load_log(BATTERY_LOG)
-    return {"devices": battery.summarize(devices, log, battery.load_history(BATTERY_HISTORY),
-                                         levels),
+    master, home_rows = load_master(), home.load_home(HOME_CSV)
+    device_rooms, rooms = home.load_device_rooms(APP_ROOMS_CSV), home.load_rooms(ROOMS_CSV)
+    apps = home.load_apps(APPS_CSV)
+    details = {d: battery_details(d, m, levels.get(d), master, home_rows, device_rooms, rooms, apps)
+               for d, m in mons.items()}
+    # Battery devices: a threshold or a reading, or a lock (locks run on batteries
+    # even when nothing reports the level, like the U-Bolt; log its changes by hand).
+    devices = [d for d, m in mons.items()
+               if m["BatteryBelow"] or d in levels or details[d]["type"] == "lock"]
+    summaries = battery.summarize(devices, log, battery.load_history(BATTERY_HISTORY), levels)
+    for s in summaries:
+        s.update(details.get(s["device"]) or battery_details(
+            s["device"], None, levels.get(s["device"]), master, home_rows, device_rooms, rooms,
+            apps))
+    return {"devices": summaries,
             "log": sorted(log, key=lambda r: (r["Date"], r["Updated"]), reverse=True),
             "events": list(battery.EVENTS)}
 
@@ -3947,11 +4011,16 @@ td.notes{white-space:normal;min-width:16rem}
 #msg{margin:.4rem 0;color:#137333}
 .ro{color:#777;font-size:12px}
 svg.spark{vertical-align:middle}
+.sub{color:#777;font-size:11.5px;margin-top:1px}
+tr.grp td{background:#e2eaf5;font-weight:600;cursor:pointer}
+tr.grp .roll{font-weight:400;color:#3a516b;margin-left:10px}
 @media (max-width:600px){body{margin:.6rem}th,td{padding:4px 5px}}
 </style>
 <h1>Batteries</h1><div id=sum>loading…</div>
 <div class=bar>
- <input id=q placeholder="search devices and notes…" style="width:16rem">
+ <input id=q placeholder="search devices, rooms, notes…" style="width:16rem">
+ <label>Group <select id=gb><option value="">(none)</option><option value=room>Room</option>
+  <option value=type>Type</option><option value=app_label>App</option></select></label>
  <span class=spacer></span>
  <button class="btn pri" id=newb>+ Log battery change</button>
  <a class=btn href="./">Devices</a>
@@ -3974,8 +4043,9 @@ svg.spark{vertical-align:middle}
  <input type=hidden id=f_id>
 </form>
 <datalist id=devs></datalist>
-<div class=wrap><table><thead><tr><th>Device</th><th>Level</th><th>Trend</th><th>Battery</th>
- <th>Last changed</th><th>Days</th><th>Every</th><th>Next due</th><th></th></tr></thead><tbody id=t></tbody></table></div>
+<div class=wrap><table><thead><tr><th>Device</th><th>Room</th><th>Type</th><th>App</th><th>Level</th>
+ <th>Trend</th><th>Battery</th><th>Last changed</th><th>Days</th><th>Every</th><th>Next due</th><th></th></tr></thead>
+ <tbody id=t></tbody></table></div>
 <h2>Change log</h2>
 <div class=wrap><table><thead><tr><th>Date</th><th>Device</th><th>Event</th><th>Battery</th><th>Level</th>
  <th>Notes</th><th>Source</th><th></th></tr></thead><tbody id=lg></tbody></table></div>
@@ -3997,17 +4067,39 @@ function spark(tr){if(!tr||tr.length<2)return '';const w=80,h=18;
 function due(s){if(!s.next_due)return '-';const late=s.next_due<=today();
  return `<span class="${late?'due':''}">${esc(s.next_due)}</span>`}
 function pass(txt){const q=document.getElementById('q').value.toLowerCase();return !q||txt.toLowerCase().includes(q)}
+const GLBL={room:'(no room)',type:'(no type)',app_label:'(no app)'};
+const collapsed={};
+function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+try{gb.value=localStorage.getItem('netinvBattGroup')||''}catch(e){}
+// friendly name, then what it is: 'Smart Life DY QSLOCK · Garage door' (the monitor's own name)
+function devCell(s){const sub=[s.model,s.name!=s.device?s.device:''].filter(Boolean).join(' · ');
+ return `<b>${esc(s.name||s.device)}</b>`+(sub?`<div class=sub>${esc(sub)}</div>`:'')}
+function rowHtml(s){
+ return `<tr><td>${devCell(s)}</td><td>${esc(s.room)||'<span class=ro>-</span>'}</td>`+
+  `<td>${esc(s.type)||'<span class=ro>-</span>'}</td><td>${esc(s.app_label)||'<span class=ro>-</span>'}</td>`+
+  `<td>${lvl(s)}</td><td>${spark(s.trend)}</td>`+
+  `<td>${esc(s.battery)||'<span class=ro>-</span>'}</td><td>${esc(s.last_changed)||'-'}</td>`+
+  `<td>${s.days_since??'-'}</td><td>${s.avg_days?s.avg_days+'d':'-'}</td><td>${due(s)}</td>`+
+  `<td>${WRITABLE?`<button class=btn data-log="${esc(s.device)}">Log change</button>`:''}</td></tr>`}
 function render(){
  const lowN=B.devices.filter(s=>s.pct!=null&&s.pct<=20).length;
  sum.innerHTML=`<b>${B.devices.length}</b> battery devices · <span class=${lowN?'low':''}>${lowN} at or below 20%</span> · ${B.log.length} logged changes`;
- const rows=B.devices.filter(s=>pass(s.device+' '+s.battery));
- t.innerHTML=rows.map(s=>`<tr><td>${esc(s.device)}</td><td>${lvl(s)}</td><td>${spark(s.trend)}</td>`+
-  `<td>${esc(s.battery)||'<span class=ro>-</span>'}</td><td>${esc(s.last_changed)||'-'}</td>`+
-  `<td>${s.days_since??'-'}</td><td>${s.avg_days?s.avg_days+'d':'-'}</td><td>${due(s)}</td>`+
-  `<td>${WRITABLE?`<button class=btn data-log="${esc(s.device)}">Log change</button>`:''}</td></tr>`).join('')
-  ||'<tr><td colspan=9 class=ro style=padding:12px>No battery devices yet: add monitors with a battery threshold (netinv monitor suggest).</td></tr>';
- const lrows=B.log.filter(e=>pass(e.Device+' '+e.Notes+' '+e.Battery));
- lg.innerHTML=lrows.map(e=>`<tr class="${e.Source=='auto'?'auto':''}"><td>${esc(e.Date)}</td><td>${esc(e.Device)}</td>`+
+ const rows=B.devices.filter(s=>pass([s.device,s.name,s.room,s.type,s.app_label,s.model,s.battery].join(' ')));
+ const g=gb.value;let html='';
+ if(!g)html=rows.map(rowHtml).join('');
+ else{const groups={};rows.forEach(s=>{const k=s[g]||GLBL[g];(groups[k]=groups[k]||[]).push(s)});
+  const keys=Object.keys(groups).sort((a,b)=>(a.startsWith('(')-b.startsWith('('))||a.localeCompare(b));
+  for(const k of keys){const items=groups[k],low=items.filter(s=>s.pct!=null&&s.pct<=20).length,id=g+':'+k;
+   html+=`<tr class=grp data-grp="${esc(id)}"><td colspan=12>${collapsed[id]?'▸':'▾'} ${esc(k)}`+
+    `<span class=roll>${items.length} device${items.length!=1?'s':''}${low?` · <span class=low>${low} low</span>`:''}</span></td></tr>`;
+   if(!collapsed[id])html+=items.map(rowHtml).join('')}}
+ t.innerHTML=html||'<tr><td colspan=12 class=ro style=padding:12px>'+(B.devices.length?'No batteries match.':
+  'No battery devices yet: add monitors with a battery threshold (netinv monitor suggest).')+'</td></tr>';
+ const byId=Object.fromEntries(B.devices.map(s=>[s.device,s]));
+ const lname=e=>{const s=byId[e.Device];return s&&s.name&&s.name!=e.Device?
+  `${esc(s.name)}<div class=sub>${esc(e.Device)}</div>`:esc(e.Device)};
+ const lrows=B.log.filter(e=>pass([e.Device,(byId[e.Device]||{}).name,e.Notes,e.Battery].join(' ')));
+ lg.innerHTML=lrows.map(e=>`<tr class="${e.Source=='auto'?'auto':''}"><td>${esc(e.Date)}</td><td>${lname(e)}</td>`+
   `<td><span class=pill>${esc(e.Event)}</span></td><td>${esc(e.Battery)}</td><td>${e.Level?esc(e.Level)+'%':''}</td>`+
   `<td class=notes>${esc(e.Notes)}</td><td>${esc(e.Source)}</td><td>`+
   (WRITABLE?`<span class=edit title=edit data-edit="${esc(e.Id)}">&#9998;</span><span class=edit title=delete data-del="${esc(e.Id)}">&#10005;</span>`:'')+
@@ -4033,12 +4125,15 @@ form.addEventListener('submit',async ev=>{ev.preventDefault();
 f_cancel.onclick=()=>{form.style.display='none'};
 newb.onclick=()=>openForm('');
 document.addEventListener('click',async ev=>{const el=ev.target;
+ const grp=el.closest&&el.closest('tr.grp');
+ if(grp){collapsed[grp.dataset.grp]=!collapsed[grp.dataset.grp];render();return}
  if(el.dataset.log!=null)openForm(el.dataset.log);
  else if(el.dataset.edit)openForm('',B.log.find(e=>e.Id==el.dataset.edit));
  else if(el.dataset.del){const e=B.log.find(x=>x.Id==el.dataset.del);
   if(!e||!confirm(`Delete the ${e.Event} entry for ${e.Device} on ${e.Date}?`))return;
   try{await send('/api/battery-delete',{id:e.Id});say('Deleted.');await load()}catch(x){say('Not deleted: '+x.message,true)}}});
 q.addEventListener('input',render);
+gb.addEventListener('change',()=>{store('netinvBattGroup',gb.value);render()});
 async function load(){B=await (await fetch('api/batteries')).json();if(form.style.display!='block')render()}
 load();setInterval(load,60000)</script>"""
 
