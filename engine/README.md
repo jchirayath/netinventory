@@ -436,6 +436,21 @@ per forwarded client. Add the names the proxy answers to (`netinv.local`) to
 `netinventory.service` as a system service; homehub updates its copy with
 its own `netinventory/update.sh`.
 
+## A read-only copy on the web (net.aspl.net)
+
+```bash
+./deploy-betty.sh --check      # every page and data file redirects to sign-in?
+./deploy-betty.sh --dry-run    # what would change
+./deploy-betty.sh              # export + publish a fresh snapshot
+```
+
+`netinv.py export-site DIR` writes the three pages and every GET API answer
+as static files. `deploy-betty.sh` copies that snapshot to betty's Caddy,
+behind the shared Entra ID sign-in. It needs `az login`, and it refuses to
+publish, or takes the data back down, if any page or data file answers
+without sign-in. The copy is read-only: edits are made at home. Run it from
+the checkout that has your data, or set `NETINV_HOME`.
+
 ## Identifying unknown devices (fingerprinting)
 
 Two layers, both built in:

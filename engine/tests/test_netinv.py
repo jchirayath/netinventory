@@ -1093,5 +1093,30 @@ class TestPackaging(unittest.TestCase):
         self.assertEqual(present - listed, set(), "add these to py-modules in pyproject.toml")
 
 
+class TestExportSite(unittest.TestCase):
+    def test_writes_read_only_pages_and_every_api_answer(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(netinv, "api_payload", side_effect=lambda p: {"path": p}):
+            files = netinv.export_site(d)
+            for rel in ("index.html", "rooms/index.html", "batteries/index.html",
+                        "api/board", "api/batteries", "api/devices"):
+                self.assertIn(rel, files)
+            with open(os.path.join(d, "api", "batteries")) as f:
+                self.assertEqual(json.load(f), {"path": "/api/batteries"})
+            for page in ("index.html", "rooms/index.html", "batteries/index.html"):
+                with open(os.path.join(d, page)) as f:
+                    html = f.read()
+                self.assertIn("const WRITABLE=false;", html)
+                self.assertNotIn("__WRITABLE__", html)
+                self.assertNotIn("__AUTHJS__", html)
+                # no "start with --allow-write" hint left to mislead
+                self.assertNotIn("--allow-write", html)
+                # pages in a subfolder fetch api/... from the site root
+                self.assertEqual('<base href="../">' in html, "/" in page)
+            with open(os.path.join(d, "batteries", "index.html")) as f:
+                self.assertIn("Read-only snapshot taken", f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

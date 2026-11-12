@@ -4250,6 +4250,74 @@ async function load(){B=await (await fetch('api/batteries')).json();if(form.styl
 load();setInterval(load,60000)</script>"""
 
 
+API_PATHS = ("/api/devices", "/api/summary", "/api/alerts", "/api/events",
+             "/api/monitors", "/api/batteries", "/api/board")
+
+
+def api_payload(path):
+    """What GET <path> answers with, or None for an unknown path."""
+    master = load_master()
+    enrich_vendors(master)
+    if path == "/api/devices":
+        return api_devices(master)
+    if path == "/api/summary":
+        return api_summary(master)
+    if path == "/api/alerts":
+        return evaluate_alerts(master)
+    if path == "/api/events":
+        return device_history("")  # all
+    if path == "/api/monitors":
+        return api_monitors()
+    if path == "/api/batteries":
+        return api_batteries()
+    if path == "/api/board":
+        import home
+        return home.board(list(master.values()), home.load_rooms(ROOMS_CSV),
+                          home.load_home(HOME_CSV), home.load_types(TYPES_CSV),
+                          home.load_apps(APPS_CSV))
+    return None
+
+
+# The pages' read-only hints say how to make them writable; a static copy
+# never can be, so they say where the snapshot came from instead.
+_RO_HINTS = ("Read-only: start with\n <code>netinv serve --allow-write</code> to move devices.",
+             "Read-only: start the server with --allow-write to log changes here, "
+             "or use: netinv battery log \"<device>\"")
+
+
+def export_site(out):
+    """Write the three pages and every GET API answer as plain files under
+    <out>, so a static web server can show a read-only copy. /rooms becomes
+    rooms/index.html with <base href="../">, so its relative links and fetches
+    (api/board, batteries) resolve from the site root as they do under serve;
+    /api/board becomes a file named api/board."""
+    import json as _json
+    note = f"Read-only snapshot taken {now_stamp()}; changes are made at home."
+    pages = {"index.html": _DASHBOARD, "rooms/index.html": _ROOMS_PAGE,
+             "batteries/index.html": _BATTERY_PAGE}
+    files = {}
+    for rel, html in pages.items():
+        html = html.replace("__WRITABLE__", "false").replace("__AUTHJS__", _AUTH_JS)
+        for hint in _RO_HINTS:
+            html = html.replace(hint, note)
+        if "/" in rel:
+            html = html.replace("<meta charset=utf-8>", '<meta charset=utf-8><base href="../">', 1)
+        files[rel] = html.encode()
+    for p in API_PATHS:
+        files[p.lstrip("/")] = _json.dumps(api_payload(p)).encode()
+    for rel, body in files.items():
+        dest = os.path.join(out, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(body)
+    return sorted(files)
+
+
+def cmd_export_site(args):
+    for rel in export_site(args.out):
+        print(f"  wrote {os.path.join(args.out, rel)}")
+
+
 def cmd_serve(args):
     srv = make_server(args)
     try:
@@ -4263,27 +4331,7 @@ def make_server(args):
     import http.server
     import json as _json
 
-    def payload(path):
-        master = load_master()
-        enrich_vendors(master)
-        if path == "/api/devices":
-            return api_devices(master)
-        if path == "/api/summary":
-            return api_summary(master)
-        if path == "/api/alerts":
-            return evaluate_alerts(master)
-        if path == "/api/events":
-            return device_history("")  # all
-        if path == "/api/monitors":
-            return api_monitors()
-        if path == "/api/batteries":
-            return api_batteries()
-        if path == "/api/board":
-            import home
-            return home.board(list(master.values()), home.load_rooms(ROOMS_CSV),
-                              home.load_home(HOME_CSV), home.load_types(TYPES_CSV),
-                              home.load_apps(APPS_CSV))
-        return None
+    payload = api_payload
 
     allow_write = getattr(args, "allow_write", False)
     if getattr(args, "lan", False):
@@ -4857,6 +4905,11 @@ def main():
                     help="serve to the whole network (same as --host 0.0.0.0); "
                          "with --allow-write, edits need the passcode (set-passcode)")
     sv.set_defaults(func=cmd_serve)
+
+    ex = sub.add_parser("export-site", help="write a read-only static copy of the "
+                        "dashboard, room board and batteries (for ./deploy-betty.sh)")
+    ex.add_argument("out", help="directory to write into")
+    ex.set_defaults(func=cmd_export_site)
     spc = sub.add_parser("set-passcode", help="passcode other devices need to edit via serve")
     spc.set_defaults(func=cmd_set_passcode)
 
