@@ -83,4 +83,14 @@ class Api {
       _post('/api/battery-edit', {'id': id, ...entry});
   Future<WriteResult> deleteBattery(String id) =>
       _post('/api/battery-delete', {'id': id});
+
+  /// Name, room and type of a battery device, and whether its battery is
+  /// tracked (saved to the agent's home.csv / monitors.csv).
+  Future<WriteResult> setBatteryDevice(String device,
+          {required String name,
+          required String room,
+          required String type,
+          required bool tracked}) =>
+      _post('/api/battery-device',
+          {'device': device, 'name': name, 'room': room, 'type': type, 'tracked': tracked});
 }

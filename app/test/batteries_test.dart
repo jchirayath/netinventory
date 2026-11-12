@@ -91,6 +91,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Change log'), findsOneWidget);
     expect(find.textContaining('Energizer'), findsOneWidget);
+    await tester.tap(find.text('Edit details'));
+    await tester.pumpAndSettle();
+    expect(find.text('Track its battery'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
   });
 
   test('grouping by room: headers in order, unknown last, collapse keeps the header', () {

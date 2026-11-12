@@ -297,7 +297,16 @@ matched by (`tuya=Garage door`), then by its network row; without a
 `home.csv` row, the room comes from the vendor app and the type is guessed
 from the name. The page and the app can group the list by room, type or
 app. Monitored locks are listed even with no battery reading (a U-Bolt
-reports none), so their changes can be logged by hand. The dashboard's **Batteries** page (`/batteries`) and the app's
+reports none), so their changes can be logged by hand.
+
+Devices nothing describes (the Flume sensor, a Govee Bluetooth thermometer
+known only as `H5101_4670`) get a name, room and type from the pencil next to
+their name on the page, or **Edit details** in the app (`POST
+/api/battery-device`). That writes their `home.csv` row. Giving one the name
+of a device `home.csv` already has links it to that row instead of adding a
+second one, which is how you tell netinventory which Bluetooth sensor is the
+Govee app's "Display-Humidor". Unticking **Track its battery** removes a
+plugged-in device (a Govee hub) from the list. The dashboard's **Batteries** page (`/batteries`) and the app's
 **Batteries** tab show the same data, with a form to log changes;
 `GET /api/batteries` and `GET /api/battery?device=` serve it.
 
