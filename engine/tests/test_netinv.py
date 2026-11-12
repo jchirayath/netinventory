@@ -929,6 +929,8 @@ class TestConnectors(unittest.TestCase):
             return connectors.blink_locate({}, sweep, wait=0.05, settle=0, poll=0,
                                            log=lambda *a: None, vendor=vendor), Blink.cameras
 
+    @unittest.skipUnless(__import__("importlib.util").util.find_spec("blinkpy"),
+                         "blinkpy not installed (the Pi's engine has no cloud SDKs)")
     def test_blink_mac_ip_skips_minis_and_doorbells(self):
         # their ids 404 at the camera config endpoint (blinkpy logs that as
         # "Connection error ... possibly down or throttled")
