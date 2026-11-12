@@ -38,7 +38,9 @@ Repository = "https://github.com/jchirayath/netinventory"
 netinv = "netinv:main"
 
 [tool.setuptools]
-py-modules = ["netinv", "connectors", "home"]
+# Every engine module: the installed `netinv` script can import only these
+# (tests/test_netinv.py checks the list against engine/*.py).
+py-modules = ["netinv", "connectors", "home", "monitor", "battery", "sync"]
 
 # Ship the bundled OUI database alongside the modules.
 [tool.setuptools.package-data]
