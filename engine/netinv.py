@@ -4591,10 +4591,13 @@ def make_server(args):
                 n = -1
             agent_call = self.path.split("?")[0] == "/api/agent/sync"
             # Over 1 MB only from the agent, and only once its token checks
-            # out: nobody else can make this server read a 64 MB body.
-            big_ok = (agent_call and agent_secret and
-                      hmac.compare_digest(self._bearer().encode(), agent_secret.encode()))
-            if not 0 <= n <= (64_000_000 if big_ok else 1_000_000):
+            # out (with the same lockout as _agent_ok, so this is no way
+            # around it): nobody else can make this server read a 64 MB body.
+            if agent_call and n > 1_000_000:
+                self.close_connection = True
+                if not self._agent_ok():
+                    return
+            if not 0 <= n <= (64_000_000 if agent_call and agent_secret else 1_000_000):
                 self.close_connection = True
                 _send(self, 413, b'{"error":"body too large"}', "application/json")
                 return

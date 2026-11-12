@@ -658,11 +658,14 @@ class TestAgent(_ServerCase):
     def test_big_body_needs_the_token_first(self):
         self.start_agent_server()
         big = b"x" * 1_500_000
-        try:   # refused unread: 413, or the connection closes mid-upload
-            self.assertEqual(self.raw("/api/agent/sync", big, token="wrong"), 413)
-        except urllib.error.URLError as e:
-            self.assertIsInstance(e.reason, (BrokenPipeError, ConnectionResetError))
         self.assertEqual(self.raw("/api/agent/sync", big), 400)   # read, then bad JSON
+        with mock.patch("builtins.print"):
+            for _ in range(11):   # refused unread (401, or closed mid-upload), and counted
+                try:
+                    self.assertIn(self.raw("/api/agent/sync", big, token="wrong"), (401, 429))
+                except urllib.error.URLError as e:
+                    self.assertIsInstance(e.reason, (BrokenPipeError, ConnectionResetError))
+            self.assertEqual(self.raw("/api/agent/stream", token="wrong"), 429)
 
     def test_agent_url_https_only_and_no_redirects(self):
         import sync
