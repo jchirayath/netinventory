@@ -191,6 +191,35 @@ class TestServer(unittest.TestCase):
             self.assertEqual(self.post("/api/battery-log", {"device": "x"}, "wrong")[0], 401)
         self.assertEqual(self.post("/api/battery-log", {"device": "x"}, "hunter22")[0], 200)
 
+    def test_wrong_passcodes_lock_out(self):
+        self.start(passcode="hunter22", local=False)
+        with mock.patch("time.sleep"):
+            for _ in range(netinv.PasscodeGuard.MAX):
+                self.post("/api/battery-log", {"device": "x"}, "guess")
+            # locked now, even with the right passcode
+            self.assertEqual(self.post("/api/battery-log", {"device": "x"}, "hunter22")[0], 429)
+
+    def test_dns_rebinding_host_refused(self):
+        self.start(passcode="hunter22", local=True)
+        port = self.srv.server_address[1]
+        for path, data in (("/api/batteries", None), ("/api/battery-log", b'{"device":"x"}')):
+            req = urllib.request.Request(self.base + path, data=data, headers={
+                "Host": f"evil.example:{port}", "Origin": f"http://evil.example:{port}",
+                "Content-Type": "application/json"})
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(cm.exception.code, 421, path)
+            cm.exception.close()
+
+    def test_host_check(self):
+        h = netinv.HostCheck("0.0.0.0", 8787)
+        self.assertTrue(h.ok("127.0.0.1:8787"))
+        self.assertTrue(h.ok("localhost"))
+        self.assertTrue(h.ok("[::1]:8787"))
+        self.assertFalse(h.ok("127.0.0.1:9999"))             # another port
+        self.assertFalse(h.ok("evil.example:8787"))
+        self.assertFalse(h.ok(""))
+
     def test_this_mac_needs_no_passcode(self):
         self.start(passcode="hunter22", local=True)
         self.assertEqual(self.post("/api/battery-log", {"device": "x"})[0], 200)

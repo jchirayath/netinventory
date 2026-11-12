@@ -27,6 +27,7 @@ import argparse
 import csv
 import datetime as dt
 import http.cookiejar
+import json
 import os
 import re
 import shutil
@@ -100,6 +101,12 @@ EVENTS_RETENTION_DAYS = int(_cfg("events_retention_days",
 # which mails you itself if this Mac or the watch stops checking in.
 MONITOR_CLOUD_EVERY = _cfg("monitor_cloud_every", "NETINV_MONITOR_CLOUD_EVERY", "1h")
 HEARTBEAT_URL = _cfg("heartbeat_url", "NETINV_HEARTBEAT_URL", "")
+# Another copy to keep in step (sync.py): 'user@pi[:path]' or a directory.
+# watch syncs with it every SYNC_EVERY.
+SYNC_TARGET = _cfg("sync_target", "NETINV_SYNC_TARGET", "")
+SYNC_EVERY = _cfg("sync_every", "NETINV_SYNC_EVERY", "15m")
+# Extra Host names serve answers to, besides localhost, this machine's name and LAN IP.
+SERVE_HOSTS = _cfg("serve_hosts", "NETINV_SERVE_HOSTS", "")
 
 
 def subnet_prefix(subnet=None):
@@ -1985,6 +1992,9 @@ def cmd_watch(args):
           f"(router={'on' if use_router else 'off'}, notify={'on' if args.notify else 'off'})"
           f" — Ctrl-C to stop")
     creds = get_router_creds() if use_router else (None, None)
+    import monitor
+    sync_every = monitor.parse_duration(SYNC_EVERY) or 900
+    last_sync = 0.0
     n = 0
     while True:
         n += 1
@@ -2017,6 +2027,10 @@ def cmd_watch(args):
             email_events(master, new, changes, long_absent(back, before_seen))
         if not args.no_monitor:
             monitor_pass(master, seen, do_email=args.email, do_notify=args.notify)
+        sync_target = args.sync or SYNC_TARGET
+        if sync_target and time.time() - last_sync >= sync_every:
+            last_sync = time.time()
+            run_sync(sync_target)
         heartbeat()
         if args.once:
             break
@@ -2216,6 +2230,35 @@ def deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify):
                                                 for k, n in counts.items()))
         ok, msg = send_email(subject, "\n".join(lines))
         print(f"  email: {msg}")
+
+
+def run_sync(spec, dry_run=False):
+    """Sync with another copy; a failure is printed, never raised, so a
+    Pi that's down can't stop the watch. Returns the changed files or None."""
+    import sync
+    try:
+        changed = sync.sync(DATA_DIR, sync.target(spec), dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! sync with {spec}: {e}")
+        return None
+    print(f"  sync with {spec}: " + (f"{len(changed)} file(s) merged" if changed else "in step"))
+    return changed
+
+
+def cmd_sync(args):
+    if args.action == "export":
+        import sync
+        json.dump(sync.export_dir(DATA_DIR), sys.stdout)
+        return
+    if args.action == "import":
+        import sync
+        sync.import_dir(DATA_DIR, {k: v for k, v in json.load(sys.stdin).items()})
+        return
+    spec = args.target or SYNC_TARGET
+    if not spec:
+        sys.exit("  usage: netinv sync user@host[:path]   (or set sync_target in ~/.netinv/config)")
+    if run_sync(spec, dry_run=args.dry_run) is None:
+        sys.exit(1)
 
 
 def heartbeat():
@@ -3690,6 +3733,64 @@ async function load(force){if(!force&&(dragId!=null||editing||menu.style.display
 load();setInterval(load,15000)</script>"""
 
 
+class PasscodeGuard:
+    """Wrong-passcode limiter shared by every request thread: failures are
+    handled one at a time with a delay, and MAX misses within WINDOW seconds
+    lock out other devices' edits for WINDOW seconds."""
+    MAX, WINDOW, DELAY = 10, 600, 1.0
+
+    def __init__(self):
+        import threading
+        self._lock = threading.Lock()
+        self._fails = []
+        self._until = 0.0
+
+    def locked(self):
+        return time.time() < self._until
+
+    def fail(self):
+        with self._lock:                 # serialized: parallel guesses queue up
+            now = time.time()
+            self._fails = [t for t in self._fails if now - t < self.WINDOW] + [now]
+            if len(self._fails) >= self.MAX:
+                self._until, self._fails = now + self.WINDOW, []
+                print(f"  ! {self.MAX} wrong passcodes: edits from other devices locked "
+                      f"for {self.WINDOW // 60} minutes")
+            time.sleep(self.DELAY)
+
+
+class HostCheck:
+    """The Host header values that address this server: localhost names,
+    this machine's names and its LAN address, with or without the port.
+    The LAN address is looked up again on a miss, in case DHCP moved it."""
+
+    def __init__(self, bind, port):
+        self.port = port
+        self.names = {"localhost", "127.0.0.1", "[::1]", bind.lower()}
+        hn = socket.gethostname().lower()
+        self.names |= {hn, hn.split(".")[0], hn.split(".")[0] + ".local"}
+        # other names you reach it by (a router's 'mac-studio.lan'), comma-separated
+        self.names |= {n.strip().lower() for n in SERVE_HOSTS.split(",") if n.strip()}
+        self._add_lan()
+
+    def _add_lan(self):
+        ip = _lan_ip()
+        if ip:
+            self.names.add(ip)
+
+    def ok(self, host):
+        h = host.strip().lower()
+        name, _, port = h.rpartition(":") if not h.endswith("]") else (h, "", "")
+        if not name or not port.isdigit():
+            name, port = h, ""
+        if port and int(port) != self.port:
+            return False
+        if name in self.names:
+            return True
+        self._add_lan()
+        return name in self.names
+
+
 def _local_client(addr):
     """True for a request from this machine itself, which needs no passcode."""
     return addr in ("127.0.0.1", "::1")
@@ -3720,8 +3821,8 @@ def cmd_set_passcode(args):
         connectors.kc_delete("serve", "passcode")
         print("  passcode removed; serve --lan --allow-write will refuse to start")
         return
-    if len(p) < 6:
-        sys.exit("  ! use at least 6 characters")
+    if len(p) < 8:
+        sys.exit("  ! use at least 8 characters")
     if getpass.getpass("Again: ") != p:
         sys.exit("  ! the two entries differ")
     connectors.kc_set("serve", "passcode", p)
@@ -3925,6 +4026,8 @@ def make_server(args):
     import hmac
     import threading
     write_lock = threading.Lock()
+    guard = PasscodeGuard()
+    hosts = None                         # HostCheck, once the port is bound (below)
 
     def _send(self, code, body, ctype, cors=False):
         self.send_response(code)
@@ -3940,7 +4043,19 @@ def make_server(args):
         def log_message(self, *a):  # quiet
             pass
 
+        def _host_ok(self):
+            """Answer only requests addressed to this machine: a page on another
+            site that re-points its own name at us (DNS rebinding) sends its own
+            name as Host, so it is refused for reads as well as writes."""
+            if hosts.ok(self.headers.get("Host", "")):
+                return True
+            _send(self, 421, b'{"error":"unknown Host; use this machine\'s address"}',
+                  "application/json")
+            return False
+
         def do_GET(self):
+            if not self._host_ok():
+                return
             path = self.path.split("?")[0]
             page = {"/": _DASHBOARD, "/index.html": _DASHBOARD,
                     "/rooms": _ROOMS_PAGE, "/batteries": _BATTERY_PAGE}.get(path)
@@ -3963,6 +4078,8 @@ def make_server(args):
             _send(self, 200, _json.dumps(data).encode(), "application/json", cors=True)
 
         def do_POST(self):
+            if not self._host_ok():
+                return
             path = self.path.split("?")[0]
             if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
                             "/api/type", "/api/app", "/api/delete", "/api/room-delete",
@@ -3974,10 +4091,13 @@ def make_server(args):
                       "application/json")
                 return
             if passcode and not _local_client(self.client_address[0]):
+                if guard.locked():
+                    _send(self, 429, b'{"error":"too many wrong passcodes; try again later"}',
+                          "application/json")
+                    return
                 given = self.headers.get("X-Netinv-Passcode", "")
                 if not hmac.compare_digest(given.encode(), passcode.encode()):
-                    import time
-                    time.sleep(1)          # slows guessing; the threaded server stays up
+                    guard.fail()
                     _send(self, 401, b'{"error":"passcode required","auth":true}',
                           "application/json")
                     return
@@ -4186,6 +4306,7 @@ def make_server(args):
                   "application/json")
 
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
+    hosts = HostCheck(args.host, srv.server_address[1])
     print(f"  netinventory API on http://{args.host}:{args.port}  "
           f"(/, /rooms, /batteries, /api/devices, /api/summary, /api/alerts, /api/events, "
           f"/api/board, /api/batteries, /api/battery?device=)")
@@ -4287,6 +4408,9 @@ def main():
                         f"back after {STALE_DAYS}+ days away (set up with set-email)")
     w.add_argument("--no-monitor", action="store_true",
                    help="skip the device monitors (monitors.csv) each poll")
+    w.add_argument("--sync", metavar="TARGET",
+                   help="merge edits with this copy (user@host[:path]) every sync_every "
+                        "(default 15m); default: sync_target from the config")
     w.set_defaults(func=cmd_watch)
 
     mo = sub.add_parser("monitor", help="alert when a device stays offline or its battery "
@@ -4434,6 +4558,15 @@ def main():
     sv.set_defaults(func=cmd_serve)
     spc = sub.add_parser("set-passcode", help="passcode other devices need to edit via serve")
     spc.set_defaults(func=cmd_set_passcode)
+
+    sy = sub.add_parser("sync", help="merge edits with another copy (user@host[:path] or a "
+                                     "directory); battery log, monitors, rooms, names, notes")
+    sy.add_argument("target", nargs="?", help="default: sync_target from ~/.netinv/config")
+    sy.add_argument("--dry-run", action="store_true", help="show what would change")
+    sy.set_defaults(func=cmd_sync, action="sync")
+    for name, act in (("sync-export", "export"), ("sync-import", "import")):
+        x = sub.add_parser(name, help=f"(used by sync over ssh) {act} this copy's synced files")
+        x.set_defaults(func=cmd_sync, action=act, target=None, dry_run=False)
 
     args = p.parse_args()
     args.func(args)
