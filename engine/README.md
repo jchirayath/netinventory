@@ -348,6 +348,35 @@ Set `sync_target = pi@192.168.1.50` in `~/.netinv/config` and the watch
 syncs every `sync_every` (default 15 minutes). Each copy keeps its own
 live levels and monitor state.
 
+**A Pi that serves and a Mac that scans** (scanner mode). The Mac runs the
+watch and the clouds; the Pi only runs `serve`, the dashboard you use. With
+`--scanner` (or `sync_scanner = yes`), the Mac's scan results, monitor state
+and events replace the Pi's, so the Pi shows live data without scanning (or
+writing much to its SD card), and edits made on the Pi still merge back:
+
+```ini
+# ~/.netinv/config on the Mac
+sync_target  = jacobc@192.168.1.204:/opt/homehub/netinventory
+sync_key     = ~/.ssh/homehub_ed25519
+sync_scanner = yes
+```
+
+| Also synced in scanner mode | From the Mac to the Pi |
+|---|---|
+| `devices.csv` scan columns (IP, Status, LastSeen...) | replace the Pi's; names and notes still merge both ways |
+| `monitor_state.json` | battery levels and offline state for the Batteries page |
+| `events.csv` | join/leave history |
+
+**Behind a reverse proxy** (the homehub Pi serves it through Caddy at
+`/netinv/`): the pages use relative links, so the prefix works. Every
+proxied request arrives from loopback, so a request carrying
+`X-Forwarded-For` is never treated as this machine's own: edits need the
+passcode, are refused outright if none is set, and wrong guesses are counted
+per forwarded client. Add the names the proxy answers to (`netinv.local`) to
+`serve_hosts`. `deploy.sh` refuses a box that already runs
+`netinventory.service` as a system service; homehub updates its copy with
+its own `netinventory/update.sh`.
+
 ## Identifying unknown devices (fingerprinting)
 
 Two layers, both built in:
@@ -440,6 +469,8 @@ non-`192.168.1.x` networks work by setting it.
 | `NETINV_HEARTBEAT_URL` | `heartbeat_url` | — | Dead-man URL fetched after each watch poll / monitor check |
 | `NETINV_SYNC_TARGET` | `sync_target` | — | Copy the watch syncs with (`user@host[:path]` or a directory) |
 | `NETINV_SYNC_EVERY` | `sync_every` | `15m` | How often the watch syncs |
+| `NETINV_SYNC_KEY` | `sync_key` | — | ssh identity file for the sync target |
+| `NETINV_SYNC_SCANNER` | `sync_scanner` | `no` | This copy scans: its scan data, monitor state and events replace the target's |
 | `NETINV_SERVE_HOSTS` | `serve_hosts` | — | Extra names `serve` answers to (e.g. `mac-studio.lan`), comma-separated |
 | `NETINV_CREDENTIALS` | — | `~/.netinv/credentials.json` | Credential file where there's no Keychain (Linux) |
 

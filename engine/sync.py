@@ -12,6 +12,13 @@ Each file has a rule:
   devices.csv          the same, but only the fields you curate (Device,
                        Notes); scan results (IP, Status...) stay each copy's
                        own, and a sync never deletes a scanned device
+  monitor_state.json, events.csv
+                       each copy's own
+
+Scanner mode (`sync --scanner`, or sync_scanner = yes): this copy scans and
+the other only serves the dashboard (the Pi), so this copy's scan results in
+devices.csv, its monitor state (battery levels, who is offline) and its
+events replace the other's. Edits still merge both ways.
 
 The last synced state lives in .sync/<target>/ next to the data, per
 target. Standard library only."""
@@ -33,6 +40,9 @@ FILES = {
     "types.csv":           ("merge3", ("Type",), None, True),
     "apps.csv":            ("merge3", ("Key",), None, True),
     "devices.csv":         ("merge3", ("MAC",), ("Device", "Notes"), False),
+    # only in scanner mode, from the scanner to the other copy
+    "monitor_state.json":  ("push", (), None, False),
+    "events.csv":          ("push", (), None, False),
 }
 
 
@@ -88,10 +98,12 @@ def merge_union(mine, theirs, cols):
     return sorted(out.values(), key=lambda r: tuple(r.get(c, "") for c in cols))
 
 
-def merge3(base, mine, theirs, cols, fields=None, deletions=True, mine_newer=True):
+def merge3(base, mine, theirs, cols, fields=None, deletions=True, mine_newer=True,
+           scanner=False):
     """Three-way merge. Returns (rows for mine, rows for theirs): the same
     synced fields on both sides, while columns outside `fields` keep each
-    side's own value (a device's IP on this Mac vs on the Pi)."""
+    side's own value (a device's IP on this Mac vs on the Pi), or with
+    scanner=True take mine's on both (the other copy doesn't scan)."""
     B = {_key(r, cols): r for r in base}
     M = {_key(r, cols): r for r in mine}
     T = {_key(r, cols): r for r in theirs}
@@ -121,13 +133,17 @@ def merge3(base, mine, theirs, cols, fields=None, deletions=True, mine_newer=Tru
             else:                       # both changed it: the newer file wins
                 merged[f] = mv if mine_newer else tv
         out_m.append({**m, **merged})
-        out_t.append({**t, **merged})
+        out_t.append({**t, **(m if scanner and fields else {}), **merged})
     return out_m, out_t
 
 
-def merge_file(name, base_text, mine_text, theirs_text, mine_newer=True):
+def merge_file(name, base_text, mine_text, theirs_text, mine_newer=True, scanner=False):
     """(text for mine, text for theirs, text to store as the new base)."""
     rule, cols, fields, deletions = FILES[name]
+    if rule == "push":                  # the scanner's copy wins; otherwise untouched
+        if scanner and mine_text:
+            return mine_text, mine_text, mine_text
+        return mine_text, theirs_text, base_text
     hb, base = parse(base_text)
     hm, mine = parse(mine_text)
     ht, theirs = parse(theirs_text)
@@ -142,7 +158,7 @@ def merge_file(name, base_text, mine_text, theirs_text, mine_newer=True):
     if rule == "union":
         text = dump(header, merge_union(mine, theirs, cols))
         return text, text, text
-    rm, rt = merge3(base, mine, theirs, cols, fields, deletions, mine_newer)
+    rm, rt = merge3(base, mine, theirs, cols, fields, deletions, mine_newer, scanner)
     mine_out = dump(_header(hm or ht, ht), rm) if (hm or rm) else mine_text
     theirs_out = dump(_header(ht or hm, hm), rt) if (ht or rt) else theirs_text
     return mine_out, theirs_out, mine_out
@@ -192,17 +208,19 @@ class SshTarget:
     prompts). It runs that copy's own netinv.py sync-export / sync-import,
     so files are read and written by the same code on both ends."""
 
-    def __init__(self, host, path="netinventory"):
+    def __init__(self, host, path="netinventory", key=""):
         # never starting with '-': ssh would read it as an option
         if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._@-]*", host):
             raise ValueError(f"bad ssh host {host!r}")
         self.host, self.path, self.label = host, path, f"{host}:{path}"
+        self.key = os.path.expanduser(key) if key else ""
 
     def _run(self, sub, stdin=None):
         engine = shlex.quote(self.path.rstrip("/") + "/engine")
         cmd = (f"cd {engine} && P=.venv/bin/python; [ -x $P ] || P=python3; "
                f"$P netinv.py {sub}")
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--",
+        key = ["-i", self.key, "-o", "IdentitiesOnly=yes"] if self.key else []
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", *key, "--",
                             self.host, cmd], input=stdin, capture_output=True, text=True,
                            timeout=120)
         if r.returncode != 0:
@@ -216,21 +234,23 @@ class SshTarget:
         self._run("sync-import", stdin=json.dumps(files))
 
 
-def target(spec):
-    """'user@host[:path]' -> SshTarget; an existing directory -> LocalTarget."""
+def target(spec, key=""):
+    """'user@host[:path]' -> SshTarget (key: an ssh identity file); an
+    existing directory -> LocalTarget."""
     if os.path.isdir(os.path.expanduser(spec)):
         return LocalTarget(os.path.expanduser(spec))
     host, _, path = spec.partition(":")
-    return SshTarget(host, path or "netinventory")
+    return SshTarget(host, path or "netinventory", key)
 
 
 def slug(label):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_")[:80] or "target"
 
 
-def sync(data_dir, tgt, dry_run=False, log=print):
-    """Two-way sync of data_dir with tgt. Returns {name: (mine changed,
-    theirs changed)} for the files that differed."""
+def sync(data_dir, tgt, dry_run=False, log=print, scanner=False):
+    """Two-way sync of data_dir with tgt (scanner: this copy's scan data and
+    monitor state replace tgt's). Returns {name: (mine changed, theirs
+    changed)} for the files that differed."""
     base_dir = os.path.join(data_dir, ".sync", slug(tgt.label))
     mine = export_dir(data_dir)
     theirs = tgt.export()
@@ -243,7 +263,7 @@ def sync(data_dir, tgt, dry_run=False, log=print):
         base_text = open(bp, encoding="utf-8").read() if os.path.exists(bp) else ""
         mine_newer = (m or {}).get("mtime", 0) >= (t or {}).get("mtime", 0)
         new_m, new_t, new_b = merge_file(name, base_text, (m or {}).get("text", ""),
-                                         (t or {}).get("text", ""), mine_newer)
+                                         (t or {}).get("text", ""), mine_newer, scanner)
         cm, ct = new_m != (m or {}).get("text", ""), new_t != (t or {}).get("text", "")
         if cm:
             to_mine[name] = new_m
