@@ -228,6 +228,9 @@ class TestServer(unittest.TestCase):
             self.assertIn("function apiPost", html, page)
             self.assertNotIn("__AUTHJS__", html, page)
             self.assertNotIn("__WRITABLE__", html, page)
+            # relative links and reads, so a proxy prefix (/netinv/) keeps working
+            self.assertNotIn('href="/', html, page)
+            self.assertNotIn("fetch('/", html, page)
 
     def test_no_cors_header_so_other_sites_cannot_read(self):
         self.start()
@@ -289,11 +292,12 @@ class TestServer(unittest.TestCase):
             cm.exception.close()
 
     def test_host_check(self):
-        h = netinv.HostCheck("0.0.0.0", 8787)
+        h = netinv.HostCheck("0.0.0.0")
         self.assertTrue(h.ok("127.0.0.1:8787"))
         self.assertTrue(h.ok("localhost"))
         self.assertTrue(h.ok("[::1]:8787"))
-        self.assertFalse(h.ok("127.0.0.1:9999"))             # another port
+        self.assertTrue(h.ok("127.0.0.1:9999"))              # a proxy's port is fine
+        self.assertFalse(h.ok("evil.example"))
         self.assertFalse(h.ok("evil.example:8787"))
         self.assertFalse(h.ok(""))
 

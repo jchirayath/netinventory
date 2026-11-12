@@ -105,6 +105,11 @@ HEARTBEAT_URL = _cfg("heartbeat_url", "NETINV_HEARTBEAT_URL", "")
 # watch syncs with it every SYNC_EVERY.
 SYNC_TARGET = _cfg("sync_target", "NETINV_SYNC_TARGET", "")
 SYNC_EVERY = _cfg("sync_every", "NETINV_SYNC_EVERY", "15m")
+# ssh identity for the sync target (e.g. ~/.ssh/homehub_ed25519), and whether
+# this copy is the scanner whose scan data and monitor state the target shows.
+SYNC_KEY = _cfg("sync_key", "NETINV_SYNC_KEY", "")
+SYNC_SCANNER = _cfg("sync_scanner", "NETINV_SYNC_SCANNER", "no").strip().lower() in (
+    "yes", "true", "1", "on")
 # Extra Host names serve answers to, besides localhost, this machine's name and LAN IP.
 SERVE_HOSTS = _cfg("serve_hosts", "NETINV_SERVE_HOSTS", "")
 
@@ -2232,12 +2237,13 @@ def deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify):
         print(f"  email: {msg}")
 
 
-def run_sync(spec, dry_run=False):
+def run_sync(spec, dry_run=False, scanner=None):
     """Sync with another copy; a failure is printed, never raised, so a
     Pi that's down can't stop the watch. Returns the changed files or None."""
     import sync
     try:
-        changed = sync.sync(DATA_DIR, sync.target(spec), dry_run=dry_run)
+        changed = sync.sync(DATA_DIR, sync.target(spec, SYNC_KEY), dry_run=dry_run,
+                            scanner=SYNC_SCANNER if scanner is None else scanner)
     except Exception as e:  # noqa: BLE001
         print(f"  ! sync with {spec}: {e}")
         return None
@@ -2257,7 +2263,7 @@ def cmd_sync(args):
     spec = args.target or SYNC_TARGET
     if not spec:
         sys.exit("  usage: netinv sync user@host[:path]   (or set sync_target in ~/.netinv/config)")
-    if run_sync(spec, dry_run=args.dry_run) is None:
+    if run_sync(spec, dry_run=args.dry_run, scanner=args.scanner or None) is None:
         sys.exit(1)
 
 
@@ -3221,8 +3227,8 @@ tr.dim td{color:#9aa}
  <span class=chip id=cu>Only unnamed</span>
  <span class=chip id=cd>Hide defunct</span>
  <span class=spacer></span>
- <a class=btn href="/rooms" style="text-decoration:none;color:inherit">Rooms</a>
- <a class=btn href="/batteries" style="text-decoration:none;color:inherit">Batteries</a>
+ <a class=btn href="rooms" style="text-decoration:none;color:inherit">Rooms</a>
+ <a class=btn href="batteries" style="text-decoration:none;color:inherit">Batteries</a>
  <button class=btn id=rst>Reset</button>
 </div>
 <div class=wrap><table><thead><tr id=hr></tr><tr class=f id=fr></tr></thead><tbody id=t></tbody></table></div>
@@ -3351,8 +3357,8 @@ hr.addEventListener('click',e=>{const th=e.target.closest('th');if(!th)return;co
 q.addEventListener('input',()=>{ST.q=q.value;renderBody()});
 gb.addEventListener('change',()=>{ST.group=gb.value;renderBody()});
 cw.onclick=()=>tog('weak');co.onclick=()=>tog('off');cu.onclick=()=>tog('unnamed');cd.onclick=()=>tog('def');rst.onclick=reset;
-async function load(){D=await (await fetch('/api/devices')).json();
- const s=await (await fetch('/api/summary')).json();shownTotal=s;
+async function load(){D=await (await fetch('api/devices')).json();
+ const s=await (await fetch('api/summary')).json();shownTotal=s;
  if(!ST.built){buildFilters();ST.built=true}render()}
 load();setInterval(load,15000)</script>"""
 
@@ -3441,8 +3447,8 @@ h1{font-size:1.2rem;margin:.2rem 0}
   <input id=newroom placeholder="new room name" maxlength=40>
   <button class=btn id=add type=submit>+ Room</button>
  </form>
- <a class=btn href="/">Devices</a>
- <a class=btn href="/batteries">Batteries</a>
+ <a class=btn href="./">Devices</a>
+ <a class=btn href="batteries">Batteries</a>
 </div>
 <div id=msg class=ro style=display:none></div>
 <div class=grid id=g></div>
@@ -3772,7 +3778,7 @@ addEventListener('hashchange',render);
 // The 15 s refresh waits while something is being dragged, edited or picked;
 // load(true) is a save asking for the new state now.
 async function load(force){if(!force&&(dragId!=null||editing||menu.style.display=='block'))return;
- B=await (await fetch('/api/board')).json();render()}
+ B=await (await fetch('api/board')).json();render()}
 load();setInterval(load,15000)</script>"""
 
 
@@ -3806,12 +3812,11 @@ class PasscodeGuard:
 
 
 class HostCheck:
-    """The Host header values that address this server: localhost names,
-    this machine's names and its LAN address, with or without the port.
+    """The Host header names that address this server: localhost names,
+    this machine's names, its LAN address, and serve_hosts (any port).
     The LAN address is looked up again on a miss, in case DHCP moved it."""
 
-    def __init__(self, bind, port):
-        self.port = port
+    def __init__(self, bind):
         self.names = {"localhost", "127.0.0.1", "[::1]", bind.lower()}
         hn = socket.gethostname().lower()
         self.names |= {hn, hn.split(".")[0], hn.split(".")[0] + ".local"}
@@ -3825,12 +3830,13 @@ class HostCheck:
             self.names.add(ip)
 
     def ok(self, host):
+        # Only the name matters: a rebinding page sends its own name whatever
+        # the port, and a reverse proxy (Caddy on the Pi) forwards the port
+        # the browser used, not ours.
         h = host.strip().lower()
         name, _, port = h.rpartition(":") if not h.endswith("]") else (h, "", "")
         if not name or not port.isdigit():
-            name, port = h, ""
-        if port and int(port) != self.port:
-            return False
+            name = h
         if name in self.names:
             return True
         self._add_lan()
@@ -3892,10 +3898,12 @@ def cmd_set_passcode(args):
 
 # Shared by every page: send a write, and when the server wants the passcode
 # (a device other than this Mac, see cmd_serve) ask for it once and keep it
-# in this browser.
+# in this browser. Paths are made relative, so the pages also work under a
+# reverse proxy's prefix (homehub serves them at /netinv/).
 _AUTH_JS = """function getPass(){try{return localStorage.getItem('netinvPass')||''}catch(e){return ''}}
 function setPass(p){try{localStorage.setItem('netinvPass',p)}catch(e){}}
 async function apiPost(path,body){
+ path=path.replace(/^\\//,'');
  for(let i=0;i<3;i++){
   const h={'Content-Type':'application/json'};const pc=getPass();if(pc)h['X-Netinv-Passcode']=pc;
   const r=await fetch(path,{method:'POST',headers:h,body:JSON.stringify(body)});
@@ -3946,8 +3954,8 @@ svg.spark{vertical-align:middle}
  <input id=q placeholder="search devices and notes…" style="width:16rem">
  <span class=spacer></span>
  <button class="btn pri" id=newb>+ Log battery change</button>
- <a class=btn href="/">Devices</a>
- <a class=btn href="/rooms">Rooms</a>
+ <a class=btn href="./">Devices</a>
+ <a class=btn href="rooms">Rooms</a>
 </div>
 <div id=msg></div>
 <form id=form>
@@ -4031,7 +4039,7 @@ document.addEventListener('click',async ev=>{const el=ev.target;
   if(!e||!confirm(`Delete the ${e.Event} entry for ${e.Device} on ${e.Date}?`))return;
   try{await send('/api/battery-delete',{id:e.Id});say('Deleted.');await load()}catch(x){say('Not deleted: '+x.message,true)}}});
 q.addEventListener('input',render);
-async function load(){B=await (await fetch('/api/batteries')).json();if(form.style.display!='block')render()}
+async function load(){B=await (await fetch('api/batteries')).json();if(form.style.display!='block')render()}
 load();setInterval(load,60000)</script>"""
 
 
@@ -4387,7 +4395,7 @@ def make_server(args):
                   "application/json")
 
     srv = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
-    hosts = HostCheck(args.host, srv.server_address[1])
+    hosts = HostCheck(args.host)
     print(f"  netinventory API on http://{args.host}:{args.port}  "
           f"(/, /rooms, /batteries, /api/devices, /api/summary, /api/alerts, /api/events, "
           f"/api/board, /api/batteries, /api/battery?device=)")
@@ -4644,6 +4652,9 @@ def main():
                                      "directory); battery log, monitors, rooms, names, notes")
     sy.add_argument("target", nargs="?", help="default: sync_target from ~/.netinv/config")
     sy.add_argument("--dry-run", action="store_true", help="show what would change")
+    sy.add_argument("--scanner", action="store_true",
+                    help="this copy scans: its scan data, monitor state and events replace "
+                         "the target's (default: sync_scanner from the config)")
     sy.set_defaults(func=cmd_sync, action="sync")
     for name, act in (("sync-export", "export"), ("sync-import", "import")):
         x = sub.add_parser(name, help=f"(used by sync over ssh) {act} this copy's synced files")

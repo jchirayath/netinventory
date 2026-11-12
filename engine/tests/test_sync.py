@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sync  # noqa: E402
@@ -75,6 +76,54 @@ class TestDevices(unittest.TestCase):
         # a MAC missing on one side is never taken as a deletion
         out_m, _, _ = sync.merge_file("devices.csv", base, csvtext(DEV_HDR), base)
         self.assertEqual(len(rows(out_m)), 1)
+
+
+class TestScannerMode(unittest.TestCase):
+    def test_scan_data_flows_from_scanner_edits_both_ways(self):
+        base = csvtext(DEV_HDR, ("Cam", "AA:BB:CC:00:00:01", "10.0.0.5", "online", ""))
+        mine = csvtext(DEV_HDR, ("Cam", "AA:BB:CC:00:00:01", "10.0.0.8", "offline", ""),
+                       ("", "AA:BB:CC:00:00:03", "10.0.0.3", "online", ""))     # newly scanned
+        theirs = csvtext(DEV_HDR, ("Garage Cam", "AA:BB:CC:00:00:01", "10.0.0.5", "online",
+                                   "batteries 11/11"))                         # edited on the Pi
+        out_m, out_t, _ = sync.merge_file("devices.csv", base, mine, theirs, scanner=True)
+        m, t = {r["MAC"]: r for r in rows(out_m)}, {r["MAC"]: r for r in rows(out_t)}
+        mac = "AA:BB:CC:00:00:01"
+        for side in (m, t):
+            self.assertEqual((side[mac]["Device"], side[mac]["Notes"]),
+                             ("Garage Cam", "batteries 11/11"))                 # the Pi's edit
+            self.assertEqual((side[mac]["IP"], side[mac]["Status"]),
+                             ("10.0.0.8", "offline"))                            # the Mac's scan
+        self.assertIn("AA:BB:CC:00:00:03", t)
+
+    def test_push_files_only_in_scanner_mode(self):
+        st = '{"QNAP NAS": {"up": true}}'
+        m, t, _ = sync.merge_file("monitor_state.json", "", st, '{"old": 1}', scanner=True)
+        self.assertEqual(t, st)
+        m, t, _ = sync.merge_file("monitor_state.json", "", st, '{"old": 1}', scanner=False)
+        self.assertEqual(t, '{"old": 1}')                  # each copy keeps its own
+
+    def test_scanner_sync_end_to_end(self):
+        with tempfile.TemporaryDirectory() as mac, tempfile.TemporaryDirectory() as pi:
+            with open(os.path.join(mac, "monitor_state.json"), "w") as f:
+                f.write('{"Lock": {"battery": {"pct": 10}}}')
+            with open(os.path.join(mac, "events.csv"), "w") as f:
+                f.write("Timestamp;Event\n2026-11-11T10:00:00;join\n")
+            sync.sync(mac, sync.LocalTarget(pi), log=lambda *_: None, scanner=True)
+            with open(os.path.join(pi, "monitor_state.json")) as f:
+                self.assertIn('"pct": 10', f.read())
+            self.assertTrue(os.path.exists(os.path.join(pi, "events.csv")))
+
+    def test_ssh_key_passed_to_ssh(self):
+        t = sync.target("jacobc@192.0.2.4:/opt/homehub/netinventory", key="~/.ssh/k")
+        self.assertEqual(t.path, "/opt/homehub/netinventory")
+        with mock.patch.object(sync.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="{}", stderr="")
+            t.export()
+        argv = run.call_args[0][0]
+        self.assertIn("-i", argv)
+        self.assertEqual(argv[argv.index("-i") + 1], os.path.expanduser("~/.ssh/k"))
+        self.assertLess(argv.index("-i"), argv.index("--"))     # options before the host
+        self.assertIn("cd /opt/homehub/netinventory/engine", argv[-1])
 
 
 class TestBatteryLog(unittest.TestCase):

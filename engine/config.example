@@ -18,5 +18,8 @@ monitor_cloud_every = 1h
 # Another copy (e.g. a Raspberry Pi) the watch keeps in step with, and how often
 # sync_target = pi@192.168.1.50
 # sync_every = 15m
+# ssh key for it, and whether this copy is the scanner the other only displays
+# sync_key = ~/.ssh/homehub_ed25519
+# sync_scanner = yes
 # Extra names `serve --lan` answers to, besides its LAN IP and hostname
 # serve_hosts = mac-studio.lan
