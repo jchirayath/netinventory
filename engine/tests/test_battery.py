@@ -192,6 +192,108 @@ class TestApiBatteries(unittest.TestCase):
         self.assertEqual(got["Garage door"]["name"], "Garage Door Lock")
 
 
+class TestSetDetails(unittest.TestCase):
+    """set_battery_details: naming devices nothing describes (Flume sensor,
+    Govee Bluetooth thermometers) and turning battery tracking off."""
+
+    def setUp(self):
+        import home
+        import monitor
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        self.paths = {k: os.path.join(d, v) for k, v in {
+            "BATTERY_LOG": "battery_log.csv", "BATTERY_HISTORY": "battery_history.csv",
+            "MONITORS_CSV": "monitors.csv", "MONITOR_STATE": "monitor_state.json",
+            "HOME_CSV": "home.csv", "ROOMS_CSV": "rooms.csv", "APP_ROOMS_CSV": "app_rooms.csv",
+            "APPS_CSV": "apps.csv", "TYPES_CSV": "types.csv", "MASTER": "devices.csv"}.items()}
+        m = lambda dev, **kw: {**{k: "" for k in monitor.FIELDS}, "Device": dev,  # noqa: E731
+                               "Enabled": "yes", **kw}
+        monitor.save(self.paths["MONITORS_CSV"], [
+            m("Flume Sensor", BatteryBelow="20", Check="cloud", Match="flume=Flume Sensor"),
+            m("H5101_4670", BatteryBelow="20", Check="ble", Match="ble=H5101_4670"),
+            m("H5043_7038", BatteryBelow="20", Check="ble", Match="ble=H5043_7038"),
+            m("Garage door", BatteryBelow="20", Check="cloud", Match="tuya=Garage door")])
+        home.write_csv(self.paths["ROOMS_CSV"], home.ROOM_FIELDS,
+                       [{"Room": r, "Floor": "", "Aliases": ""} for r in ("Office", "Garage", "Outside")])
+        home.write_csv(self.paths["HOME_CSV"], home.HOME_FIELDS, [TestDetails.HOME[0]])
+        with open(self.paths["MONITOR_STATE"], "w") as f:
+            json.dump({"H5101_4670": {"battery": {"pct": 89, "provider": "ble", "model": "bluetooth"}},
+                       "Flume Sensor": {"battery": {"pct": 10, "provider": "flume", "model": "sensor"}}}, f)
+        self.patch = mock.patch.multiple(netinv, **self.paths)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def devices(self):
+        return {s["device"]: s for s in netinv.api_batteries()["devices"]}
+
+    def test_new_home_row_for_a_bluetooth_sensor_then_found_again(self):
+        import home
+        d = netinv.set_battery_details("H5101_4670", {"name": "Office Humidor Thermometer",
+                                                      "room": "office", "type": "sensor"})
+        self.assertEqual((d["name"], d["room"], d["type"], d["app"]),
+                         ("Office Humidor Thermometer", "Office", "sensor", "govee"))
+        row = [h for h in home.load_home(self.paths["HOME_CSV"]) if h["Name"].startswith("Office")]
+        self.assertEqual(row[0]["AppNames"], "govee=H5101_4670")   # how it's matched next time
+        self.assertEqual(self.devices()["H5101_4670"]["room"], "Office")
+        # a second save updates the same row, doesn't add another
+        netinv.set_battery_details("H5101_4670", {"name": "Humidor", "room": "Office"})
+        self.assertEqual(len(home.load_home(self.paths["HOME_CSV"])), 2)
+
+    def test_naming_it_like_an_existing_device_links_instead_of_duplicating(self):
+        import home
+        rows = home.load_home(self.paths["HOME_CSV"]) + [
+            {**{k: "" for k in home.HOME_FIELDS}, "Room": "Office", "Type": "sensor",
+             "Name": "Office Humidor Thermometer", "Native": "govee",
+             "AppNames": "govee=Display-Humidor"}]
+        home.write_csv(self.paths["HOME_CSV"], home.HOME_FIELDS, rows)
+        d = netinv.set_battery_details("H5101_4670", {"name": "office humidor thermometer"})
+        self.assertTrue(d["linked"])
+        self.assertEqual((d["name"], d["room"]), ("Office Humidor Thermometer", "Office"))
+        rows = home.load_home(self.paths["HOME_CSV"])
+        self.assertEqual(len(rows), 2)                              # no duplicate row
+        humidor = next(r for r in rows if r["Name"] == "Office Humidor Thermometer")
+        self.assertEqual(home.parse_app_names(humidor["AppNames"]),
+                         {"govee": "Display-Humidor", "ble": "H5101_4670"})
+        self.assertEqual(self.devices()["H5101_4670"]["name"], "Office Humidor Thermometer")
+
+    def test_flume_sensor(self):
+        d = netinv.set_battery_details("Flume Sensor", {"name": "Water Meter Sensor",
+                                                        "room": "Outside", "type": "sensor"})
+        self.assertEqual((d["name"], d["room"], d["app"]), ("Water Meter Sensor", "Outside", "flume"))
+
+    def test_existing_row_updated_in_place(self):
+        import home
+        netinv.set_battery_details("Garage door", {"name": "Garage Door Lock", "room": "Garage",
+                                                   "type": "lock"})
+        rows = home.load_home(self.paths["HOME_CSV"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["AppNames"], "tuya=Garage door")
+
+    def test_untrack_a_mains_powered_hub(self):
+        self.assertIn("H5043_7038", self.devices())
+        d = netinv.set_battery_details("H5043_7038", {"name": "WashRoom Leak Hub", "tracked": False})
+        self.assertFalse(d["tracked"])
+        self.assertNotIn("H5043_7038", self.devices())             # off the Batteries list
+        netinv.set_battery_details("H5043_7038", {"tracked": True})
+        self.assertIn("H5043_7038", self.devices())
+
+    def test_rejects_unknown_room_type_and_device(self):
+        with self.assertRaises(ValueError):
+            netinv.set_battery_details("Flume Sensor", {"room": "Narnia"})
+        with self.assertRaises(ValueError):
+            netinv.set_battery_details("Flume Sensor", {"type": "spaceship"})
+        with self.assertRaises(KeyError):
+            netinv.set_battery_details("Not Monitored", {"name": "x"})
+
+    def test_api_lists_rooms_and_types_for_the_form(self):
+        data = netinv.api_batteries()
+        self.assertIn("Office", data["rooms"])
+        self.assertIn("lock", data["types"])
+
+
 class TestCredentialFile(unittest.TestCase):
     def test_file_store_without_keychain(self):
         with tempfile.TemporaryDirectory() as d:
@@ -307,6 +409,13 @@ class TestServer(unittest.TestCase):
         self.assertEqual(json.loads(self.get("/api/batteries"))["log"], [])
         self.assertEqual(self.post("/api/battery-delete", {"id": eid})[0], 404)
         self.assertEqual(self.post("/api/battery-log", {"device": ""})[0], 400)
+
+    def test_battery_device_endpoint(self):
+        self.start(passcode="hunter22", local=False)
+        code, j = self.post("/api/battery-device", {"device": "nope", "name": "x"}, "hunter22")
+        self.assertEqual(code, 404)                    # behind the passcode, then validated
+        with mock.patch("time.sleep"):
+            self.assertEqual(self.post("/api/battery-device", {"device": "nope"})[0], 401)
 
     def test_page_has_auth_helper_and_no_placeholders(self):
         self.start()

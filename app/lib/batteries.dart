@@ -273,6 +273,72 @@ class _BatteriesTabState extends State<BatteriesTab> {
     }
   }
 
+  Future<void> _editDetails(Map s) async {
+    final device = '${s['device']}';
+    final name = TextEditingController(text: batteryName(s));
+    final rooms = ((widget.data['rooms'] as List?) ?? const []).map((r) => '$r').toList();
+    final types = ((widget.data['types'] as List?) ?? const []).map((t) => '$t').toList();
+    var room = rooms.contains('${s['room']}') ? '${s['room']}' : '';
+    var type = types.contains('${s['type']}') ? '${s['type']}' : '';
+    var tracked = s['tracked'] == true;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, setD) => AlertDialog(
+          title: const Text('Edit details'),
+          content: SizedBox(
+            width: 360,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (batteryName(s) != device)
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(device, style: TextStyle(fontSize: 12, color: Brand.offline))),
+              TextField(
+                  controller: name,
+                  decoration: const InputDecoration(
+                      labelText: 'Name', hintText: 'e.g. Office Humidor Thermometer')),
+              DropdownButtonFormField<String>(
+                initialValue: room,
+                decoration: const InputDecoration(labelText: 'Room'),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('(none)')),
+                  for (final r in rooms) DropdownMenuItem(value: r, child: Text(r)),
+                ],
+                onChanged: (v) => setD(() => room = v ?? ''),
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: type,
+                decoration: const InputDecoration(labelText: 'Type'),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('(none)')),
+                  for (final t in types) DropdownMenuItem(value: t, child: Text(t)),
+                ],
+                onChanged: (v) => setD(() => type = v ?? ''),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Track its battery'),
+                subtitle: const Text('Alert at 20%. Off for plugged-in devices.'),
+                value: tracked,
+                onChanged: (v) => setD(() => tracked = v),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (saved != true || !mounted) return;
+    final r = await _write(() => widget.api.setBatteryDevice(device,
+        name: name.text.trim(), room: room, type: type, tracked: tracked));
+    if (!mounted) return;
+    _say(r.ok ? 'Saved ${name.text.trim()}' : 'Not saved: ${_explain(r)}');
+    if (r.ok) await widget.onChanged();
+  }
+
   Future<void> _delete(Map e) async {
     final yes = await showDialog<bool>(
       context: context,
@@ -308,8 +374,20 @@ class _BatteriesTabState extends State<BatteriesTab> {
           controller: scroll,
           padding: const EdgeInsets.fromLTRB(18, 14, 18, 24),
           children: [
-            Text(batteryName(s),
-                style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+            Row(children: [
+              Expanded(
+                child: Text(batteryName(s),
+                    style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+              ),
+              TextButton.icon(
+                icon: const Icon(Icons.edit_rounded, size: 16),
+                label: const Text('Edit details'),
+                onPressed: () {
+                  Navigator.pop(c);
+                  _editDetails(s);
+                },
+              ),
+            ]),
             if ('${s['model'] ?? ''}'.isNotEmpty)
               Text('${s['model']}',
                   style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: .55))),

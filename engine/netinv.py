@@ -2117,16 +2117,14 @@ READING_APP = {"tuya": "smartlife", "govee-app": "govee", "ble": "govee",
                "blink": "blink", "flume": "flume", "ha": "ha"}
 
 
-def battery_details(device, mon, level, master, home_rows, device_rooms, rooms, apps):
-    """What a battery device is, so two 'Garage door' entries can be told
-    apart: {name, room, type, app, app_label, model} from its home.csv row
-    (found by name, then by the cloud name it is matched by, then by its
-    network row), else the vendor app's room and a type guessed from its
-    name. mon: its monitors.csv row or None; level: its battery reading."""
+def find_home_row(device, mon, provider, master, home_rows):
+    """The home.csv row a battery device is, or None, with how it is known:
+    (row, cloud_name, provider, network rows). Found by the monitor's name,
+    then by the cloud name it is matched by (tuya=Garage door), then by that
+    name under another app (HA relays SmartThings), then by its network row."""
     import home
     import monitor
     norm = monitor.norm
-    provider = (level or {}).get("provider", "")
     via, _, cloud_name = ((mon or {}).get("Match") or "").partition("=")
     cloud_name = cloud_name.strip() if cloud_name.strip() not in ("", "*") else device
     provider = provider or via.strip()
@@ -2144,6 +2142,18 @@ def battery_details(device, mon, level, master, home_rows, device_rooms, rooms, 
     if h is None and net:                 # its network row's name
         devs = {norm(r["Device"]) for r in net if r["Device"]}
         h = next((h for h in home_rows if h["Device"] and norm(h["Device"]) in devs), None)
+    return h, cloud_name, provider, net
+
+
+def battery_details(device, mon, level, master, home_rows, device_rooms, rooms, apps):
+    """What a battery device is, so two 'Garage door' entries can be told
+    apart: {name, room, type, app, app_label, model, tracked} from its
+    home.csv row (find_home_row), else the vendor app's room and a type
+    guessed from its name. mon: its monitors.csv row or None; level: its
+    battery reading. tracked: the monitor has a battery threshold."""
+    import home
+    h, cloud_name, provider, net = find_home_row(device, mon, (level or {}).get("provider", ""),
+                                                 master, home_rows)
     h = h or {}
     known = lambda v: v if v and v != home.TODO else ""  # noqa: E731
     room = known(h.get("Room")) or known(home.app_room(cloud_name, device_rooms, rooms))
@@ -2159,7 +2169,75 @@ def battery_details(device, mon, level, master, home_rows, device_rooms, rooms, 
     model = re.sub(r"\s+(id|serial|eui)\s+\S+.*$", "", h.get("Description", "")) or \
         (level or {}).get("model", "")
     return {"name": h.get("Name") or device, "room": room, "type": typ,
-            "app": app, "app_label": label, "model": model}
+            "app": app, "app_label": label, "model": model,
+            "tracked": bool((mon or {}).get("BatteryBelow"))}
+
+
+def set_battery_details(device, req):
+    """Save what a battery device is from the Batteries page: name, room and
+    type go to its home.csv row (the row already carrying that name, linked
+    by its cloud name, or a new one when there is none: the Flume sensor, a
+    Govee Bluetooth sensor), and 'tracked' turns its battery threshold on
+    (20%) or off. Raises ValueError / KeyError. Returns its new details,
+    with linked=True when it joined an existing row."""
+    import home
+    import monitor
+    mons = monitor.load(MONITORS_CSV)
+    mon = next((m for m in mons if m["Device"] == device), None)
+    if mon is None:
+        raise KeyError(f"'{device}' is not a monitored device")
+    rooms, types = home.load_rooms(ROOMS_CSV), home.load_types(TYPES_CSV)
+    name = " ".join(str(req.get("name", "")).split())[:home.MAX_NAME + 30]
+    room = home.clean_room(str(req.get("room", "")))
+    typ = str(req.get("type", "")).strip().lower()
+    canon = {r["Room"].lower(): r["Room"] for r in rooms}
+    if room and room.lower() not in canon:
+        raise ValueError(f"unknown room '{room}' (add it on the Rooms board first)")
+    if typ and typ not in home.type_names(types):
+        raise ValueError(f"unknown type '{typ}'")
+    master = load_master()
+    level = battery_levels().get(device) or {}
+    rows = home.load_home(HOME_CSV)          # read right before writing: edited by hand too
+    h, cloud_name, provider, _net = find_home_row(device, mon, level.get("provider", ""),
+                                                  master, rows)
+    app = home.app_key(READING_APP.get(provider, provider))
+    linked = False
+    if h is None and name:
+        # Named like a device home.csv already has (a Bluetooth H5101 named
+        # 'Office Humidor Thermometer', the Govee cloud's 'Display-Humidor'):
+        # it is that device, so link its cloud name to that row, never a
+        # second row with the same name. A key that row already uses for
+        # another name falls back to the raw provider ('ble=H5101_4670').
+        same = next((r for r in rows if monitor.norm(r["Name"]) == monitor.norm(name)), None)
+        if same is not None:
+            names = home.parse_app_names(same["AppNames"])
+            key = next((k for k in (app, provider) if k and names.get(k, cloud_name) == cloud_name),
+                       "")
+            if key:
+                names[key] = cloud_name
+                same["AppNames"] = home.format_app_names(names)
+                h, linked = same, True
+    if h is None:
+        h = {k: "" for k in home.HOME_FIELDS}
+        h.update(Native=app, Description=level.get("model", "") or cloud_name,
+                 AppNames=home.format_app_names({app or provider or "monitor": cloud_name}))
+        rows.append(h)
+    if not linked:                       # a linked row keeps its own spelling of the name
+        h["Name"] = name or h["Name"] or device
+    h["Room"] = canon.get(room.lower(), "") if room else h["Room"]
+    h["Type"] = typ or h["Type"]
+    home.write_csv(HOME_CSV, home.HOME_FIELDS, rows)
+    if "tracked" in req:
+        on = bool(req.get("tracked"))
+        if on and not mon["BatteryBelow"]:
+            mon["BatteryBelow"] = str(monitor.DEFAULT_BATTERY)
+        elif not on:
+            mon["BatteryBelow"] = ""
+        monitor.save(MONITORS_CSV, mons)
+    out = battery_details(device, mon, level or None, master, rows,
+                          home.load_device_rooms(APP_ROOMS_CSV), rooms, home.load_apps(APPS_CSV))
+    out["linked"] = linked
+    return out
 
 
 def api_batteries():
@@ -2188,7 +2266,10 @@ def api_batteries():
             apps))
     return {"devices": summaries,
             "log": sorted(log, key=lambda r: (r["Date"], r["Updated"]), reverse=True),
-            "events": list(battery.EVENTS)}
+            "events": list(battery.EVENTS),
+            # for the Edit details form
+            "rooms": [r["Room"] for r in rooms if r["Room"]],
+            "types": home.type_names(home.load_types(TYPES_CSV))}
 
 
 def api_battery(device):
@@ -4004,10 +4085,10 @@ td.notes{white-space:normal;min-width:16rem}
 .pill{background:#eef;border-radius:8px;padding:1px 6px;font-size:12px}
 .auto{background:#fef7e0}
 .edit{cursor:pointer;opacity:.4;margin-left:4px}.edit:hover{opacity:1}
-#form{display:none;border:1px solid #cdd;border-radius:8px;padding:10px;margin:.5rem 0;background:#f8fafd;max-width:44rem}
-#form label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#444}
-#form .row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
-#form .row>label{flex:1 1 9rem}
+#form,.dform{display:none;border:1px solid #cdd;border-radius:8px;padding:10px;margin:.5rem 0;background:#f8fafd;max-width:44rem}
+#form label,.dform label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#444}
+#form .row,.dform .row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+#form .row>label,.dform .row>label{flex:1 1 9rem}
 #msg{margin:.4rem 0;color:#137333}
 .ro{color:#777;font-size:12px}
 svg.spark{vertical-align:middle}
@@ -4042,6 +4123,19 @@ tr.grp .roll{font-weight:400;color:#3a516b;margin-left:10px}
  <button class=btn type=button id=f_cancel>Cancel</button>
  <input type=hidden id=f_id>
 </form>
+<form id=dform style="display:none" class=dform>
+ <div class=row><b id=d_title style="flex:1 1 100%"></b></div>
+ <div class=row>
+  <label>Name<input id=d_name maxlength=60 placeholder="e.g. Office Humidor Thermometer"></label>
+  <label>Room<select id=d_room></select></label>
+  <label>Type<select id=d_type></select></label>
+ </div>
+ <div class=row><label style="flex-direction:row;align-items:center;gap:6px">
+  <input type=checkbox id=d_track> Track its battery (alert at 20%)</label></div>
+ <button class="btn pri" type=submit>Save details</button>
+ <button class=btn type=button id=d_cancel>Cancel</button>
+ <input type=hidden id=d_dev>
+</form>
 <datalist id=devs></datalist>
 <div class=wrap><table><thead><tr><th>Device</th><th>Room</th><th>Type</th><th>App</th><th>Level</th>
  <th>Trend</th><th>Battery</th><th>Last changed</th><th>Days</th><th>Every</th><th>Next due</th><th></th></tr></thead>
@@ -4073,7 +4167,17 @@ function store(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 try{gb.value=localStorage.getItem('netinvBattGroup')||''}catch(e){}
 // friendly name, then what it is: 'Smart Life DY QSLOCK · Garage door' (the monitor's own name)
 function devCell(s){const sub=[s.model,s.name!=s.device?s.device:''].filter(Boolean).join(' · ');
- return `<b>${esc(s.name||s.device)}</b>`+(sub?`<div class=sub>${esc(sub)}</div>`:'')}
+ return `<b>${esc(s.name||s.device)}</b>`+
+  (WRITABLE?` <span class=edit title="edit name, room, type" data-details="${esc(s.device)}">&#9998;</span>`:'')+
+  (sub?`<div class=sub>${esc(sub)}</div>`:'')}
+function opt(v,cur,label){return `<option value="${esc(v)}"${v==cur?' selected':''}>${esc(label||v)}</option>`}
+function openDetails(dev){const s=B.devices.find(x=>x.device==dev);if(!s)return;
+ form.style.display='none';dform.style.display='block';d_dev.value=dev;
+ d_title.textContent='Edit details: '+(s.name||dev)+(s.name!=dev?' ('+dev+')':'');
+ d_name.value=s.name||dev;
+ d_room.innerHTML=opt('',s.room,'(none)')+(B.rooms||[]).map(r=>opt(r,s.room)).join('');
+ d_type.innerHTML=opt('',s.type,'(none)')+(B.types||[]).map(t=>opt(t,s.type)).join('');
+ d_track.checked=!!s.tracked;d_name.focus();dform.scrollIntoView({block:'nearest'})}
 function rowHtml(s){
  return `<tr><td>${devCell(s)}</td><td>${esc(s.room)||'<span class=ro>-</span>'}</td>`+
   `<td>${esc(s.type)||'<span class=ro>-</span>'}</td><td>${esc(s.app_label)||'<span class=ro>-</span>'}</td>`+
@@ -4123,10 +4227,18 @@ form.addEventListener('submit',async ev=>{ev.preventDefault();
   form.style.display='none';say((f_id.value?'Updated ':'Logged ')+body.event+' for '+body.device+'.');await load()}
  catch(e){say('Not saved: '+e.message,true)}});
 f_cancel.onclick=()=>{form.style.display='none'};
+dform.addEventListener('submit',async ev=>{ev.preventDefault();
+ const body={device:d_dev.value,name:d_name.value,room:d_room.value,type:d_type.value,tracked:d_track.checked};
+ try{const j=await send('/api/battery-device',body);dform.style.display='none';
+  say((j.details&&j.details.linked?'Linked '+body.device+' to '+body.name:'Saved details for '+(body.name||body.device))+
+   (body.tracked?'':' (battery no longer tracked)')+'.');await load()}
+ catch(e){say('Not saved: '+e.message,true)}});
+d_cancel.onclick=()=>{dform.style.display='none'};
 newb.onclick=()=>openForm('');
 document.addEventListener('click',async ev=>{const el=ev.target;
  const grp=el.closest&&el.closest('tr.grp');
  if(grp){collapsed[grp.dataset.grp]=!collapsed[grp.dataset.grp];render();return}
+ if(el.dataset.details!=null){openDetails(el.dataset.details);return}
  if(el.dataset.log!=null)openForm(el.dataset.log);
  else if(el.dataset.edit)openForm('',B.log.find(e=>e.Id==el.dataset.edit));
  else if(el.dataset.del){const e=B.log.find(x=>x.Id==el.dataset.del);
@@ -4186,7 +4298,7 @@ def make_server(args):
     CATEGORY_PATHS = ("/api/type-add", "/api/type-edit", "/api/type-delete",
                       "/api/app-add", "/api/app-edit", "/api/app-delete", "/api/room-edit")
     BATTERY_PATHS = {"/api/battery-log": "add", "/api/battery-edit": "edit",
-                     "/api/battery-delete": "delete"}
+                     "/api/battery-delete": "delete", "/api/battery-device": "device"}
     import hmac
     import threading
     write_lock = threading.Lock()
@@ -4327,6 +4439,11 @@ def make_server(args):
 
         def _battery(self, action, req):
             try:
+                if action == "device":
+                    d = set_battery_details(str(req.get("device", "")), req)
+                    _send(self, 200, _json.dumps({"ok": True, "details": d}).encode(),
+                          "application/json")
+                    return
                 e = battery_write(action, req)
             except ValueError as err:
                 _send(self, 400, _json.dumps({"error": str(err)}).encode(), "application/json")
