@@ -12,6 +12,9 @@ home.csv
 app_rooms.csv
 monitors.csv
 monitor_state.json
+battery_log.csv
+battery_history.csv
+.sync/
 
 # Cached/scraped pages and any raw captures
 *.html

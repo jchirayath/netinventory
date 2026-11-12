@@ -1,11 +1,12 @@
-// netinventory — macOS/iOS companion. Reads the read-only JSON API served by
+// netinventory — macOS/iOS companion. Reads the JSON API served by
 // `netinv serve` (default http://127.0.0.1:8787). On iPhone, point Host at the
-// Mac agent's LAN IP.
+// agent's LAN IP (`netinv serve --lan`); edits from there need its passcode.
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 
+import 'api.dart';
+import 'batteries.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -153,43 +154,6 @@ class NetInvApp extends StatelessWidget {
   }
 }
 
-class Api {
-  String base;
-  Api(this.base);
-
-  Future<dynamic> _get(String path) async {
-    final r = await http
-        .get(Uri.parse('$base$path'))
-        .timeout(const Duration(seconds: 6));
-    if (r.statusCode != 200) {
-      throw 'HTTP ${r.statusCode}';
-    }
-    return jsonDecode(r.body);
-  }
-
-  Future<Map<String, dynamic>> summary() async =>
-      (await _get('/api/summary')) as Map<String, dynamic>;
-  Future<List<dynamic>> devices() async =>
-      (await _get('/api/devices')) as List<dynamic>;
-  Future<List<dynamic>> alerts() async =>
-      (await _get('/api/alerts')) as List<dynamic>;
-
-  /// Rename a device. Returns the HTTP status (200 ok, 403 read-only,
-  /// 404 unknown MAC), or 0 if the request failed to reach the agent.
-  Future<int> setName(String mac, String name) async {
-    try {
-      final r = await http
-          .post(Uri.parse('$base/api/name'),
-              headers: {'Content-Type': 'application/json'},
-              body: jsonEncode({'mac': mac, 'name': name}))
-          .timeout(const Duration(seconds: 6));
-      return r.statusCode;
-    } catch (_) {
-      return 0;
-    }
-  }
-}
-
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
   @override
@@ -201,6 +165,7 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic> _summary = {};
   List<dynamic> _devices = [];
   List<dynamic> _alerts = [];
+  Map<String, dynamic> _batteries = {};
   String _filter = '';
   String? _error;
   bool _loading = false;
@@ -236,10 +201,15 @@ class _HomePageState extends State<HomePage> {
       final s = await _api.summary();
       final d = await _api.devices();
       final a = await _api.alerts();
+      Map<String, dynamic> b = {};
+      try {
+        b = await _api.batteries();
+      } catch (_) {} // an older agent without /api/batteries: empty tab
       setState(() {
         _summary = s;
         _devices = d;
         _alerts = a;
+        _batteries = b;
         _error = null;
       });
     } catch (e) {
@@ -251,16 +221,27 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _editHost() async {
     final ctrl = TextEditingController(text: _api.base);
+    final pass = TextEditingController(text: _api.passcode);
     final v = await showDialog<String>(
       context: context,
       builder: (c) => AlertDialog(
         title: const Text('Agent host'),
-        content: TextField(
-          controller: ctrl,
-          decoration: const InputDecoration(
-              helperText:
-                  'e.g. http://127.0.0.1:8787 (Mac) or the Mac\'s LAN IP'),
-        ),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: ctrl,
+            decoration: const InputDecoration(
+                helperText:
+                    'e.g. http://127.0.0.1:8787 (this Mac), or the agent\'s LAN IP'),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: pass,
+            obscureText: true,
+            decoration: const InputDecoration(
+                labelText: 'Passcode (for edits from this device)',
+                helperText: 'Set on the agent with: netinv set-passcode'),
+          ),
+        ]),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(c), child: const Text('Cancel')),
@@ -271,7 +252,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
     if (v != null && v.isNotEmpty) {
-      setState(() => _api = Api(v));
+      setState(() => _api = Api(v, passcode: pass.text));
       _refresh();
     }
   }
@@ -292,7 +273,10 @@ class _HomePageState extends State<HomePage> {
                 ? _errorView()
                 : _tab == 0
                     ? _deviceList()
-                    : _alertList(),
+                    : _tab == 1
+                        ? _alertList()
+                        : BatteriesTab(
+                            api: _api, data: _batteries, onChanged: _refresh),
           ),
         ]),
       ),
@@ -457,6 +441,8 @@ class _HomePageState extends State<HomePage> {
         child: Row(children: [
           item(0, Icons.lan_rounded, 'Devices'),
           item(1, Icons.notifications_rounded, 'Alerts', badge: high),
+          item(2, Icons.battery_std_rounded, 'Batteries',
+              badge: lowBatteryCount((_batteries['devices'] as List?) ?? const [])),
         ]),
       ),
     );

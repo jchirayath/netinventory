@@ -15,3 +15,8 @@ home_ssids = MyHomeWiFi
 monitor_cloud_every = 1h
 # Dead-man URL fetched after each poll, so you hear when this Mac goes quiet
 # heartbeat_url = https://hc-ping.com/your-uuid
+# Another copy (e.g. a Raspberry Pi) the watch keeps in step with, and how often
+# sync_target = pi@192.168.1.50
+# sync_every = 15m
+# Extra names `serve --lan` answers to, besides its LAN IP and hostname
+# serve_hosts = mac-studio.lan

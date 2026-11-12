@@ -10,12 +10,19 @@
 #         ./scan-jobs.sh restart [watch args]
 #         ./scan-jobs.sh status
 #         ./scan-jobs.sh logs                 (follow the log; Ctrl-C to quit)
+#         ./scan-jobs.sh serve-start [args]   the dashboard as a LaunchAgent too
+#                                             (default: --lan --allow-write once a
+#                                             passcode is set, else --allow-write)
+#         ./scan-jobs.sh serve-stop | serve-status
 set -euo pipefail
 
 ENGINE="$(cd "$(dirname "$0")/engine" && pwd)"
 LABEL="com.netinventory.watch"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$ENGINE/netinv-watch.log"
+SERVE_LABEL="com.netinventory.serve"
+SERVE_PLIST="$HOME/Library/LaunchAgents/$SERVE_LABEL.plist"
+SERVE_LOG="$ENGINE/netinv-serve.log"
 DOMAIN="gui/$(id -u)"
 DEFAULT_ARGS=(--interval 120 --no-router --email)
 
@@ -44,17 +51,27 @@ start() {
   [ ${#args[@]} -eq 0 ] && args=("${DEFAULT_ARGS[@]}")
   stop quiet
   local py; py="$(python_bin)"
+  write_agent "$LABEL" "$PLIST" "$LOG" "$py" netinv.py watch "${args[@]}"
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+  echo "Started $LABEL: netinv.py watch ${args[*]}"
+  echo "Log: $LOG"
+}
+
+# write_agent LABEL PLIST LOG PROGRAM ARGS...: a LaunchAgent that starts at
+# login and is restarted if it dies.
+write_agent() {
+  local label="$1" plist="$2" log="$3"; shift 3
   local argxml="" a
-  for a in "$py" netinv.py watch "${args[@]}"; do
+  for a in "$@"; do
     argxml+="    <string>$a</string>"$'\n'
   done
-  mkdir -p "$(dirname "$PLIST")"
-  cat > "$PLIST" <<EOF
+  mkdir -p "$(dirname "$plist")"
+  cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
   <array>
 $argxml  </array>
@@ -68,14 +85,46 @@ $argxml  </array>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>$LOG</string>
-  <key>StandardErrorPath</key><string>$LOG</string>
+  <key>StandardOutPath</key><string>$log</string>
+  <key>StandardErrorPath</key><string>$log</string>
 </dict>
 </plist>
 EOF
-  launchctl bootstrap "$DOMAIN" "$PLIST"
-  echo "Started $LABEL: netinv.py watch ${args[*]}"
-  echo "Log: $LOG"
+}
+
+serve_loaded() { launchctl print "$DOMAIN/$SERVE_LABEL" >/dev/null 2>&1; }
+
+serve_start() {
+  local args=("$@") py; py="$(python_bin)"
+  if [ ${#args[@]} -eq 0 ]; then
+    # LAN writes need a passcode (serve refuses them without one)
+    if (cd "$ENGINE" && "$py" -c 'import netinv,sys; sys.exit(0 if netinv.serve_passcode() else 1)'); then
+      args=(--lan --allow-write)
+    else
+      args=(--allow-write)
+      echo "No passcode set, so the dashboard is this Mac only. For your phone: netinv set-passcode, then serve-start again."
+    fi
+  fi
+  serve_stop quiet
+  write_agent "$SERVE_LABEL" "$SERVE_PLIST" "$SERVE_LOG" "$py" netinv.py serve "${args[@]}"
+  launchctl bootstrap "$DOMAIN" "$SERVE_PLIST"
+  echo "Started $SERVE_LABEL: netinv.py serve ${args[*]}"
+  echo "Log: $SERVE_LOG"
+}
+
+serve_stop() {
+  if serve_loaded; then
+    launchctl bootout "$DOMAIN/$SERVE_LABEL" 2>/dev/null || true
+    [ "${1:-}" = quiet ] || echo "Stopped the dashboard."
+  elif [ "${1:-}" != quiet ]; then
+    echo "The dashboard LaunchAgent wasn't running."
+  fi
+}
+
+serve_status() {
+  if serve_loaded; then echo "LaunchAgent $SERVE_LABEL: loaded"; else echo "LaunchAgent $SERVE_LABEL: not loaded"; fi
+  [ -f "$SERVE_LOG" ] && { echo "--- last lines of $SERVE_LOG"; tail -n 6 "$SERVE_LOG"; }
+  return 0
 }
 
 stop() {
@@ -119,5 +168,8 @@ case "${1:-}" in
   restart) shift; start "$@" ;;
   status)  status ;;
   logs)    touch "$LOG"; tail -f "$LOG" ;;
-  *)       sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  serve-start|serve-restart) shift; serve_start "$@" ;;
+  serve-stop)   serve_stop ;;
+  serve-status) serve_status ;;
+  *)       sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

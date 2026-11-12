@@ -11,7 +11,9 @@ exposes them. netinv merges those names back into devices.csv:
     name only     -> written to cloud_devices.csv as a reference list
 
 Credentials live in the macOS Keychain as generic-passwords under the service
-"netinv-cloud-<provider>", one account per field. Store them with:
+"netinv-cloud-<provider>", one account per field. Where there is no Keychain
+(Linux, e.g. a Raspberry Pi) they go in ~/.netinv/credentials.json, readable
+by its owner only ($NETINV_CREDENTIALS moves it). Store them with:
 
     ./netinv.py set-cloud <provider>
 
@@ -84,7 +86,41 @@ def _service(provider):
     return f"netinv-cloud-{provider}"
 
 
+def _keychain():
+    import shutil
+    import sys
+    return sys.platform == "darwin" and shutil.which("security") is not None
+
+
+def _cred_file():
+    return os.path.expanduser(os.environ.get("NETINV_CREDENTIALS", "~/.netinv/credentials.json"))
+
+
+def _cred_load():
+    try:
+        with open(_cred_file()) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _cred_save(d):
+    path = _cred_file()
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump(d, f, indent=1, sort_keys=True)
+    os.chmod(tmp, 0o600)           # the mode above only applies to a new file
+    os.replace(tmp, path)
+
+
 def kc_set(provider, account, secret):
+    if not _keychain():
+        d = _cred_load()
+        d.setdefault(provider, {})[account] = secret
+        _cred_save(d)
+        return
     subprocess.run(
         ["security", "add-generic-password", "-s", _service(provider),
          "-a", account, "-w", secret, "-U",
@@ -93,12 +129,20 @@ def kc_set(provider, account, secret):
 
 
 def kc_delete(provider, account):
+    if not _keychain():
+        d = _cred_load()
+        if account in d.get(provider, {}):
+            del d[provider][account]
+            _cred_save(d)
+        return
     subprocess.run(
         ["security", "delete-generic-password", "-s", _service(provider),
          "-a", account], capture_output=True, text=True)
 
 
 def kc_get(provider, account):
+    if not _keychain():
+        return _cred_load().get(provider, {}).get(account) or None
     r = subprocess.run(
         ["security", "find-generic-password", "-s", _service(provider),
          "-a", account, "-w"],
