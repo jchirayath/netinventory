@@ -116,6 +116,8 @@ overwrites a name you set.
 # Dashboard, sync and deploy
 ./netinv.py serve [--host H] [--port 8787] [--lan] [--allow-write]   # JSON API + web dashboard
 ./netinv.py sync user@host[:path] [--dry-run] [--scanner]        # merge edits with another copy
+./netinv.py agent [https://net.aspl.net] [--once]                 # keep a web copy in step, outbound only
+./netinv.py agent-token [--generate]                             # the agent's shared token
 ../deploy.sh user@host [--copy-credentials]                      # install/update on a Pi
 
 # Credentials and settings
@@ -439,20 +441,50 @@ per forwarded client. Add the names the proxy answers to (`netinv.local`) to
 `netinventory.service` as a system service; homehub updates its copy with
 its own `netinventory/update.sh`.
 
-## A read-only copy on the web (net.aspl.net)
+## An editable copy on the web (net.aspl.net), kept in step by the Pi
 
-```bash
-./deploy-betty.sh --check      # every page and data file redirects to sign-in?
-./deploy-betty.sh --dry-run    # what would change
-./deploy-betty.sh              # export + publish a fresh snapshot
+```
+  Mac (scans) ── sync every 15 min ──▶ Pi (serves at home) ── netinv agent ──▶ net.aspl.net
+                ◀── edits ────────────                     ◀── edits ───────   (betty, Entra)
 ```
 
-`netinv.py export-site DIR` writes the three pages and every GET API answer
-as static files. `deploy-betty.sh` copies that snapshot to betty's Caddy,
-behind the shared Entra ID sign-in. It needs `az login`, and it refuses to
-publish, or takes the data back down, if any page or data file answers
-without sign-in. The copy is read-only: edits are made at home. Run it from
-the checkout that has your data, or set `NETINV_HOME`.
+net.aspl.net runs `netinv serve --allow-write` on a cloud VM, behind the
+Entra ID sign-in, with edits also needing the passcode. It can't reach your
+network, and nothing on the internet can reach into it: the Pi's `netinv
+agent` makes **one outbound HTTPS connection** and keeps it open (the
+pattern poolhound uses for its pool controller).
+
+- The agent holds `GET /api/agent/stream` open. An edit on net.aspl.net
+  sends `sync` down it, so the change reaches the Pi within seconds, and
+  the Mac at its next sync.
+- It also syncs every `agent_every` (5 minutes): the Pi's scan data, levels
+  and events go up (scanner mode), and edits merge both ways under the same
+  rules as `netinv sync`.
+- An idle sync costs one small request. The agent sends fingerprints of what
+  it last synced, and the server sends back only files that differ. Bodies
+  are gzipped, and nothing is written to the Pi's SD card when nothing
+  changed.
+- An import is refused (409) if the server's file changed after the export,
+  so an edit made on the web mid-sync is never overwritten. The agent just
+  syncs again.
+- `/api/agent/*` skips Entra and needs a bearer token (`agent-token`),
+  compared in constant time, with the passcode lockout applied to wrong
+  tokens. Without a token set, those paths don't exist.
+
+```bash
+# on the server copy, once (or pipe one copy's token to the other with creds-export | creds-import)
+netinv agent-token --generate
+# on the Pi: agent_url = https://net.aspl.net in ~/.netinv/config, the same token, then
+netinv agent --once            # one sync, to test
+netinv agent                   # run it (homehub runs it as netinventory-agent.service)
+```
+
+Run `./deploy-betty.sh` to ship this checkout's committed engine to
+net.aspl.net, and `./deploy-betty.sh --check` to confirm that every page
+and data path redirects to the sign-in while the agent path wants its
+token. The script needs `az login` and refuses to ship if the gates aren't
+in place. `netinv.py export-site DIR` still writes a static read-only copy
+(the three pages and every GET answer) for any plain web server.
 
 ## Identifying unknown devices (fingerprinting)
 
@@ -572,6 +604,8 @@ non-`192.168.1.x` networks work by setting it.
 | `NETINV_SYNC_EVERY` | `sync_every` | `15m` | How often the watch syncs |
 | `NETINV_SYNC_KEY` | `sync_key` | — | ssh identity file for the sync target |
 | `NETINV_SYNC_SCANNER` | `sync_scanner` | `no` | This copy scans: its scan data, monitor state and events replace the target's |
+| `NETINV_AGENT_URL` | `agent_url` | — | Server copy `netinv agent` keeps in step (outbound HTTPS) |
+| `NETINV_AGENT_EVERY` | `agent_every` | `5m` | How often the agent syncs regardless of nudges |
 | `NETINV_SERVE_HOSTS` | `serve_hosts` | — | Extra names `serve` answers to (e.g. `mac-studio.lan`), comma-separated |
 | `NETINV_CREDENTIALS` | — | `~/.netinv/credentials.json` | Credential file where there's no Keychain (Linux) |
 

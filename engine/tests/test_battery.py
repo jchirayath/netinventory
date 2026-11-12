@@ -349,7 +349,7 @@ class TestCredsCopy(unittest.TestCase):
             netinv.cmd_creds(argparse.Namespace(action="export"))
 
 
-class TestServer(unittest.TestCase):
+class _ServerCase(unittest.TestCase):
     """A real server on a spare port, with the data files in a temp dir."""
 
     def start(self, allow_write=True, passcode="", local=True):
@@ -393,6 +393,8 @@ class TestServer(unittest.TestCase):
         with urllib.request.urlopen(self.base + path, timeout=10) as r:
             return r.read().decode()
 
+
+class TestServer(_ServerCase):
     def test_log_edit_delete_round_trip(self):
         self.start()
         code, j = self.post("/api/battery-log", {"device": "Garage Lock", "battery": "4x AA",
@@ -575,6 +577,93 @@ class TestServer(unittest.TestCase):
         with mock.patch.object(netinv, "serve_passcode", return_value=""), \
                 self.assertRaises(SystemExit):
             netinv.make_server(args)
+
+
+class TestAgent(_ServerCase):
+    """The Pi's agent against a real server copy: token auth, a two-way sync
+    over HTTP, fingerprints that make an idle sync free, and the nudge."""
+    TOKEN = "t0ken-for-tests-only-abcdefghij"
+
+    def start_agent_server(self, token=TOKEN):
+        self.patches_extra = [mock.patch.object(netinv, "agent_token", return_value=token)]
+        for p in self.patches_extra:
+            p.start()
+        self.start(passcode="pass-for-tests", local=True)
+        self.patches += self.patches_extra
+        p = mock.patch.object(netinv, "DATA_DIR", self.tmp.name)
+        p.start()
+        self.patches.append(p)
+        self.pi = tempfile.TemporaryDirectory()
+        self.addCleanup(self.pi.cleanup)
+
+    def raw(self, path, data=None, token=TOKEN):
+        h = {"Content-Type": "application/json"}
+        if token:
+            h["Authorization"] = "Bearer " + token
+        req = urllib.request.Request(self.base + path, data=data, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_agent_paths_absent_without_a_token(self):
+        self.start_agent_server(token="")
+        self.assertEqual(self.raw("/api/agent/sync", b'{"op":"export"}'), 404)
+        self.assertEqual(self.raw("/api/agent/stream"), 404)
+
+    def test_bad_token_refused(self):
+        self.start_agent_server()
+        self.assertEqual(self.raw("/api/agent/sync", b'{"op":"export"}', token="wrong"), 401)
+        self.assertEqual(self.raw("/api/agent/sync", b'{"op":"export"}', token=""), 401)
+        self.assertEqual(self.raw("/api/agent/stream", token="nope"), 401)
+        self.assertEqual(self.raw("/api/agent/sync", b'{"op":"rm -rf"}'), 400)
+
+    def test_two_way_sync_over_http(self):
+        import sync
+        self.start_agent_server()
+        log = battery.load_log(os.path.join(self.pi.name, "battery_log.csv"), include_deleted=True)
+        battery.add_entry(log, "Garage Lock", "replaced", TODAY, "4x AA", "", "from the Pi")
+        battery.save_log(os.path.join(self.pi.name, "battery_log.csv"), log)
+        tgt = sync.HttpTarget(self.base, self.TOKEN)
+        changed = sync.sync(self.pi.name, tgt, log=lambda m: None, scanner=True)
+        self.assertEqual(changed["battery_log.csv"], (False, True))
+        server = json.loads(self.get("/api/batteries"))
+        self.assertEqual(server["log"][0]["Notes"], "from the Pi")
+        # an edit on the server (net.aspl.net) comes back down
+        self.assertEqual(self.post("/api/battery-log", {"device": "Front Door Lock",
+                                                        "notes": "from the web"})[0], 200)
+        changed = sync.sync(self.pi.name, tgt, log=lambda m: None, scanner=True)
+        self.assertEqual(changed["battery_log.csv"], (True, False))
+        pi_log = battery.load_log(os.path.join(self.pi.name, "battery_log.csv"))
+        self.assertEqual(sorted(e["Notes"] for e in pi_log), ["from the Pi", "from the web"])
+        # nothing changed anywhere: the server sends no file text at all
+        with mock.patch.object(tgt, "_post", wraps=tgt._post) as post:
+            self.assertEqual(sync.sync(self.pi.name, tgt, log=lambda m: None, scanner=True), {})
+        reply = post.call_args_list
+        self.assertEqual(len(reply), 1)          # export only, no import
+
+    def test_import_refuses_a_file_that_changed_since_export(self):
+        import sync
+        with tempfile.TemporaryDirectory() as d:
+            sync.import_dir(d, {"rooms.csv": "Room\nGarage\n"})
+            with self.assertRaises(sync.Conflict):
+                sync.agent_import(d, {"rooms.csv": "Room\nAttic\n"},
+                                  {"rooms.csv": sync.fingerprint("Room\n")})
+            sync.agent_import(d, {"rooms.csv": "Room\nAttic\n"},
+                              {"rooms.csv": sync.fingerprint("Room\nGarage\n")})
+            with self.assertRaises(ValueError):
+                sync.agent_import(d, {"../evil.csv": "x"}, {})
+
+    def test_stream_nudges_after_an_edit(self):
+        self.start_agent_server()
+        req = urllib.request.Request(self.base + "/api/agent/stream",
+                                     headers={"Authorization": "Bearer " + self.TOKEN})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.readline(), b": connected\n")
+            r.readline()
+            self.assertEqual(self.post("/api/battery-log", {"device": "Garage Lock"})[0], 200)
+            self.assertEqual(r.readline(), b"event: sync\n")
 
 
 if __name__ == "__main__":

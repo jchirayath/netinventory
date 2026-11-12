@@ -112,6 +112,10 @@ SYNC_SCANNER = _cfg("sync_scanner", "NETINV_SYNC_SCANNER", "no").strip().lower()
     "yes", "true", "1", "on")
 # Extra Host names serve answers to, besides localhost, this machine's name and LAN IP.
 SERVE_HOSTS = _cfg("serve_hosts", "NETINV_SERVE_HOSTS", "")
+# `netinv agent`: this copy (the Pi) connects OUT to a server copy at this URL
+# (https://net.aspl.net) and keeps the two in step; nothing connects in.
+AGENT_URL = _cfg("agent_url", "NETINV_AGENT_URL", "")
+AGENT_EVERY = _cfg("agent_every", "NETINV_AGENT_EVERY", "5m")
 
 
 def subnet_prefix(subnet=None):
@@ -2412,6 +2416,89 @@ def cmd_sync(args):
         sys.exit(1)
 
 
+def agent_token():
+    """The shared secret between the agent (the Pi) and the server copy."""
+    import connectors
+    return connectors.kc_get("agent", "token") or ""
+
+
+def cmd_agent_token(args):
+    """Show whether an agent token is set (never the token), or --generate one.
+    Copy it to the other side with creds-export | creds-import."""
+    import connectors
+    import hashlib
+    import secrets
+    if args.generate:
+        connectors.kc_set("agent", "token", secrets.token_urlsafe(32))
+    t = agent_token()
+    if not t:
+        sys.exit("  no agent token: netinv agent-token --generate")
+    print(f"  agent token set (sha256 {hashlib.sha256(t.encode()).hexdigest()[:12]}…)"
+          " — compare this on both copies")
+
+
+def cmd_agent(args):
+    """Keep this copy and a server copy in step over one outbound HTTPS
+    connection (the poolhound pattern): hold GET /api/agent/stream open, sync
+    when the server says something changed, and every AGENT_EVERY regardless.
+    This copy's scan data, levels and events replace the server's (it doesn't
+    scan); edits merge both ways (sync.py). Prints only changes and errors."""
+    import sync
+    import monitor
+    url = (args.url or AGENT_URL).rstrip("/")
+    tgt = sync.HttpTarget(url, agent_token())   # raises on a bad url / no token
+    every = monitor.parse_duration(args.every or AGENT_EVERY) or 300
+    last_err = [""]
+
+    def say_err(msg):
+        if msg != last_err[0]:          # once per distinct error, not per retry
+            print(f"  ! {msg}", flush=True)
+            last_err[0] = msg
+
+    def run():
+        for _ in range(3):              # a conflict means the server changed mid-sync
+            try:
+                changed = sync.sync(DATA_DIR, tgt, log=lambda m: None, scanner=True)
+            except sync.Conflict:
+                continue
+            except Exception as e:  # noqa: BLE001
+                say_err(f"sync with {url}: {e}")
+                return False
+            if last_err[0]:
+                print("  sync working again", flush=True)
+                last_err[0] = ""
+            if changed:
+                print(f"  {now_stamp()} synced: " + ", ".join(
+                    f"{n} ({'here' if m else ''}{' and ' if m and t else ''}{'server' if t else ''})"
+                    for n, (m, t) in sorted(changed.items())), flush=True)
+            return True
+        say_err(f"sync with {url}: kept changing; trying again later")
+        return False
+
+    if args.once:
+        sys.exit(0 if run() else 1)
+    last, backoff = 0.0, 5
+    while True:
+        if time.time() - last >= every:
+            run()
+            last = time.time()
+        try:
+            req = urllib.request.Request(url + "/api/agent/stream", headers={
+                "Authorization": "Bearer " + tgt.token, "Accept": "text/event-stream",
+                "User-Agent": "netinv-agent"})
+            # the server pings every 25s, so 90s of silence means a dead link
+            with urllib.request.urlopen(req, timeout=90) as r:
+                backoff = 5
+                for line in r:
+                    if line.startswith(b"event: sync") or time.time() - last >= every:
+                        run()
+                        last = time.time()
+        except Exception as e:  # noqa: BLE001
+            say_err(f"stream {url}: {e}")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 300)
+
+
 # Login tokens cached outside the credential store, copied along with it.
 TOKEN_FILES = ("~/.netinv_blink.json", "~/.netinv_govee.json")
 
@@ -2421,7 +2508,8 @@ def cmd_creds(args):
     JSON on stdout, for `deploy.sh --copy-credentials` to pipe over ssh;
     creds-import: store that JSON here. Never written to a file in transit."""
     import connectors
-    providers = dict(connectors.PROVIDERS, email=EMAIL_FIELDS, serve=[("passcode", True, "")])
+    providers = dict(connectors.PROVIDERS, email=EMAIL_FIELDS, serve=[("passcode", True, "")],
+                     agent=[("token", True, "")])
     if args.action == "export":
         if sys.stdout.isatty():
             sys.exit("  refusing to print secrets to a terminal; pipe it (deploy.sh does)")
@@ -4408,6 +4496,16 @@ def make_server(args):
     write_lock = threading.Lock()
     guard = PasscodeGuard()
     hosts = None                         # HostCheck, once the port is bound (below)
+    # The agent (the Pi) connects to /api/agent/* with this token; unset, those
+    # paths don't exist. `changed` wakes its stream after an edit made here.
+    agent_secret = agent_token()
+    changed = threading.Condition()
+    generation = [0]
+
+    def bump():
+        with changed:
+            generation[0] += 1
+            changed.notify_all()
 
     def _send(self, code, body, ctype):
         # No Access-Control-Allow-Origin: the pages are same-origin and the app
@@ -4438,6 +4536,10 @@ def make_server(args):
             if not self._host_ok():
                 return
             path = self.path.split("?")[0]
+            if path == "/api/agent/stream":
+                if self._agent_ok():
+                    self._agent_stream()
+                return
             page = {"/": _DASHBOARD, "/index.html": _DASHBOARD,
                     "/rooms": _ROOMS_PAGE, "/batteries": _BATTERY_PAGE}.get(path)
             if page:
@@ -4465,7 +4567,8 @@ def make_server(args):
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 n = -1
-            if not 0 <= n <= 1_000_000:
+            agent_call = self.path.split("?")[0] == "/api/agent/sync"
+            if not 0 <= n <= (64_000_000 if agent_call and agent_secret else 1_000_000):
                 self.close_connection = True
                 _send(self, 413, b'{"error":"body too large"}', "application/json")
                 return
@@ -4473,6 +4576,10 @@ def make_server(args):
             if not self._host_ok():
                 return
             path = self.path.split("?")[0]
+            if agent_call:
+                if self._agent_ok():
+                    self._agent_sync(raw)
+                return
             if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
                             "/api/type", "/api/app", "/api/delete", "/api/room-delete",
                             "/api/room-rename", *CATEGORY_PATHS, *BATTERY_PATHS):
@@ -4540,6 +4647,90 @@ def make_server(args):
                     self._category(path, req)
                 else:
                     self._room(path, req)
+            bump()   # tell a connected agent to sync now
+
+        def _agent_ok(self):
+            """Bearer token from the agent, compared in constant time; wrong
+            ones count toward the same per-client lockout as passcodes."""
+            if not agent_secret:
+                self.send_error(404)
+                return False
+            client = _client_key(self.client_address[0], self.headers)
+            if guard.locked(client):
+                _send(self, 429, b'{"error":"too many bad tokens; try again later"}',
+                      "application/json")
+                return False
+            auth = self.headers.get("Authorization", "")
+            given = auth[7:] if auth.startswith("Bearer ") else ""
+            if not hmac.compare_digest(given.encode(), agent_secret.encode()):
+                guard.fail(client)
+                _send(self, 401, b'{"error":"bad agent token"}', "application/json")
+                return False
+            return True
+
+        def _agent_sync(self, raw):
+            import gzip
+            import zlib
+            import sync
+            try:
+                if self.headers.get("Content-Encoding", "").lower() == "gzip":
+                    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    raw = d.decompress(raw, 256_000_000)   # no decompression bombs
+                    if d.unconsumed_tail:
+                        raise ValueError("body too large")
+                req = _json.loads(raw or b"{}")
+                if not isinstance(req, dict):
+                    raise ValueError("bad JSON")
+                with write_lock:
+                    if req.get("op") == "export":
+                        out = sync.agent_export(DATA_DIR, req.get("have"))
+                    elif req.get("op") == "import":
+                        sync.agent_import(DATA_DIR, req.get("files"), req.get("expect"))
+                        out = {"ok": True}
+                    else:
+                        raise ValueError("op must be export or import")
+            except sync.Conflict as e:
+                _send(self, 409, _json.dumps({"error": f"{e} changed; sync again"}).encode(),
+                      "application/json")
+                return
+            except (ValueError, TypeError, zlib.error) as e:
+                _send(self, 400, _json.dumps({"error": str(e)[:200]}).encode(),
+                      "application/json")
+                return
+            body = gzip.compress(_json.dumps(out).encode())
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _agent_stream(self):
+            """Server-sent events: 'sync' after an edit here, a comment every
+            25s so both ends notice a dead link, closed after 10 minutes (the
+            agent reconnects)."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.close_connection = True
+            seen, end = generation[0], time.monotonic() + 600
+            try:
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+                while time.monotonic() < end:
+                    with changed:
+                        changed.wait_for(lambda: generation[0] != seen, timeout=25)
+                    if generation[0] != seen:
+                        seen = generation[0]
+                        self.wfile.write(b"event: sync\ndata: {}\n\n")
+                    else:
+                        self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+            except OSError:
+                return
 
         def _battery(self, action, req):
             try:
@@ -4977,6 +5168,16 @@ def main():
                     help="this copy scans: its scan data, monitor state and events replace "
                          "the target's (default: sync_scanner from the config)")
     sy.set_defaults(func=cmd_sync, action="sync")
+    ag = sub.add_parser("agent", help="keep in step with a server copy over one outbound "
+                                      "HTTPS connection (agent_url, e.g. https://net.aspl.net)")
+    ag.add_argument("url", nargs="?", help="server copy (default: agent_url from the config)")
+    ag.add_argument("--every", help="sync at least this often (default: agent_every, 5m)")
+    ag.add_argument("--once", action="store_true", help="sync once and exit")
+    ag.set_defaults(func=cmd_agent)
+    at = sub.add_parser("agent-token", help="show whether the agent token is set, or "
+                                            "--generate one (copy it with creds-export)")
+    at.add_argument("--generate", action="store_true", help="make and store a new token")
+    at.set_defaults(func=cmd_agent_token)
     for name, act in (("sync-export", "export"), ("sync-import", "import")):
         x = sub.add_parser(name, help=f"(used by sync over ssh) {act} this copy's synced files")
         x.set_defaults(func=cmd_sync, action=act, target=None, dry_run=False)

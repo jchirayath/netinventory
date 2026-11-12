@@ -23,12 +23,16 @@ events replace the other's. Edits still merge both ways.
 The last synced state lives in .sync/<target>/ next to the data, per
 target. Standard library only."""
 import csv
+import gzip
+import hashlib
 import io
 import json
 import os
 import re
 import shlex
 import subprocess
+import urllib.error
+import urllib.request
 
 # name -> (rule, key columns, columns merged (None = all), deletions sync?)
 FILES = {
@@ -43,6 +47,7 @@ FILES = {
     # only in scanner mode, from the scanner to the other copy
     "monitor_state.json":  ("push", (), None, False),
     "events.csv":          ("push", (), None, False),
+    "app_rooms.csv":       ("push", (), None, False),
 }
 
 
@@ -234,9 +239,100 @@ class SshTarget:
         self._run("sync-import", stdin=json.dumps(files))
 
 
+def _read(path, missing=""):
+    if not os.path.exists(path):
+        return missing
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def fingerprint(text):
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def agent_export(data_dir, have=None):
+    """The server side of HttpTarget.export: files whose text differs from the
+    fingerprints the agent says it holds, and the names of those that match."""
+    have = have if isinstance(have, dict) else {}
+    files, same = {}, []
+    for name, f in export_dir(data_dir).items():
+        if have.get(name) == fingerprint(f["text"]):
+            same.append(name)
+        else:
+            files[name] = f
+    return {"files": files, "same": same}
+
+
+class Conflict(Exception):
+    """The other copy changed between our export and our import: sync again."""
+
+
+def agent_import(data_dir, files, expect):
+    """The server side of HttpTarget.import_: write `files` only if each is
+    still what was exported (`expect`: name -> fingerprint, "" = absent), so an
+    edit made on the server in between is never overwritten."""
+    if not isinstance(files, dict) or not isinstance(expect, dict):
+        raise ValueError("files and expect must be objects")
+    for name in files:
+        if name not in FILES or not isinstance(files[name], str):
+            raise ValueError(f"refusing to write {name!r}")
+        p = os.path.join(data_dir, name)
+        now = _read(p, None)
+        if (fingerprint(now) if now is not None else "") != expect.get(name, ""):
+            raise Conflict(name)
+    import_dir(data_dir, files)
+
+
+class HttpTarget:
+    """A copy reached over HTTPS: the agent on the Pi calling the server
+    (net.aspl.net) at /api/agent/sync with a bearer token. The Pi connects
+    out; nothing connects in. Bodies are gzipped JSON, and only files that
+    differ from the last synced copy travel."""
+
+    def __init__(self, url, token, timeout=60):
+        if not re.fullmatch(r"https?://[A-Za-z0-9.-]+(:\d+)?(/[A-Za-z0-9._/-]*)?", url or ""):
+            raise ValueError(f"bad agent url {url!r}")
+        if not token:
+            raise ValueError("no agent token: netinv agent-token")
+        self.url, self.token, self.timeout = url.rstrip("/"), token, timeout
+        self.label, self._seen = url, {}
+
+    def _post(self, body):
+        req = urllib.request.Request(
+            self.url + "/api/agent/sync", data=gzip.compress(json.dumps(body).encode()),
+            headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json",
+                     "Content-Encoding": "gzip", "User-Agent": "netinv-agent"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                data = r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                raise Conflict(e.read()[:200].decode("utf-8", "replace")) from None
+            raise RuntimeError(f"{self.url}: HTTP {e.code} {e.read()[:200]!r}") from None
+        return json.loads(gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data)
+
+    def export(self, bases=None):
+        bases = bases or {}
+        got = self._post({"op": "export",
+                          "have": {n: fingerprint(t) for n, t in bases.items() if t}})
+        files = dict(got.get("files") or {})
+        for name in got.get("same") or []:
+            if name in FILES and bases.get(name):
+                files[name] = {"text": bases[name], "mtime": 0}
+        self._seen = {n: fingerprint(f.get("text", "")) for n, f in files.items()}
+        return files
+
+    def import_(self, files):
+        expect = {n: self._seen.get(n, "") for n in files}
+        self._post({"op": "import", "files": files, "expect": expect})
+
+
 def target(spec, key=""):
     """'user@host[:path]' -> SshTarget (key: an ssh identity file); an
-    existing directory -> LocalTarget."""
+    existing directory -> LocalTarget; an https:// URL -> HttpTarget (key:
+    the agent token)."""
+    if spec.startswith(("https://", "http://")):
+        return HttpTarget(spec, key)
     if os.path.isdir(os.path.expanduser(spec)):
         return LocalTarget(os.path.expanduser(spec))
     host, _, path = spec.partition(":")
@@ -252,15 +348,20 @@ def sync(data_dir, tgt, dry_run=False, log=print, scanner=False):
     monitor state replace tgt's). Returns {name: (mine changed, theirs
     changed)} for the files that differed."""
     base_dir = os.path.join(data_dir, ".sync", slug(tgt.label))
+    old = {}
+    for name in FILES:
+        bp = os.path.join(base_dir, name)
+        old[name] = _read(bp)
     mine = export_dir(data_dir)
-    theirs = tgt.export()
+    # HttpTarget sends only what differs from the last synced copy
+    theirs = tgt.export(old) if isinstance(tgt, HttpTarget) else tgt.export()
     to_mine, to_theirs, changed, bases = {}, {}, {}, {}
     for name in FILES:
         m, t = mine.get(name), theirs.get(name)
         if m is None and t is None:
             continue
         bp = os.path.join(base_dir, name)
-        base_text = open(bp, encoding="utf-8").read() if os.path.exists(bp) else ""
+        base_text = old[name]
         mine_newer = (m or {}).get("mtime", 0) >= (t or {}).get("mtime", 0)
         new_m, new_t, new_b = merge_file(name, base_text, (m or {}).get("text", ""),
                                          (t or {}).get("text", ""), mine_newer, scanner)
@@ -282,8 +383,10 @@ def sync(data_dir, tgt, dry_run=False, log=print, scanner=False):
         import_dir(data_dir, to_mine)
     # Only once both sides hold the merge: a failed write must not make the
     # next sync think unsent edits are already shared.
+    # Unchanged bases aren't rewritten: an idle sync writes nothing (SD cards).
     os.makedirs(base_dir, exist_ok=True)
     for bp, text in bases.items():
-        with open(bp, "w", encoding="utf-8", newline="") as f:
-            f.write(text)
+        if text != old.get(os.path.basename(bp)):
+            with open(bp, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
     return changed
