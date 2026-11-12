@@ -5,9 +5,11 @@
 <h1 align="center">netinventory-app</h1>
 
 macOS + iOS companion for [netinventory](https://github.com/jchirayath/netinventory).
-Flutter app that reads the read-only JSON API served by `netinv serve` and shows
-your network inventory — a searchable device list (group / sort / filter by
-status, band, category and signal), a rollup summary, and alerts.
+Flutter app over the JSON API served by `netinv serve`. It shows your network
+inventory (a searchable device list you can group, sort and filter by status,
+band, category and signal), a rollup summary, alerts, and a **Batteries** tab
+for levels and battery changes. Renames and battery entries are written back
+when the agent allows edits.
 
 <p align="center">
   <img src="../assets/screenshots/app-devices.png" alt="Device list" width="820">
@@ -15,13 +17,14 @@ status, band, category and signal), a rollup summary, and alerts.
 
 ## Model
 
-The Python engine (netinventory) is the **scanner agent** and runs on a Mac
-(`netinv serve` exposes `/api/devices|summary|alerts|events`). This app is the
-**viewer**:
+The Python engine (netinventory) is the **agent**: it scans on a Mac and can
+serve from a Raspberry Pi (`netinv serve` exposes
+`/api/devices|summary|alerts|events|batteries`). This app is the **viewer**:
 
 - **macOS**: talks to the local agent at `http://127.0.0.1:8787`.
 - **iOS**: can't scan (sandbox); tap the host chip in the header and point it at
-  the Mac's LAN IP.
+  the agent's address: the Mac's LAN IP, or the Pi behind a proxy
+  (`http://<pi>/netinv`; a path prefix works).
 
 ## Run
 
@@ -41,9 +44,13 @@ agent with `netinv serve --lan --allow-write`, and enter its passcode
 write comes back 401.
 
 The **Batteries** tab lists battery devices worst first, with level, battery
-type, last change and next expected change. Tap one for its change log
-(edit or delete entries); **Log change** records a replacement, charge, check
-or note.
+type, last change and next expected change. Each shows its name, room, type,
+app and model ("Garage Door Lock · Garage · lock · Smart Life"). The list
+groups by room, type or app, and filters as you type. Tap one for its change
+log (edit or delete entries). **Log change** records a replacement, charge,
+check or note. **Edit details** sets a device's name, room and type (for a
+Flume sensor or a Govee Bluetooth thermometer nothing names) or stops
+tracking a plugged-in device.
 
 ## The interface
 
@@ -76,7 +83,9 @@ the signal ("Weak — likely cause of drops & failed DHCP"), and inline rename.
 
 ```
 lib/
-├── main.dart      → view logic (group/sort/filter — unit-tested), API client, screens
+├── main.dart      → view logic (group/sort/filter — unit-tested), screens
+├── api.dart       → API client: host, passcode, reads and writes (WriteResult)
+├── batteries.dart → Batteries tab, its grouping/filtering logic, log and details forms
 ├── theme.dart     → brand tokens, light/dark themes, category → icon/tint
 └── widgets.dart   → BrandMark, SignalBars, StatPill, CategoryBadge
 ```
@@ -109,7 +118,8 @@ automatic signing registers the App ID.
 
 ```bash
 flutter analyze
-flutter test          # 10 tests: view logic + a build smoke test
+flutter test          # view logic, battery grouping, a build smoke test
+NETINV_E2E=http://127.0.0.1:8787 flutter test test/api_e2e_test.dart   # opt-in, against a live agent
 ```
 
 CI runs both on every push. The smoke test asserts the string `netinventory`

@@ -34,7 +34,7 @@ wireless, and flags devices that have gone defunct.
 
 ```bash
 git clone https://github.com/jchirayath/netinventory.git
-cd netinventory
+cd netinventory/engine
 
 ./netinv.py update --scan          # local subnet scan only (no router/cloud needed)
 open inventory.xlsx                 # or open devices.csv in a spreadsheet
@@ -89,26 +89,46 @@ overwrites a name you set.
 ## Commands
 
 ```
+# Inventory
 ./netinv.py update [--scan] [--router] [--cloud] [--auto-name] [--notify]   # gather + merge + report
-./netinv.py watch [--interval 300] [--notify] [--once]           # poll & alert on new devices
-./netinv.py monitor [list|on|off|check|suggest|batteries]        # offline / low-battery alerts
-./netinv.py battery [list|log|history|edit|delete]               # battery changes + levels
-./netinv.py serve --lan --allow-write                            # dashboard for phones (set-passcode)
-./netinv.py sync user@host[:path]                                # merge edits with another copy
-../deploy.sh user@host [--copy-credentials]                      # install/update on a Pi
+./netinv.py watch [--interval 300] [--notify] [--email] [--once] [--sync T]  # poll & alert on new devices
 ./netinv.py name "Friendly Name" <mac> [<mac> ...]               # group MAC(s) under a name
 ./netinv.py show [filter]                                        # print inventory
-./netinv.py alerts [--rule id] [--notify]                        # evaluate alert rules
 ./netinv.py history "<name|mac>"                                 # join history + record
-./netinv.py serve [--host H] [--port 8787]                       # JSON API + web dashboard
+./netinv.py alerts [--rule id] [--notify]                        # evaluate alert rules
 ./netinv.py report                                               # rebuild reports from devices.csv
+./update.sh                                                      # one-shot: scan, router, cloud, report
+
+# Identifying devices
 ./netinv.py pairs [--by-mac] [--apply]                           # find likely wired+wifi duplicates
 ./netinv.py fingerprint [ip|mac] [--fast] [--apply]              # identify a device by ports/banners
 ./netinv.py wifi-scan [file] [--add-mine]                        # classify a Wi-Fi survey
-./netinv.py set-router-password                                  # store router login in Keychain
-./netinv.py set-cloud <provider>                                 # store a cloud connector's creds
-./update.sh                                                      # one-shot: everything above
+./netinv.py cloud [provider ...]                                 # pull names from smart-home clouds
+./netinv.py blink-locate [camera ...] [--apply] [--via user@pi]  # wake Blink cameras to learn their MACs
+
+# Rooms, types and names (docs/home-standard.md)
+./netinv.py home rooms|draft|check|push [--from tuya|kasa|ha|smartthings]
+
+# Monitors and batteries
+./netinv.py monitor [list|on|off|check|suggest|batteries]        # offline / low-battery alerts
+./netinv.py battery [list|log|history|edit|delete]               # battery changes + levels
+
+# Dashboard, sync and deploy
+./netinv.py serve [--host H] [--port 8787] [--lan] [--allow-write]   # JSON API + web dashboard
+./netinv.py sync user@host[:path] [--dry-run] [--scanner]        # merge edits with another copy
+../deploy.sh user@host [--copy-credentials]                      # install/update on a Pi
+
+# Credentials and settings
+./netinv.py set-router-password                                  # router login (Keychain)
+./netinv.py set-cloud <provider>                                 # a cloud connector's creds
+./netinv.py blink-login | govee-login                            # interactive 2FA / emailed-code login
+./netinv.py set-email                                            # SMTP settings for watch --email
+./netinv.py set-passcode                                         # passcode for edits from other devices
+./netinv.py creds-export | creds-import                          # pipe credentials to another copy
 ```
+
+`sync-export` / `sync-import` also exist; `sync` runs them on the other copy
+over ssh, so you don't call them yourself.
 
 ## Wired vs wireless, and dual-NIC devices
 
@@ -310,6 +330,27 @@ plugged-in device (a Govee hub) from the list. The dashboard's **Batteries** pag
 **Batteries** tab show the same data, with a form to log changes;
 `GET /api/batteries` and `GET /api/battery?device=` serve it.
 
+## Dashboard and API
+
+`./netinv.py serve` serves three pages on `http://127.0.0.1:8787`:
+
+| Page | What it shows |
+|---|---|
+| `/` | every device: search, group, sort, rename (with `--allow-write`) |
+| `/rooms` | a board of devices by room, type or app. Drag a device to move it, filter by room/type/app, and add, rename or delete rooms, types and apps. Writes `home.csv`, `rooms.csv`, `types.csv`, `apps.csv` |
+| `/batteries` | battery levels, change log and details (see above) |
+
+| Read (GET) | Write (POST, needs `--allow-write`) |
+|---|---|
+| `/api/devices`, `/api/summary`, `/api/alerts`, `/api/events` | `/api/name`, `/api/rename`, `/api/delete` |
+| `/api/monitors` (live status) | `/api/room`, `/api/room-add`, `/api/room-edit`, `/api/room-rename`, `/api/room-delete` |
+| `/api/board` (the rooms board) | `/api/type`, `/api/type-add`, `/api/type-edit`, `/api/type-delete` (and the same for `app`) |
+| `/api/batteries`, `/api/battery?device=` | `/api/battery-log`, `/api/battery-edit`, `/api/battery-delete`, `/api/battery-device` |
+
+Writes take JSON (`Content-Type: application/json`), and a browser's `Origin`
+must match the host. A request from another device must carry the passcode
+in `X-Netinv-Passcode`. No response sends a CORS header.
+
 ## Using the dashboard from your phone or another computer
 
 ```bash
@@ -420,6 +461,27 @@ RTSP→camera, IPP→printer):
 `fp: …` hint to each device's `Notes`. `update.sh` runs it in fast mode by
 default (`--no-fingerprint` to skip). Active scans only touch your own LAN.
 
+**Blink cameras** sleep off Wi-Fi, and the Blink cloud gives no MAC.
+`blink-locate` wakes each camera in turn, watches which MAC/IP joins, waits for
+it to sleep again, then moves on to the next. `--apply` writes the Blink names
+into `devices.csv` by MAC. `--via user@pi` runs the ARP sweep on another box
+(needs nmap and passwordless sudo there) when this Mac can't see the joins.
+
+## Rooms, types and one name per device
+
+[`docs/home-standard.md`](../docs/home-standard.md) is the standard:
+`rooms.csv` lists the rooms, and `home.csv` gives every device a room, a type
+and the name it should have in each smart-home app.
+
+```bash
+./netinv.py home rooms --from tuya     # import an app's rooms into rooms.csv
+./netinv.py home draft                 # add unclassified devices to home.csv
+./netinv.py home check                 # validate rooms.csv + home.csv
+./netinv.py home push --to tuya        # rename devices in the app to match
+```
+
+The dashboard's `/rooms` board edits the same files.
+
 ## Status / staleness
 
 A device confirmed by the gateway (or seen on the wire when the gateway isn't used)
@@ -428,7 +490,10 @@ only ever seen in an imported export and never confirmed live ages to `defunct`.
 
 ## Credentials (macOS Keychain)
 
-Secrets are **never written to disk** — they live in the macOS Keychain.
+On a Mac, secrets live in the macOS Keychain and are never written to a
+file. On Linux (a Pi), they go to `~/.netinv/credentials.json`, owner-only (or
+`$NETINV_CREDENTIALS`). `deploy.sh --copy-credentials` moves them through
+`creds-export | creds-import` on a pipe, never through a file.
 
 ```bash
 ./netinv.py set-router-password             # internet-password for your gateway
@@ -495,22 +560,30 @@ non-`192.168.1.x` networks work by setting it.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests   # 25 tests, stdlib only, no network
+python -m unittest discover -s tests   # ~250 tests, no network
 ```
+
+Use the venv's Python (`.venv/bin/python`) so the connector tests can import
+their SDKs.
 
 ## Requirements
 
 - Python 3.8+ (standard library only for the core)
-- `nmap` for the ping-sweep (`brew install nmap`)
-- macOS for the Keychain credential storage (`security`)
-- Optional: `xlsxwriter` for the workbook, and the per-connector SDKs in
-  `requirements-cloud.txt`
+- `nmap` for the ping-sweep (`brew install nmap`, `apt install nmap`)
+- macOS (Keychain, notifications, Mail.app) or Linux (a Raspberry Pi, with the
+  owner-only credentials file)
+- Optional: `xlsxwriter` for the workbook, `bleak` for Bluetooth sensors, and
+  the per-connector SDKs in `requirements-cloud.txt` (`pip install -e '.[all]'`
+  installs everything)
 
 ## Privacy
 
-`devices.csv`, the reports, `inventory.xlsx`, `wifi_scan.csv`, and `home_ssids.txt`
-all contain real network details and are git-ignored. Credentials are stored only in
-the macOS Keychain. Nothing identifying your network is committed to the repo.
+`devices.csv`, the reports, `inventory.xlsx`, `wifi_scan.csv`, `home_ssids.txt`,
+`events.csv`, `home.csv`, `rooms.csv`, `app_rooms.csv`, `monitors.csv`,
+`monitor_state.json`, `battery_log.csv`, `battery_history.csv` and the `.sync/`
+bases all contain real network details and are git-ignored. Credentials are
+stored in the macOS Keychain or the owner-only credentials file. Nothing
+identifying your network is committed to the repo.
 
 ## License
 
