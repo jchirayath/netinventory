@@ -169,8 +169,9 @@ class TestServer(unittest.TestCase):
                  "MONITORS_CSV": "monitors.csv", "MONITOR_STATE": "monitor_state.json"}
         self.patches = [mock.patch.object(netinv, k, os.path.join(self.tmp.name, v))
                         for k, v in paths.items()]
-        self.patches += [mock.patch.object(netinv, "serve_passcode", return_value=passcode),
-                         mock.patch.object(netinv, "_local_client", return_value=local)]
+        self.patches.append(mock.patch.object(netinv, "serve_passcode", return_value=passcode))
+        if local is not None:                      # None: the real loopback/proxy check
+            self.patches.append(mock.patch.object(netinv, "_local_client", return_value=local))
         for p in self.patches:
             p.start()
         args = argparse.Namespace(host="127.0.0.1", port=0, allow_write=allow_write, lan=False)
@@ -323,6 +324,47 @@ class TestServer(unittest.TestCase):
         except (urllib.error.URLError, ConnectionError):
             code = 413          # some stacks see the close before the reply
         self.assertEqual(code, 413)
+
+    def _post_via_proxy(self, body, passcode=None, xff="192.168.1.50"):
+        h = {"Content-Type": "application/json", "X-Forwarded-For": xff}
+        if passcode is not None:
+            h["X-Netinv-Passcode"] = passcode
+        req = urllib.request.Request(self.base + "/api/battery-log", data=json.dumps(body).encode(),
+                                     headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code
+
+    def test_proxied_request_is_not_local(self):
+        # Caddy on the Pi connects from loopback for every LAN client.
+        self.start(passcode="hunter22", local=None)
+        self.assertEqual(self.post("/api/battery-log", {"device": "x"})[0], 200)  # truly local
+        with mock.patch("time.sleep"):
+            self.assertEqual(self._post_via_proxy({"device": "x"}), 401)
+        self.assertEqual(self._post_via_proxy({"device": "x"}, "hunter22"), 200)
+
+    def test_proxied_write_without_passcode_configured_refused(self):
+        self.start(passcode="", local=None)
+        self.assertEqual(self._post_via_proxy({"device": "x"}), 403)
+        self.assertEqual(self.post("/api/battery-log", {"device": "x"})[0], 200)  # this machine
+
+    def test_proxy_lockout_keys_on_forwarded_client(self):
+        self.start(passcode="hunter22", local=None)
+        with mock.patch("time.sleep"):
+            for _ in range(netinv.PasscodeGuard.MAX):
+                self._post_via_proxy({"device": "x"}, "guess", xff="192.168.1.66")
+        self.assertEqual(self._post_via_proxy({"device": "x"}, "hunter22", xff="192.168.1.66"), 429)
+        self.assertEqual(self._post_via_proxy({"device": "x"}, "hunter22", xff="192.168.1.7"), 200)
+
+    def test_client_key(self):
+        self.assertEqual(netinv._client_key("127.0.0.1", {"X-Forwarded-For": "1.2.3.4, 10.0.0.9"}),
+                         "10.0.0.9")                          # the proxy's own entry
+        self.assertEqual(netinv._client_key("192.168.1.5", {"X-Forwarded-For": "1.2.3.4"}),
+                         "192.168.1.5")                       # a direct client can't forge it
+        self.assertEqual(netinv._client_key("127.0.0.1", {}), "127.0.0.1")
 
     def test_this_mac_needs_no_passcode(self):
         self.start(passcode="hunter22", local=True)

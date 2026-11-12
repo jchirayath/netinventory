@@ -3837,8 +3837,23 @@ class HostCheck:
         return name in self.names
 
 
-def _local_client(addr):
-    """True for a request from this machine itself, which needs no passcode."""
+def _client_key(addr, headers):
+    """Who to count wrong passcodes against. Behind a reverse proxy on this
+    machine every request comes from loopback, so use the address the proxy
+    reports (the last X-Forwarded-For entry, the one the proxy itself added).
+    A direct client's own X-Forwarded-For is ignored: it could forge it."""
+    xff = headers.get("X-Forwarded-For", "") if addr in ("127.0.0.1", "::1") else ""
+    return xff.split(",")[-1].strip() or addr
+
+
+def _local_client(addr, headers=None):
+    """True for a request from this machine itself, which needs no passcode.
+    Not when a reverse proxy forwarded it (Caddy on the Pi always adds
+    X-Forwarded-For): the proxy connects from loopback for every LAN
+    client. A local caller adding the header only loses its exemption."""
+    if headers is not None and (headers.get("X-Forwarded-For") or headers.get("Forwarded")
+                                or headers.get("X-Real-IP")):
+        return False
     return addr in ("127.0.0.1", "::1")
 
 
@@ -4168,8 +4183,14 @@ def make_server(args):
                     return
             # The passcode, checked only after the same-origin gates above, so a
             # cross-site form post can't count as a miss and lock anyone out.
-            client = self.client_address[0]
-            if passcode and not _local_client(client):
+            client = _client_key(self.client_address[0], self.headers)
+            local = _local_client(self.client_address[0], self.headers)
+            if not local and not passcode:
+                # e.g. bound to 127.0.0.1 behind a reverse proxy with no passcode set
+                _send(self, 403, b'{"error":"edits from other devices need a passcode: '
+                                 b'netinv set-passcode"}', "application/json")
+                return
+            if passcode and not local:
                 if guard.locked(client):
                     _send(self, 429, b'{"error":"too many wrong passcodes; try again later"}',
                           "application/json")

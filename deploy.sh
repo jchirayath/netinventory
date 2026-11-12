@@ -47,6 +47,15 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10 --)
 
 echo "→ checking ssh to $HOST"
 "${SSH[@]}" "$HOST" true || { echo "  ssh failed: set up a key first (ssh-copy-id $HOST)" >&2; exit 1; }
+# A box that already runs netinventory as a system service (e.g. homehub's
+# /etc/systemd/system/netinventory.service behind Caddy) is managed elsewhere;
+# a second copy here would fight it for port 8787.
+if "${SSH[@]}" "$HOST" 'test -f /etc/systemd/system/netinventory.service'; then
+  echo "  $HOST already runs netinventory as a system service (netinventory.service)." >&2
+  echo "  Update it the way that box is managed (homehub: git pull in /opt/homehub/netinventory," >&2
+  echo "  then sudo systemctl restart netinventory), not with deploy.sh." >&2
+  exit 1
+fi
 
 echo "→ copying committed engine code to $HOST:$DEST"
 FILES=$(cd "$ROOT" && git ls-files engine scan-jobs.sh deploy.sh | grep -v '^engine/tests/')
