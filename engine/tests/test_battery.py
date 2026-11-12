@@ -111,6 +111,46 @@ class TestCredentialFile(unittest.TestCase):
                 self.assertIsNone(connectors.kc_get("serve", "passcode"))
 
 
+class TestCredsCopy(unittest.TestCase):
+    def test_export_import_round_trip_and_path_safety(self):
+        import io
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+            def env(d):
+                return [mock.patch.dict(os.environ, {"NETINV_CREDENTIALS": os.path.join(d, "c.json"),
+                                                     "HOME": d}),
+                        mock.patch.object(connectors, "_keychain", return_value=False)]
+            for p in env(src):
+                p.start()
+            connectors.kc_set("tuya", "access_id", "id1")
+            connectors.kc_set("serve", "passcode", "hunter22")
+            with open(os.path.join(src, ".netinv_blink.json"), "w") as f:
+                f.write('{"token": "t"}')
+            out = io.StringIO()
+            with mock.patch.object(sys, "stdout", out):
+                netinv.cmd_creds(argparse.Namespace(action="export"))
+            mock.patch.stopall()
+            data = json.loads(out.getvalue())
+            data["tokens"]["../../evil"] = "x"                     # must be ignored
+            data["creds"]["not-a-provider"] = {"a": "b"}           # must be ignored
+            for p in env(dst):
+                p.start()
+            with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(data))), \
+                    mock.patch("builtins.print"):
+                netinv.cmd_creds(argparse.Namespace(action="import"))
+            self.assertEqual(connectors.kc_get("tuya", "access_id"), "id1")
+            self.assertEqual(connectors.kc_get("serve", "passcode"), "hunter22")
+            self.assertIsNone(connectors.kc_get("not-a-provider", "a"))
+            tok = os.path.join(dst, ".netinv_blink.json")
+            self.assertEqual(os.stat(tok).st_mode & 0o777, 0o600)
+            self.assertFalse(os.path.exists(os.path.join(os.path.dirname(dst), "evil")))
+            mock.patch.stopall()
+
+    def test_export_refuses_a_terminal(self):
+        with mock.patch.object(sys.stdout, "isatty", return_value=True), \
+                self.assertRaises(SystemExit):
+            netinv.cmd_creds(argparse.Namespace(action="export"))
+
+
 class TestServer(unittest.TestCase):
     """A real server on a spare port, with the data files in a temp dir."""
 
@@ -198,6 +238,27 @@ class TestServer(unittest.TestCase):
                 self.post("/api/battery-log", {"device": "x"}, "guess")
             # locked now, even with the right passcode
             self.assertEqual(self.post("/api/battery-log", {"device": "x"}, "hunter22")[0], 429)
+
+    def test_lockout_is_per_client(self):
+        g = netinv.PasscodeGuard()
+        with mock.patch("time.sleep"):
+            for _ in range(g.MAX):
+                g.fail("10.0.0.66")
+        self.assertTrue(g.locked("10.0.0.66"))
+        self.assertFalse(g.locked("10.0.0.7"))             # everyone else can still edit
+
+    def test_cross_site_form_post_is_not_a_miss(self):
+        # A text/plain form post from another site must be refused before the
+        # passcode check, so it can't use up anyone's attempts.
+        self.start(passcode="hunter22", local=False)
+        with mock.patch.object(netinv.PasscodeGuard, "fail") as fail:
+            req = urllib.request.Request(self.base + "/api/battery-log", data=b"device=x",
+                                         headers={"Content-Type": "text/plain"})
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(cm.exception.code, 415)
+            cm.exception.close()
+            fail.assert_not_called()
 
     def test_dns_rebinding_host_refused(self):
         self.start(passcode="hunter22", local=True)

@@ -2261,6 +2261,49 @@ def cmd_sync(args):
         sys.exit(1)
 
 
+# Login tokens cached outside the credential store, copied along with it.
+TOKEN_FILES = ("~/.netinv_blink.json", "~/.netinv_govee.json")
+
+
+def cmd_creds(args):
+    """creds-export: every stored credential (and cached login tokens) as
+    JSON on stdout, for `deploy.sh --copy-credentials` to pipe over ssh;
+    creds-import: store that JSON here. Never written to a file in transit."""
+    import connectors
+    providers = dict(connectors.PROVIDERS, email=EMAIL_FIELDS, serve=[("passcode", True, "")])
+    if args.action == "export":
+        if sys.stdout.isatty():
+            sys.exit("  refusing to print secrets to a terminal; pipe it (deploy.sh does)")
+        out = {"creds": {}, "tokens": {}}
+        for p, fields in providers.items():
+            got = {f: v for f, *_ in fields if (v := connectors.kc_get(p, f))}
+            if got:
+                out["creds"][p] = got
+        for t in TOKEN_FILES:
+            path = os.path.expanduser(t)
+            if os.path.exists(path):
+                with open(path) as f:
+                    out["tokens"][os.path.basename(path)] = f.read()
+        json.dump(out, sys.stdout)
+        return
+    data = json.load(sys.stdin)
+    n = 0
+    for p, fields in (data.get("creds") or {}).items():
+        if p not in providers:
+            continue
+        for f, v in fields.items():
+            connectors.kc_set(p, f, v)
+            n += 1
+    for name, text in (data.get("tokens") or {}).items():
+        if name not in {os.path.basename(t) for t in TOKEN_FILES}:
+            continue
+        path = os.path.expanduser("~/" + name)
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            f.write(text)
+        os.chmod(path, 0o600)
+    print(f"  stored {n} credential field(s) and {len(data.get('tokens') or {})} login token(s)")
+
+
 def heartbeat():
     """GET HEARTBEAT_URL (if set) so an outside service notices when this
     Mac, its network, or the watch stops: the one failure it can't report
@@ -3734,29 +3777,32 @@ load();setInterval(load,15000)</script>"""
 
 
 class PasscodeGuard:
-    """Wrong-passcode limiter shared by every request thread: failures are
-    handled one at a time with a delay, and MAX misses within WINDOW seconds
-    lock out other devices' edits for WINDOW seconds."""
+    """Wrong-passcode limiter, per client address and shared by every
+    request thread: MAX misses from one address within WINDOW seconds lock
+    that address (only) out of edits for WINDOW seconds, and each miss costs
+    its sender a DELAY (outside the lock, so other clients aren't held up)."""
     MAX, WINDOW, DELAY = 10, 600, 1.0
 
     def __init__(self):
         import threading
         self._lock = threading.Lock()
-        self._fails = []
-        self._until = 0.0
+        self._fails = {}                 # address -> [miss times]
+        self._until = {}                 # address -> locked until
 
-    def locked(self):
-        return time.time() < self._until
+    def locked(self, addr):
+        with self._lock:
+            return time.time() < self._until.get(addr, 0.0)
 
-    def fail(self):
-        with self._lock:                 # serialized: parallel guesses queue up
+    def fail(self, addr):
+        with self._lock:
             now = time.time()
-            self._fails = [t for t in self._fails if now - t < self.WINDOW] + [now]
-            if len(self._fails) >= self.MAX:
-                self._until, self._fails = now + self.WINDOW, []
-                print(f"  ! {self.MAX} wrong passcodes: edits from other devices locked "
+            fails = [t for t in self._fails.get(addr, []) if now - t < self.WINDOW] + [now]
+            if len(fails) >= self.MAX:
+                self._until[addr], fails = now + self.WINDOW, []
+                print(f"  ! {self.MAX} wrong passcodes from {addr}: its edits locked "
                       f"for {self.WINDOW // 60} minutes")
-            time.sleep(self.DELAY)
+            self._fails[addr] = fails
+        time.sleep(self.DELAY)
 
 
 class HostCheck:
@@ -4090,17 +4136,6 @@ def make_server(args):
                 _send(self, 403, b'{"error":"read-only; start with --allow-write"}',
                       "application/json")
                 return
-            if passcode and not _local_client(self.client_address[0]):
-                if guard.locked():
-                    _send(self, 429, b'{"error":"too many wrong passcodes; try again later"}',
-                          "application/json")
-                    return
-                given = self.headers.get("X-Netinv-Passcode", "")
-                if not hmac.compare_digest(given.encode(), passcode.encode()):
-                    guard.fail()
-                    _send(self, 401, b'{"error":"passcode required","auth":true}',
-                          "application/json")
-                    return
             # CSRF defense for the state-changing write. Requiring a strict
             # application/json body forces a CORS preflight for any cross-origin
             # caller (which this server never approves), so a malicious page
@@ -4117,6 +4152,20 @@ def make_server(args):
                 from urllib.parse import urlparse
                 if urlparse(origin).netloc != self.headers.get("Host", ""):
                     _send(self, 403, b'{"error":"cross-origin write rejected"}',
+                          "application/json")
+                    return
+            # The passcode, checked only after the same-origin gates above, so a
+            # cross-site form post can't count as a miss and lock anyone out.
+            client = self.client_address[0]
+            if passcode and not _local_client(client):
+                if guard.locked(client):
+                    _send(self, 429, b'{"error":"too many wrong passcodes; try again later"}',
+                          "application/json")
+                    return
+                given = self.headers.get("X-Netinv-Passcode", "")
+                if not hmac.compare_digest(given.encode(), passcode.encode()):
+                    guard.fail(client)
+                    _send(self, 401, b'{"error":"passcode required","auth":true}',
                           "application/json")
                     return
             try:
@@ -4567,6 +4616,10 @@ def main():
     for name, act in (("sync-export", "export"), ("sync-import", "import")):
         x = sub.add_parser(name, help=f"(used by sync over ssh) {act} this copy's synced files")
         x.set_defaults(func=cmd_sync, action=act, target=None, dry_run=False)
+    for name, act in (("creds-export", "export"), ("creds-import", "import")):
+        x = sub.add_parser(name, help=f"(used by deploy.sh --copy-credentials) {act} "
+                                      "stored credentials as JSON on a pipe")
+        x.set_defaults(func=cmd_creds, action=act)
 
     args = p.parse_args()
     args.func(args)
