@@ -1078,5 +1078,20 @@ class TestSmartThingsRooms(unittest.TestCase):
             self.assertEqual(rooms[devices["d1"]["roomId"]], "Garage")
 
 
+class TestPackaging(unittest.TestCase):
+    def test_every_engine_module_is_packaged(self):
+        # The installed `netinv` script (the Pi runs .venv/bin/netinv) can only
+        # import modules listed in py-modules; a missing one crashes there
+        # while `python netinv.py` from the engine dir still works.
+        import glob
+        import re
+        engine = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(engine, "pyproject.toml")) as f:
+            listed = set(re.findall(r'"(\w+)"', re.search(r"py-modules\s*=\s*\[(.*?)\]",
+                                                          f.read(), re.S).group(1)))
+        present = {os.path.basename(p)[:-3] for p in glob.glob(os.path.join(engine, "*.py"))}
+        self.assertEqual(present - listed, set(), "add these to py-modules in pyproject.toml")
+
+
 if __name__ == "__main__":
     unittest.main()
