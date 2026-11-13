@@ -127,6 +127,17 @@ class TestServeHardening(_ServerCase):
                           ("battery-log", "Garage Lock", "401")])
         self.assertTrue(all(r["Who"] for r in rows))
 
+    def test_refusals_without_a_passcode_attempt_are_not_audited(self):
+        self.start(passcode="hunter22", local=False)
+        import urllib.error
+        import urllib.request
+        for _ in range(5):                 # wrong Content-Type: 415, no passcode needed
+            req = urllib.request.Request(self.base + "/api/battery-log", data=b"{}",
+                                         headers={"Content-Type": "text/plain"})
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(req, timeout=10).close()
+        self.assertFalse(os.path.exists(netinv.AUDIT_LOG))
+
     def test_reads_are_not_audited(self):
         self.start()
         self.get("/api/batteries")

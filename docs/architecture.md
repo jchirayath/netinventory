@@ -283,8 +283,10 @@ journald, `docker logs` or the Mac's log file as they happen.
 address), so a guesser or a bug is visible while successful reads cost the SD card
 nothing.
 
-**The audit trail:** every edit through serve, and every refused edit, adds a line to
-`audit.csv` in the data directory:
+**The audit trail:** every edit through serve, and every wrong passcode, adds a line to
+`audit.csv` in the data directory. Other refusals (a cross-site request, a wrong
+content type) need no passcode to send, so they go only to the log, where they can't
+push real edits out of the file. Wrong passcodes are capped by the lockout.
 
 | Column | Holds |
 |---|---|

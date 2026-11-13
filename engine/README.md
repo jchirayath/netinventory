@@ -368,8 +368,8 @@ in `X-Netinv-Passcode`. No response sends a CORS header. Every response
 carries a Content-Security-Policy and `X-Frame-Options: DENY`, so no other
 site can frame the pages.
 
-Every write, and every refused one, adds a line to `audit.csv` next to the
-data: time, who (this machine, the client's address, or the agent), the
+Every write, and every wrong passcode, adds a line to `audit.csv` next to the
+data (other refusals go only to the log, so they can't flood it): time, who (this machine, the client's address, or the agent), the
 action, its target and the answer. It stays on its own copy and is never
 synced; past 1 MB it moves to `audit.csv.1`. Serve logs refused and failed
 requests (4xx/5xx) with the client's address, and nothing for successful ones.

@@ -4812,6 +4812,13 @@ def make_server(args):
             path = self.path.split("?")[0]
             if path not in WRITE_PATHS and path != "/api/agent/sync":
                 return                   # unknown paths: the access log has them
+            status = str(self._status or "")
+            if not (status.startswith("2") or status == "401"):
+                # Edits that happened, and wrong passcodes (the lockout caps
+                # those at ~10 per client per 10 min). Other refusals need no
+                # passcode to send, so they stay in the access log: here they
+                # could flood the file and rotate the real edits out of it.
+                return
             if path == "/api/agent/sync" and (self._status != 200 or not self._audit_detail):
                 # Only the agent's own imports of edits. Tokenless probes from
                 # the internet (401/429) are in the access log; recording them

@@ -36,7 +36,7 @@ credential is added.
 | Pi → betty (the token in transit) | https only; redirects refused, so the token can't be sent on to another host | `sync.check_agent_url`, `agent_opener` |
 | Lying LAN devices → the scan | SSDP descriptions fetched only over http from a literal LAN IP, without redirects; Bluetooth names trusted only for `ble` monitors with an explicit match | `ssdp_discover`, `monitor.match_reading` |
 | Credentials between copies | `creds-export` refuses a terminal; `--only agent,serve` for a copy that scans nothing (betty holds only those two); sync never carries credentials | `cmd_creds` |
-| Edits after the fact | every edit and refused edit through serve is a line in `audit.csv` (who, what, answer), kept per copy and never synced | `audit` |
+| Edits after the fact | every edit and every wrong passcode through serve is a line in `audit.csv` (who, what, answer), kept per copy and never synced; refusals that need no passcode go only to the log, so nobody can flood the file and rotate real edits out | `audit`, `_audit_post` |
 
 ## Known gaps, accepted for now
 
