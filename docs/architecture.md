@@ -115,12 +115,22 @@ Commands:
 ./scan-jobs.sh serve-start | serve-stop
 ```
 
-After a `git pull`, run `./scan-jobs.sh restart` so the watch picks up the new code.
+After a `git pull`, pick up the new code and dependency versions:
+
+```bash
+engine/.venv/bin/python -m pip install -q -U -e './engine[all]'
+./scan-jobs.sh restart                                       # the watch
+launchctl kickstart -k gui/$(id -u)/com.netinventory.serve   # serve, same arguments
+```
+
+`scan-jobs.sh serve-start` would also restart serve, but it adds `--lan` once a passcode
+is set, which shares the Mac's dashboard with the whole network.
 
 ## The Pi: the hub
 
-Units from the [homehub repo](https://github.com/jchirayath/homehub) (`netinventory/`).
-`./netinventory/update.sh` installs them; [`deploy.sh`](../deploy.sh) is the generic
+The units come from the homehub repo (`~/code/homehub/netinventory/`, a local repo on
+the Mac with no GitHub copy). Its `./netinventory/update.sh` installs them, and
+`provision.sh --check` reports any drift. [`deploy.sh`](../deploy.sh) is the generic
 installer for any other Pi.
 
 | Unit | What | Writes to the SD card |
@@ -133,6 +143,22 @@ The Pi never scans: there is no scan timer, by design (SD card wear). Its scan d
 battery levels and events all come from the Mac's sync. The code and data both live in
 `/opt/homehub/netinventory/engine/`, and homehub's nightly `backup.sh` keeps a copy of
 `devices.csv`.
+
+**Sandbox.** `netinventory.service` runs as `jacobc` under systemd's sandbox:
+- The system is read-only (`ProtectSystem=strict`).
+- Home is read-only (`ProtectHome=read-only`), with two writable exceptions:
+  - the engine directory, for the CSVs and `audit.csv`
+  - `~/.netinv`, so serve can turn a passcode stored the old way into a salted hash
+    the first time it starts
+- It has no capabilities.
+
+If a log ever says `couldn't store the passcode as a hash`, the second exception is
+missing. To convert the passcode by hand:
+
+```bash
+cd /opt/homehub/netinventory/engine
+.venv/bin/python -c 'import netinv; netinv._upgrade_passcode(netinv.serve_passcode())'
+```
 
 **Nightly self-update.** It connects out to GitHub and does nothing unless `main` has
 moved. When it has, the script checks out the new commit, reinstalls the engine, and runs
