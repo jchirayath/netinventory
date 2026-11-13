@@ -16,7 +16,7 @@ about, and tracks their batteries.
 netinventory/
 ├── engine/      → Python scanner engine + CLI + dashboard server
 ├── app/         → Flutter macOS/iOS companion (a viewer/editor over the engine's API)
-├── docs/        → the home standard: rooms, types and names across smart-home apps
+├── docs/        → how it runs (architecture, threat model) and the home standard
 ├── deploy.sh    → install/update the engine on a Pi over ssh
 ├── scan-jobs.sh → keep the watch and the dashboard running on a Mac (LaunchAgents)
 └── assets/      → brand mark + app screenshots
@@ -50,8 +50,14 @@ netinventory/
 - **Dashboard and app.** Devices, a rooms board (drag devices between rooms,
   types and apps) and Batteries pages in the browser; the same data in the
   companion app. Edits are opt-in and need a passcode from any other device.
-- **Two copies in step.** A Raspberry Pi serves the dashboard; the Mac scans and
-  syncs its results to the Pi. Edits made on either side merge back.
+- **Three copies in step.** The Mac scans; a Raspberry Pi serves the dashboard to
+  the house; [net.aspl.net](https://net.aspl.net) serves it from anywhere, behind
+  an Entra sign-in. The Pi keeps the web copy in step over one outbound
+  connection, and edits made on any copy reach the others.
+- **Updates itself.** The Pi pulls `main` nightly and switches only if the tests
+  pass on the Pi and both services come back up, otherwise it rolls back.
+- **An audit trail.** Every edit, and every refused one, is recorded with who made
+  it.
 - **Private by design.** Network data is git-ignored, credentials stay in the
   Keychain (or an owner-only file on Linux), and CI blocks committing a data
   file or a real MAC.
@@ -82,19 +88,32 @@ run on iOS, so the split is deliberate:
   ssh, and `netinv sync` keeps your edits in step between the copies. See
   [`engine/README.md`](engine/README.md#keeping-two-copies-in-step-a-raspberry-pi).
 
-The recommended home setup splits the work:
+The home setup runs three copies of the engine:
 
-```
-  Mac (scans)                                  Raspberry Pi (serves)
-  watch: sweep, router, clouds,   sync every   serve --lan --allow-write
-  Bluetooth, monitors, alerts  ── 15 min ───▶  dashboard + API for phones/app
-  scan data, levels, events    ◀────────────   edits: names, notes, battery log,
-                                                rooms, monitors
+```mermaid
+flowchart LR
+  mac["Mac<br/>scans · alerts"] == "ssh sync<br/>every 15 min" ==> pi["Raspberry Pi<br/>dashboard for the house"]
+  pi == "agent: one outbound HTTPS<br/>connection, held open" ==> web["net.aspl.net<br/>dashboard from anywhere<br/>(Entra sign-in)"]
+  phone["phones, app"] --> pi
+  you["you, away"] --> web
 ```
 
 The Mac has the radios and the CPU for scanning. The Pi is always on, so the
-dashboard stays up when the Mac sleeps. Scanner mode (`sync_scanner = yes`)
-sends the Mac's scan results to the Pi, and edits made on the Pi merge back.
+dashboard stays up when the Mac sleeps, and its agent keeps net.aspl.net in step
+without anything on the internet connecting into the house. Edits made on any
+copy merge into the others: within seconds from the web to the Pi, and at the
+next 15-minute sync to the Mac.
+
+**[docs/architecture.md](docs/architecture.md)** covers how it all runs:
+- the jobs on the Mac
+- the Pi's units and its nightly self-update
+- the web copy on betty
+- the sync rules
+- logs and the audit trail
+- where to look when something is off
+
+**[docs/threat-model.md](docs/threat-model.md)** lists what protects each
+boundary.
 
 ## Quick start
 
@@ -147,9 +166,9 @@ All real network data lives under `engine/` and is git-ignored: `devices.csv`,
 reports, `inventory.xlsx`, `events.csv`, `home.csv`, `rooms.csv`,
 `monitors.csv`, the battery log and history, SSIDs and router cookies.
 Credentials are in the macOS Keychain, or in an owner-only
-`~/.netinv/credentials.json` on Linux. CI fails if any data file or real MAC
-is committed. See [`analysis-report.md`](analysis-report.md) for the productization
-roadmap and status.
+`~/.netinv/credentials.json` on Linux, and the edit passcode is stored only as a
+salted hash. CI fails if any data file or real MAC is committed. To report a
+vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 

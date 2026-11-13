@@ -126,7 +126,7 @@ overwrites a name you set.
 ./netinv.py blink-login | govee-login                            # interactive 2FA / emailed-code login
 ./netinv.py set-email                                            # SMTP settings for watch --email
 ./netinv.py set-passcode                                         # passcode for edits from other devices
-./netinv.py creds-export | creds-import                          # pipe credentials to another copy
+./netinv.py creds-export [--only agent,serve] | creds-import     # pipe credentials to another copy
 ```
 
 `sync-export` / `sync-import` also exist; `sync` runs them on the other copy
@@ -203,6 +203,13 @@ at login, restarted if it dies), use `scan-jobs.sh` at the repo root:
 ../scan-jobs.sh logs         # follow engine/netinv-watch.log
 ../scan-jobs.sh stop         # also stops a watch started by hand
 ```
+
+A poll in which the scan hears nobody at all (Wi-Fi down, the Mac away from
+home) changes nothing: no device goes offline, no `leave` events, no monitor
+alerts, and no heartbeat. An email that fails to send is not lost: monitor
+alerts wait and go with the next poll's email. Log lines carry a timestamp
+and a level (`INFO`, `WARN`, `ERROR`), so `grep -E 'WARN|ERROR'
+netinv-watch.log` lists every problem and when it started.
 
 ## Device monitors (offline too long, battery low)
 
@@ -296,8 +303,11 @@ For a periodic full refresh instead, install the update LaunchAgent:
 `battery_log.csv` records when batteries were changed, with the battery
 type and your notes. `battery_history.csv` records each monitored device's
 level whenever the hourly check sees it change. When a level jumps from 50%
-or less to 40+ points higher, the change is logged for you as a detected
-replacement.
+or less to 40+ points higher, as reported by the same provider, the change is
+logged for you as a detected replacement. Providers that report words instead
+of numbers (Flume high/medium/low, Blink ok/low) count only when the level
+climbs from the bottom one: those words wobble across a boundary, and
+medium → high is not new batteries.
 
 ```bash
 ./netinv.py battery                                   # every battery device, worst first
@@ -354,12 +364,20 @@ with battery changes marked, every level reading, and every logged change
 
 Writes take JSON (`Content-Type: application/json`), and a browser's `Origin`
 must match the host. A request from another device must carry the passcode
-in `X-Netinv-Passcode`. No response sends a CORS header.
+in `X-Netinv-Passcode`. No response sends a CORS header. Every response
+carries a Content-Security-Policy and `X-Frame-Options: DENY`, so no other
+site can frame the pages.
+
+Every write, and every refused one, adds a line to `audit.csv` next to the
+data: time, who (this machine, the client's address, or the agent), the
+action, its target and the answer. It stays on its own copy and is never
+synced; past 1 MB it moves to `audit.csv.1`. Serve logs refused and failed
+requests (4xx/5xx) with the client's address, and nothing for successful ones.
 
 ## Using the dashboard from your phone or another computer
 
 ```bash
-./netinv.py set-passcode                    # 8+ characters, kept in Keychain
+./netinv.py set-passcode                    # 8+ characters, stored as a salted hash
 ./netinv.py serve --lan --allow-write       # prints the address to open
 ../scan-jobs.sh serve-start                 # or keep it running: starts at login
 ```
@@ -372,7 +390,8 @@ machine (its LAN IP, its name, `localhost`, plus any names in
 `serve_hosts`), which blocks DNS-rebinding pages. Ten wrong passcodes in
 ten minutes lock that device out of editing for ten minutes. Reading the
 inventory needs no passcode on your LAN, so don't use `--lan` on a network
-you don't trust.
+you don't trust. Over plain `http://` the passcode crosses your Wi-Fi in clear
+text, so a TLS front (Caddy) is the safer way to share edits.
 
 ## Keeping two copies in step (a Raspberry Pi)
 
@@ -448,6 +467,9 @@ its own `netinventory/update.sh`.
                 ◀── edits ────────────                     ◀── edits ───────   (betty, Entra)
 ```
 
+The whole picture (diagrams, every job on every machine, logs, and where to
+look when something is off) is in [../docs/architecture.md](../docs/architecture.md).
+
 net.aspl.net runs `netinv serve --allow-write` on a cloud VM, behind the
 Entra ID sign-in, with edits also needing the passcode. It can't reach your
 network, and nothing on the internet can reach into it: the Pi's `netinv
@@ -468,11 +490,15 @@ pattern poolhound uses for its pool controller).
   so an edit made on the web mid-sync is never overwritten. The agent just
   syncs again.
 - `/api/agent/*` skips Entra and needs a bearer token (`agent-token`),
-  compared in constant time, with the passcode lockout applied to wrong
-  tokens. Without a token set, those paths don't exist.
+  compared in constant time, with its own lockout for wrong tokens, counted
+  per visitor. Behind a container proxy that needs `NETINV_TRUSTED_PROXIES`
+  (`deploy-betty.sh` checks it). Without a token set, those paths don't exist.
+- The dashboard on net.aspl.net shows when the Pi last synced, next to the
+  device count, so stale data shows.
 
 ```bash
-# on the server copy, once (or pipe one copy's token to the other with creds-export | creds-import)
+# on the server copy, once; then copy only the token across:
+#   netinv creds-export --only agent | ssh <server> netinv creds-import
 netinv agent-token --generate
 # on the Pi: agent_url = https://net.aspl.net in ~/.netinv/config, the same token, then
 netinv agent --once            # one sync, to test
@@ -484,7 +510,9 @@ net.aspl.net, and `./deploy-betty.sh --check` to confirm that every page
 and data path redirects to the sign-in while the agent path wants its
 token. The script needs `az login` and refuses to ship if the gates aren't
 in place. `netinv.py export-site DIR` still writes a static read-only copy
-(the three pages and every GET answer) for any plain web server.
+(the three pages and every GET answer, each page marked as a snapshot) for a
+plain web server. It holds every MAC, IP and the join/leave history, so publish
+it only behind a login.
 
 ## Identifying unknown devices (fingerprinting)
 
@@ -543,7 +571,10 @@ only ever seen in an imported export and never confirmed live ages to `defunct`.
 On a Mac, secrets live in the macOS Keychain and are never written to a
 file. On Linux (a Pi), they go to `~/.netinv/credentials.json`, owner-only (or
 `$NETINV_CREDENTIALS`). `deploy.sh --copy-credentials` moves them through
-`creds-export | creds-import` on a pipe, never through a file.
+`creds-export | creds-import` on a pipe, never through a file. For a copy
+that scans nothing (the web copy), send only what it uses:
+`creds-export --only agent,serve`. The edit passcode is stored as a salted
+scrypt hash; a plain one from an older version is converted when serve starts.
 
 ```bash
 ./netinv.py set-router-password             # internet-password for your gateway
@@ -612,7 +643,7 @@ non-`192.168.1.x` networks work by setting it.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests   # ~250 tests, no network
+python -m unittest discover -s tests   # ~280 tests, no network
 ```
 
 Use the venv's Python (`.venv/bin/python`) so the connector tests can import
@@ -632,8 +663,8 @@ their SDKs.
 
 `devices.csv`, the reports, `inventory.xlsx`, `wifi_scan.csv`, `home_ssids.txt`,
 `events.csv`, `home.csv`, `rooms.csv`, `app_rooms.csv`, `monitors.csv`,
-`monitor_state.json`, `battery_log.csv`, `battery_history.csv` and the `.sync/`
-bases all contain real network details and are git-ignored. Credentials are
+`monitor_state.json`, `battery_log.csv`, `battery_history.csv`, `audit.csv`
+and the `.sync/` bases all contain real network details and are git-ignored. Credentials are
 stored in the macOS Keychain or the owner-only credentials file. Nothing
 identifying your network is committed to the repo.
 
