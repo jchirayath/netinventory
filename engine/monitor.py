@@ -36,6 +36,9 @@ import socket
 import subprocess
 import sys
 
+import home
+import store
+
 FIELDS = ["Device", "Enabled", "OfflineAfter", "BatteryBelow", "Check", "Match", "Notes"]
 CHECKS = ("ping", "cloud", "ble", "none")  # plus tcp:PORT
 # Battery labels some clouds report instead of a percent.
@@ -49,18 +52,11 @@ ON = {"yes", "y", "on", "true", "1"}
 # monitors.csv
 # --------------------------------------------------------------------------- #
 def load(path):
-    if not os.path.exists(path):
-        return []
-    with open(path, newline="", encoding="utf-8") as f:
-        return [{k: (r.get(k) or "").strip() for k in FIELDS}
-                for r in csv.DictReader(f, delimiter=";") if (r.get("Device") or "").strip()]
+    return [r for r in store.read_rows(path, FIELDS) if r["Device"]]
 
 
 def save(path, rows):
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
-        w.writeheader()
-        w.writerows({k: r.get(k, "") for k in FIELDS} for r in rows)
+    store.write_rows(path, FIELDS, rows)
 
 
 def enabled(m):
@@ -108,9 +104,7 @@ def validate(m):
 # --------------------------------------------------------------------------- #
 # matching a monitor to inventory rows and cloud readings
 # --------------------------------------------------------------------------- #
-def norm(s):
-    """Case- and quote-insensitive key: "Jacob’s Mac" == "jacob's mac"."""
-    return " ".join(re.sub(r"[’‘`´]", "'", s or "").lower().split())
+norm = home.name_key   # the same key that keeps device names unique
 
 
 def _app_names(s):
@@ -266,10 +260,7 @@ def load_state(path):
 
 
 def save_state(path, state):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(state, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    store.write_text(path, json.dumps(state, indent=1, sort_keys=True))
 
 
 def _iso(t):
@@ -364,8 +355,12 @@ def status_line(st, now):
 # one pass
 # --------------------------------------------------------------------------- #
 def run(monitors, master, state, readings=None, *, home_rows=(), now=None,
-        seen_online=None, arp=None, probe_fn=probe):
+        seen_online=None, arp=None, probe_fn=probe, lan_checked=True):
     """Check every enabled monitor once; returns [(device, kind, message)].
+
+    lan_checked=False: this machine couldn't see the network this time (the
+    sweep heard nobody at all), so ping and tcp devices are 'not checked'
+    rather than offline; cloud and Bluetooth monitors are judged as usual.
 
     seen_online: MACs a sweep (the watch) just saw. A device with one counts
     as present without sending anything; one without is probed only when its
@@ -396,7 +391,7 @@ def run(monitors, master, state, readings=None, *, home_rows=(), now=None,
             elif check == "cloud":
                 if reading is not None and reading.get("online") is not None:
                     present = bool(reading["online"])
-            elif check != "none":
+            elif check != "none" and lan_checked:
                 if seen_online is not None and not check.startswith("tcp:"):
                     present = bool({r["MAC"] for r in rows} & seen_online)
                 else:              # probes run side by side: same packets, less waiting

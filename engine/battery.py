@@ -24,6 +24,8 @@ import datetime as dt
 import os
 import uuid
 
+import store
+
 LOG_FIELDS = ["Id", "Date", "Device", "Event", "Battery", "Level", "Notes",
               "Source", "Updated", "Deleted"]
 HISTORY_FIELDS = ["Time", "Device", "Provider", "Level", "Pct"]
@@ -31,27 +33,15 @@ EVENTS = ("replaced", "charged", "checked", "note")
 EDITABLE = ("Date", "Device", "Event", "Battery", "Level", "Notes")
 # A jump this big, from this low or lower, means fresh batteries.
 JUMP, FROM_AT_MOST = 40, 50
+LABEL_FROM_AT_MOST = 10        # a word label counts only from 'low' / 'critical' / 'empty'
 
 
 def now_iso():
     return dt.datetime.now().replace(microsecond=0).isoformat()
 
 
-def _read(path, fields):
-    if not os.path.exists(path):
-        return []
-    with open(path, newline="", encoding="utf-8") as f:
-        return [{k: (r.get(k) or "").strip() for k in fields}
-                for r in csv.DictReader(f, delimiter=";")]
-
-
-def _write(path, fields, rows):
-    tmp = path + ".tmp"
-    with open(tmp, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
-        w.writeheader()
-        w.writerows({k: r.get(k, "") for k in fields} for r in rows)
-    os.replace(tmp, path)
+_read = store.read_rows
+_write = store.write_rows
 
 
 def load_log(path, include_deleted=False):
@@ -134,6 +124,24 @@ def delete_entry(rows, entry_id):
 # --------------------------------------------------------------------------- #
 # readings -> history + automatic 'replaced' entries
 # --------------------------------------------------------------------------- #
+def _numeric(r):
+    label = str(r.get("label") or "")
+    return label in ("", str(r.get("pct"))) or label.isdigit()
+
+
+def _replaced(old, new):
+    """A rise big enough to mean new batteries. Only within one provider (a
+    switch from HA's 30% to Tuya's 'high' is not a replacement), and from a
+    word label (Flume high/medium/low, Blink ok/low) only when it climbs from
+    the bottom one: those labels wobble across a boundary, and medium -> high
+    is a 50-point 'rise' that nobody made."""
+    if old.get("provider", "") != new.get("provider", ""):
+        return False
+    if old["pct"] > FROM_AT_MOST or new["pct"] - old["pct"] < JUMP:
+        return False
+    return (_numeric(old) and _numeric(new)) or old["pct"] <= LABEL_FROM_AT_MOST
+
+
 def record_levels(log_rows, history_rows, before, after, now=None):
     """Fold one monitor pass into the history and the log.
     before / after: {device: {'pct', 'label', 'provider'}} from the monitor
@@ -153,7 +161,7 @@ def record_levels(log_rows, history_rows, before, after, now=None):
              "Level": str(b.get("label") or b["pct"]), "Pct": str(b["pct"])}
         history_rows.append(h)
         new_hist.append(h)
-        if old is not None and old <= FROM_AT_MOST and b["pct"] - old >= JUMP:
+        if old is not None and _replaced(before.get(dev) or {}, b):
             new_log.append(add_entry(
                 log_rows, dev, "replaced", now[:10], level=str(b["pct"]),
                 notes=f"detected: {b.get('provider', '')} level rose from {old}% to {b['pct']}%",

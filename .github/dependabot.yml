@@ -1,0 +1,16 @@
+# Weekly update proposals. The 7-day cooldown keeps a brand-new release (the
+# window in which a hijacked package is usually caught) out of the proposals.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /engine
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+  - package-ecosystem: pub
+    directory: /app
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }

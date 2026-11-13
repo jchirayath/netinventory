@@ -16,6 +16,17 @@ class WriteResult {
   String get error => '${body['error'] ?? 'HTTP $status'}';
 }
 
+/// A read the agent answered with something other than 200. [status] lets a
+/// caller tell "this agent doesn't have that endpoint" (404, an older
+/// version) from a real failure that the user should see.
+class ApiError implements Exception {
+  final int status;
+  const ApiError(this.status);
+  bool get notFound => status == 404;
+  @override
+  String toString() => 'HTTP $status';
+}
+
 class Api {
   String base;
 
@@ -29,7 +40,7 @@ class Api {
         .get(Uri.parse('$base$path'))
         .timeout(const Duration(seconds: 6));
     if (r.statusCode != 200) {
-      throw 'HTTP ${r.statusCode}';
+      throw ApiError(r.statusCode);
     }
     return jsonDecode(r.body);
   }
@@ -48,7 +59,9 @@ class Api {
       try {
         final d = jsonDecode(r.body);
         if (d is Map<String, dynamic>) j = d;
-      } catch (_) {}
+      } on FormatException {
+        // not JSON (a proxy's HTML error page): the status alone tells the caller
+      }
       return WriteResult(r.statusCode, j);
     } catch (_) {
       return const WriteResult(0, {'error': 'could not reach the agent'});

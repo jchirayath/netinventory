@@ -166,6 +166,7 @@ class _HomePageState extends State<HomePage> {
   List<dynamic> _devices = [];
   List<dynamic> _alerts = [];
   Map<String, dynamic> _batteries = {};
+  String? _batteryError; // batteries failed to load (not just absent)
   String _filter = '';
   String? _error;
   bool _loading = false;
@@ -202,14 +203,21 @@ class _HomePageState extends State<HomePage> {
       final d = await _api.devices();
       final a = await _api.alerts();
       Map<String, dynamic> b = {};
+      String? batteryError;
       try {
         b = await _api.batteries();
-      } catch (_) {} // an older agent without /api/batteries: empty tab
+      } on ApiError catch (e) {
+        // only an older agent without /api/batteries means an empty tab
+        if (!e.notFound) batteryError = '$e';
+      } catch (e) {
+        batteryError = '$e';
+      }
       setState(() {
         _summary = s;
         _devices = d;
         _alerts = a;
         _batteries = b;
+        _batteryError = batteryError;
         _error = null;
       });
     } catch (e) {
@@ -276,7 +284,10 @@ class _HomePageState extends State<HomePage> {
                     : _tab == 1
                         ? _alertList()
                         : BatteriesTab(
-                            api: _api, data: _batteries, onChanged: _refresh),
+                            api: _api,
+                            data: _batteries,
+                            error: _batteryError,
+                            onChanged: _refresh),
           ),
         ]),
       ),

@@ -355,7 +355,8 @@ class _ServerCase(unittest.TestCase):
     def start(self, allow_write=True, passcode="", local=True):
         self.tmp = tempfile.TemporaryDirectory()
         paths = {"BATTERY_LOG": "battery_log.csv", "BATTERY_HISTORY": "battery_history.csv",
-                 "MONITORS_CSV": "monitors.csv", "MONITOR_STATE": "monitor_state.json"}
+                 "MONITORS_CSV": "monitors.csv", "MONITOR_STATE": "monitor_state.json",
+                 "AUDIT_LOG": "audit.csv"}
         self.patches = [mock.patch.object(netinv, k, os.path.join(self.tmp.name, v))
                         for k, v in paths.items()]
         self.patches.append(mock.patch.object(netinv, "serve_passcode", return_value=passcode))
@@ -679,6 +680,9 @@ class TestAgent(_ServerCase):
 
         class Redirect(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                # read the body first: replying mid-upload can reset the
+                # connection, and the client sees that instead of the 307
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 self.send_response(307)
                 self.send_header("Location", "http://127.0.0.1:9/steal")
                 self.end_headers()

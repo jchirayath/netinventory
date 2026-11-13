@@ -34,6 +34,8 @@ import subprocess
 import urllib.error
 import urllib.request
 
+import store
+
 # name -> (rule, key columns, columns merged (None = all), deletions sync?)
 FILES = {
     "battery_log.csv":     ("updated", ("Id",), None, True),
@@ -188,11 +190,7 @@ def import_dir(data_dir, files):
     for name, text in files.items():
         if name not in FILES:
             raise ValueError(f"refusing to write {name!r}")
-        p = os.path.join(data_dir, name)
-        tmp = p + ".sync-tmp"
-        with open(tmp, "w", encoding="utf-8", newline="") as f:
-            f.write(text)
-        os.replace(tmp, p)
+        store.write_text(os.path.join(data_dir, name), text)
 
 
 class LocalTarget:
@@ -276,11 +274,17 @@ def agent_import(data_dir, files, expect):
     for name in files:
         if name not in FILES or not isinstance(files[name], str):
             raise ValueError(f"refusing to write {name!r}")
-        p = os.path.join(data_dir, name)
-        now = _read(p, None)
+    _unchanged(data_dir, files, expect)
+    import_dir(data_dir, files)
+
+
+def _unchanged(data_dir, names, expect):
+    """Raise Conflict unless each named file still has its expected
+    fingerprint ("" = absent)."""
+    for name in names:
+        now = _read(os.path.join(data_dir, name), None)
         if (fingerprint(now) if now is not None else "") != expect.get(name, ""):
             raise Conflict(name)
-    import_dir(data_dir, files)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -383,6 +387,11 @@ def sync(data_dir, tgt, dry_run=False, log=print, scanner=False):
             continue
         bp = os.path.join(base_dir, name)
         base_text = old[name]
+        if m is None or t is None:
+            # A file missing on one side (a wiped volume, a fresh copy) is
+            # copied across. Merged against the old base, every row would look
+            # deleted over there and be deleted here too.
+            base_text = ""
         mine_newer = (m or {}).get("mtime", 0) >= (t or {}).get("mtime", 0)
         new_m, new_t, new_b = merge_file(name, base_text, (m or {}).get("text", ""),
                                          (t or {}).get("text", ""), mine_newer, scanner)
@@ -394,20 +403,25 @@ def sync(data_dir, tgt, dry_run=False, log=print, scanner=False):
         if cm or ct:
             changed[name] = (cm, ct)
             log(f"  {name}: " + " and ".join(s for s, c in (("this copy", cm),
-                                                             (tgt.label, ct)) if c) + " updated")
+                                                             (tgt.label, ct)) if c)
+                + (" would be updated (dry run)" if dry_run else " updated"))
         bases[bp] = new_b
     if dry_run:
         return changed
+    # This copy is checked the way the server checks an agent's import: a file
+    # edited here during the round trip (serve runs in another process) makes
+    # the sync start over instead of overwriting that edit with the merge.
+    expect = {n: fingerprint(f["text"]) for n, f in mine.items()}
+    _unchanged(data_dir, to_mine, expect)
     if to_theirs:
         tgt.import_(to_theirs)
     if to_mine:
-        import_dir(data_dir, to_mine)
+        agent_import(data_dir, to_mine, expect)
     # Only once both sides hold the merge: a failed write must not make the
     # next sync think unsent edits are already shared.
     # Unchanged bases aren't rewritten: an idle sync writes nothing (SD cards).
     os.makedirs(base_dir, exist_ok=True)
     for bp, text in bases.items():
         if text != old.get(os.path.basename(bp)):
-            with open(bp, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
+            store.write_text(bp, text)
     return changed

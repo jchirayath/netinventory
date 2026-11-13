@@ -103,6 +103,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=$ABS/engine
+Environment=PYTHONUNBUFFERED=1
 ExecStart=$ABS/engine/.venv/bin/python netinv.py $3
 Restart=always
 RestartSec=30
@@ -126,6 +127,26 @@ else
   systemctl --user disable --now netinv-serve >/dev/null 2>&1 || true
 fi
 systemctl --user --no-pager --lines=0 status netinv-watch netinv-serve 2>/dev/null | grep -E "●|Active:" || true
+# `restart` returns as soon as the process starts; prove it stayed up (and
+# that the dashboard answers) before anyone reads "deployed".
+sleep 5
+WANT="netinv-watch"; [ "$SERVE" = 1 ] && WANT="$WANT netinv-serve"
+for u in $WANT; do
+  if [ "$(systemctl --user is-active "$u")" != active ]; then
+    journalctl --user -u "$u" -n 20 --no-pager || true
+    echo "  ! $u is not running (log above)"; exit 1
+  fi
+done
+if [ "$SERVE" = 1 ]; then
+  ok=""
+  for _ in 1 2 3 4 5; do
+    python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8787/api/summary", timeout=5)' \
+      2>/dev/null && { ok=1; break; }
+    sleep 2
+  done
+  [ -n "$ok" ] || { journalctl --user -u netinv-serve -n 20 --no-pager || true
+                    echo "  ! the dashboard doesn't answer on :8787 (log above)"; exit 1; }
+fi
 if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != yes ]; then
   echo "  ! to keep running after you log out and across reboots: sudo loginctl enable-linger $USER"
 fi

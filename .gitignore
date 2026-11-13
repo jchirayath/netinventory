@@ -14,6 +14,8 @@ monitors.csv
 monitor_state.json
 battery_log.csv
 battery_history.csv
+audit.csv
+audit.csv.1
 .sync/
 
 # Cached/scraped pages and any raw captures

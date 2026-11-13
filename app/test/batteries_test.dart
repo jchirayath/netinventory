@@ -90,7 +90,13 @@ void main() {
     await tester.tap(find.text('Flume Sensor'));
     await tester.pumpAndSettle();
     expect(find.text('Change log'), findsOneWidget);
+    // the sheet's list builds lazily: bring the entry into view first
+    await tester.scrollUntilVisible(find.textContaining('Energizer'), 80,
+        scrollable: find.byType(Scrollable).last);
     expect(find.textContaining('Energizer'), findsOneWidget);
+    // the test client answers every request with 400: a failed history
+    // load is shown as a failure, not as "no readings"
+    expect(find.textContaining('History unavailable'), findsOneWidget);
     await tester.tap(find.text('Edit details'));
     await tester.pumpAndSettle();
     expect(find.text('Track its battery'), findsOneWidget);

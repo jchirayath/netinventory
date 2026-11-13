@@ -27,6 +27,7 @@ import argparse
 import csv
 import datetime as dt
 import http.cookiejar
+import io
 import json
 import os
 import re
@@ -35,10 +36,13 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
+
+import store
 
 HERE = os.path.dirname(os.path.abspath(__file__))     # code + read-only assets
 # Writable data lives in DATA_DIR (defaults to the code dir, so running from a
@@ -137,6 +141,23 @@ TODAY = dt.date.today().isoformat()
 def now_stamp():
     return dt.datetime.now().isoformat(timespec="seconds")
 
+
+# Log lines from the long-running commands (watch, serve, agent): a timestamp,
+# because on the Mac they go to a plain file (scan-jobs.sh), a level to grep
+# for, and a flush, because under launchd, systemd or docker stdout is a pipe
+# and a buffered warning would arrive hours late or die with the process.
+# One-off commands keep plain print(): that output is for the person typing.
+def log(msg, level="INFO"):
+    print(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} {level:<5} {msg.strip()}", flush=True)
+
+
+def warn(msg):
+    log(msg, "WARN")
+
+
+def error(msg):
+    log(msg, "ERROR")
+
 MAC_RE = re.compile(r"\b([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})\b")
 
 
@@ -222,12 +243,7 @@ def save_master(rows, base=None):
                     rows[mac][f] = d[f]
     # sorted by IP address (devices with no current IP sort last)
     ordered = sorted(rows.values(), key=lambda r: ip_key(r["IP"]))
-    tmp = MASTER + ".tmp"
-    with open(tmp, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
-        w.writeheader()
-        w.writerows(ordered)
-    os.replace(tmp, MASTER)                      # readers never see a half-written file
+    store.write_rows(MASTER, FIELDS, ordered)    # atomic: readers never see half a file
 
 
 # --------------------------------------------------------------------------- #
@@ -421,12 +437,20 @@ def ssdp_discover(timeout=3):
         except Exception:  # noqa: BLE001
             pass
 
+    import sync
     ip2mac = arp_table()
     out = []
     for ip, url in locs.items():
         name = vendor = ""
+        # The reply is from anything on the Wi-Fi: fetch its description only
+        # over http from a LAN address, never following a redirect, so it
+        # can't point this Mac at a file:// path or a host on the internet.
+        u = urllib.parse.urlsplit(url)
+        if u.scheme != "http" or not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", u.hostname or "") \
+                or not is_lan_ip(u.hostname):
+            continue
         try:
-            with urllib.request.urlopen(url, timeout=4) as r:
+            with sync.agent_opener().open(url, timeout=4) as r:
                 xml = r.read().decode("utf-8", "replace")
             fn = re.search(r"<friendlyName>([^<]+)</friendlyName>", xml, re.I)
             mn = re.search(r"<modelName>([^<]+)</modelName>", xml, re.I)
@@ -761,9 +785,12 @@ def router_scan(user, password):
         try:
             cj.save(ignore_discard=True, ignore_expires=True)
             os.chmod(ROUTER_COOKIES, 0o600)
-        except Exception:  # noqa: BLE001
-            pass
-        print("  router: logged in (session cached for reuse)")
+            print("  router: logged in (session cached for reuse)")
+        except OSError as e:
+            # Without the cache every poll logs in afresh, which is what trips
+            # the gateway's lockout: say so, don't claim it was cached.
+            warn(f"router: logged in, but couldn't cache the session in "
+                 f"{ROUTER_COOKIES} ({e}); each poll will log in again")
 
     # success -> clear any stale cooldown marker
     if os.path.exists(ROUTER_COOLDOWN_FILE):
@@ -1080,10 +1107,11 @@ def prune_events():
         if keep:
             kept.append(r)
     if len(kept) != len(data):
-        with open(EVENTS_LOG, "w", newline="") as f:
-            w = csv.writer(f, delimiter=";")
-            w.writerow(header)
-            w.writerows(kept)
+        out = io.StringIO()
+        w = csv.writer(out, delimiter=";")
+        w.writerow(header)
+        w.writerows(kept)
+        store.write_text(EVENTS_LOG, out.getvalue())
 
 
 def log_events(rows, kind="join"):
@@ -1103,17 +1131,30 @@ def log_events(rows, kind="join"):
                         band(r["Link"]), r["Device"], r["Source"]])
 
 
+_NOTIFY_WARNED = set()
+
+
 def notify(title, message):
-    """Best-effort macOS Notification Center banner."""
+    """Best-effort macOS Notification Center banner. Where it can't work (not
+    a Mac, or notifications refused) it says so once, then stays quiet."""
+    if sys.platform != "darwin":
+        if "platform" not in _NOTIFY_WARNED:
+            _NOTIFY_WARNED.add("platform")
+            warn("notifications need macOS; on this machine use --email")
+        return
     try:
         msg = message.replace('"', "'").replace("\\", "")
         ttl = title.replace('"', "'")
-        subprocess.run(
+        r = subprocess.run(
             ["osascript", "-e",
              f'display notification "{msg}" with title "{ttl}" sound name "Submarine"'],
-            capture_output=True, timeout=5)
-    except Exception:  # noqa: BLE001
-        pass
+            capture_output=True, text=True, timeout=5)
+        failed = r.returncode and (r.stderr.strip() or f"exit {r.returncode}")
+    except (OSError, subprocess.SubprocessError) as e:
+        failed = str(e)
+    if failed and "osascript" not in _NOTIFY_WARNED:
+        _NOTIFY_WARNED.add("osascript")
+        warn(f"notification not shown: {failed[:200]}")
 
 
 def report_presence(master, before_status):
@@ -1205,11 +1246,6 @@ def email_settings():
     """Whatever email fields are stored, missing ones as None."""
     import connectors
     return {f: connectors.kc_get("email", f) for f, _s, _p in EMAIL_FIELDS}
-
-
-def email_creds():
-    out = email_settings()
-    return out if all(out.values()) else None
 
 
 # Arguments go in as argv, never spliced into the script, so a device name with
@@ -1324,7 +1360,7 @@ def email_events(master, new, changes, away=None):
     room_of = {h["Device"]: h["Room"] for h in home.load_home(HOME_CSV)
                if h["Device"] and h["Room"] != home.TODO}
     ok, msg = send_email(*event_email(events, room_of, changes, away))
-    print(f"  email: {msg}")
+    (log if ok else error)(f"email: {msg}")
 
 
 def cmd_set_email(args):
@@ -1924,18 +1960,19 @@ def auto_name(master):
     overwrites a name you've set. Returns the number of devices auto-named.
     A name already taken gets a number ('Amazon Echo Dot 2'): one Device name
     is one physical device, so three Dots must not merge into one."""
-    taken = {r["Device"].lower() for r in master.values() if r["Device"]}
+    import home
+    taken = {home.name_key(r["Device"]) for r in master.values() if r["Device"]}
     n = 0
     for row in master.values():
         if row["Device"]:
             continue
         if name_quality(row["Hostname"]) >= 3:
             name, i = row["Hostname"], 1
-            while name.lower() in taken:
+            while home.name_key(name) in taken:
                 i += 1
                 name = f"{row['Hostname']} {i}"
             row["Device"] = name
-            taken.add(name.lower())
+            taken.add(home.name_key(name))
             n += 1
     return n
 
@@ -2026,24 +2063,35 @@ def cmd_watch(args):
             sightings += ssdp_discover()
         if not args.no_mdns:
             sightings += mdns_discover()
-        seen = merge(master, sightings)
-        auto_name(master)
-        save_master(master, base)
-        write_reports(master)
-        new = report_new(master, before, do_notify=args.notify)
-        left, back = report_presence(master, before_status)
-        changes = report_changes(master, before_detail)
-        print(f"  [{now_stamp()}] poll #{n}: {len(seen)} online, {len(new)} new, "
-              f"{len(changes)} changed, {len(left)} left, {len(back)} back")
-        if args.email:
-            email_events(master, new, changes, long_absent(back, before_seen))
+        # Nobody at all answered (Wi-Fi down, the Mac away from home, the
+        # sweep tools failing): that says nothing about the devices. Leave
+        # every status as it is instead of marking the house offline, logging
+        # a 'leave' per device and alerting on each monitor half an hour on.
+        blind = not sightings
+        if blind:
+            warn(f"poll #{n}: the scan heard nothing on {SUBNET}; presence left unchanged")
+            seen = set()
+        else:
+            seen = merge(master, sightings)
+            auto_name(master)
+            save_master(master, base)
+            write_reports(master)
+            new = report_new(master, before, do_notify=args.notify)
+            left, back = report_presence(master, before_status)
+            changes = report_changes(master, before_detail)
+            log(f"poll #{n}: {len(seen)} online, {len(new)} new, "
+                f"{len(changes)} changed, {len(left)} left, {len(back)} back")
+            if args.email:
+                email_events(master, new, changes, long_absent(back, before_seen))
         if not args.no_monitor:
-            monitor_pass(master, seen, do_email=args.email, do_notify=args.notify)
+            monitor_pass(master, seen, do_email=args.email, do_notify=args.notify,
+                         lan_checked=not blind)
         sync_target = args.sync or SYNC_TARGET
         if sync_target and time.time() - last_sync >= sync_every:
             last_sync = time.time()
             run_sync(sync_target)
-        heartbeat()
+        if not blind:                    # a blind watch shouldn't look healthy outside
+            heartbeat()
         if args.once:
             break
         time.sleep(args.interval)
@@ -2057,10 +2105,11 @@ MONITOR_WORD = {"offline": "OFFLINE", "online": "BACK ONLINE",
 
 
 def monitor_pass(master, seen_online=None, *, do_email=False, do_notify=False,
-                 cloud="auto"):
+                 cloud="auto", lan_checked=True):
     """Check the enabled monitors once and deliver what crossed a threshold.
     seen_online: MACs a sweep just saw (watch); None probes each device
-    itself. cloud: 'auto' asks the battery clouds every MONITOR_CLOUD_EVERY,
+    itself. lan_checked=False: the sweep heard nobody, so LAN presence isn't
+    judged this pass (see monitor.run). cloud: 'auto' asks the battery clouds every MONITOR_CLOUD_EVERY,
     'now' always, 'skip' never. Returns [(device, kind, message)]."""
     import home
     import monitor
@@ -2084,7 +2133,7 @@ def monitor_pass(master, seen_online=None, *, do_email=False, do_notify=False,
     home_rows = home.load_home(HOME_CSV)
     before = {k: dict(v.get("battery") or {}) for k, v in state.items() if k != "_meta"}
     alerts = monitor.run(mons, master, state, readings, home_rows=home_rows, now=now,
-                         seen_online=seen_online, arp=arp_table())
+                         seen_online=seen_online, arp=arp_table(), lan_checked=lan_checked)
     if readings is not None:
         record_battery_levels(before, {k: v.get("battery") for k, v in state.items()
                                        if k != "_meta"})
@@ -2092,8 +2141,15 @@ def monitor_pass(master, seen_online=None, *, do_email=False, do_notify=False,
     names = {m["Device"] for m in monitor.load(MONITORS_CSV)}
     for k in [k for k in state if k != "_meta" and k not in names]:
         del state[k]
+    # An alert counts as sent only once it is: one that couldn't be emailed
+    # waits in the state and goes with the next pass (the 'alerted' flags
+    # stop it being raised again, so without this it would be lost).
+    pending = meta.pop("undelivered", []) if do_email else []
+    failed = deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify,
+                                    pending=pending)
+    if failed:
+        meta["undelivered"] = failed[-50:]
     monitor.save_state(MONITOR_STATE, state)
-    deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify)
     return alerts
 
 
@@ -2361,45 +2417,71 @@ def cmd_battery(args):
     print(f"\n  log a change: netinv battery log \"<device>\" --type \"2x AA\" --note \"...\"")
 
 
-def deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify):
-    """Print, log to events.csv, and optionally notify / email monitor alerts."""
-    if not alerts:
-        return
+def deliver_monitor_alerts(alerts, master, home_rows, do_email, do_notify, pending=()):
+    """Print, log to events.csv, and optionally notify / email monitor alerts.
+    pending: [device, kind, message, time] from passes whose email failed;
+    they go in this email too. Returns the alerts still not emailed (with
+    their times) when the email fails, else []."""
     import monitor
     room_of = {h["Device"]: h["Room"] for h in home_rows if h["Device"]}
-    lines = [f"Device alerts at {now_stamp()}", ""]
+    stamp = now_stamp()
+    queue = [list(p) for p in pending if len(p) == 4 and p[1] in MONITOR_WORD]
     for dev, kind, msg in alerts:
-        print(f"    ! {dev}: {msg}")
+        log(f"alert {dev}: {msg}")
         rows = monitor.rows_for({"Device": dev}, master)
         r = dict(rows[0]) if rows else {k: "" for k in FIELDS}
         r["Device"], r["Source"] = dev, f"monitor: {msg}"
         log_events([r], kind=kind)
         if do_notify:
             notify(f"{dev}: {MONITOR_WORD[kind].lower()}", msg)
-        lines += [f"{MONITOR_WORD[kind]}: {dev}", f"  {msg}",
-                  f"  Room: {room_of.get(dev) or '-'}   IP: {r['IP'] or '-'}   MAC: {r['MAC'] or '-'}", ""]
-    if do_email:
-        counts = {}
-        for _d, kind, _m in alerts:
-            counts[kind] = counts.get(kind, 0) + 1
-        subject = (f"netinventory: {alerts[0][0]} {alerts[0][2]}" if len(alerts) == 1 else
-                   "netinventory: " + ", ".join(f"{n} {MONITOR_WORD[k].lower()}"
-                                                for k, n in counts.items()))
-        ok, msg = send_email(subject, "\n".join(lines))
-        print(f"  email: {msg}")
+        queue.append([dev, kind, msg, stamp])
+    if not do_email or not queue:
+        return []
+    if not email_settings().get("to"):
+        warn("alerts not emailed: email isn't set up (netinv set-email)")
+        return []
+    lines = [f"Device alerts at {stamp}", ""]
+    counts = {}
+    for dev, kind, msg, at in queue:
+        counts[kind] = counts.get(kind, 0) + 1
+        rows = monitor.rows_for({"Device": dev}, master)
+        r = rows[0] if rows else {}
+        late = f"   (raised {at.replace('T', ' ')}; not delivered then)" if at != stamp else ""
+        lines += [f"{MONITOR_WORD[kind]}: {dev}{late}", f"  {msg}",
+                  f"  Room: {room_of.get(dev) or '-'}   IP: {r.get('IP') or '-'}   "
+                  f"MAC: {r.get('MAC') or '-'}", ""]
+    subject = (f"netinventory: {queue[0][0]} {queue[0][2]}" if len(queue) == 1 else
+               "netinventory: " + ", ".join(f"{n} {MONITOR_WORD[k].lower()}"
+                                            for k, n in counts.items()))
+    ok, msg = send_email(subject, "\n".join(lines))
+    if ok:
+        log(f"email: {msg}")
+        return []
+    error(f"alert email failed, {len(queue)} alert(s) kept for the next pass: {msg}")
+    return queue
 
 
 def run_sync(spec, dry_run=False, scanner=None):
     """Sync with another copy; a failure is printed, never raised, so a
     Pi that's down can't stop the watch. Returns the changed files or None."""
     import sync
-    try:
-        changed = sync.sync(DATA_DIR, sync.target(spec, SYNC_KEY), dry_run=dry_run,
-                            scanner=SYNC_SCANNER if scanner is None else scanner)
-    except Exception as e:  # noqa: BLE001
-        print(f"  ! sync with {spec}: {e}")
-        return None
-    print(f"  sync with {spec}: " + (f"{len(changed)} file(s) merged" if changed else "in step"))
+    for attempt in range(3):
+        try:
+            changed = sync.sync(DATA_DIR, sync.target(spec, SYNC_KEY), dry_run=dry_run,
+                                scanner=SYNC_SCANNER if scanner is None else scanner)
+            break
+        except sync.Conflict as e:       # an edit landed mid-sync; merge again
+            if attempt == 2:
+                warn(f"sync with {spec}: {e} kept changing; trying again next time")
+                return None
+        except Exception as e:  # noqa: BLE001
+            error(f"sync with {spec}: {e}")
+            return None
+    if dry_run:
+        log(f"sync with {spec} (dry run, nothing written): "
+            + (f"{len(changed)} file(s) would merge" if changed else "in step"))
+    else:
+        log(f"sync with {spec}: " + (f"{len(changed)} file(s) merged" if changed else "in step"))
     return changed
 
 
@@ -2427,7 +2509,7 @@ def agent_token():
 
 def cmd_agent_token(args):
     """Show whether an agent token is set (never the token), or --generate one.
-    Copy it to the other side with creds-export | creds-import."""
+    Copy it to the other side with creds-export --only agent | creds-import."""
     import connectors
     import hashlib
     import secrets
@@ -2458,7 +2540,7 @@ def cmd_agent(args):
 
     def say_err(msg):
         if msg != last_err[0]:          # once per distinct error, not per retry
-            print(f"  ! {msg}", flush=True)
+            warn(msg)
             last_err[0] = msg
 
     def run():
@@ -2471,12 +2553,12 @@ def cmd_agent(args):
                 say_err(f"sync with {url}: {e}")
                 return False
             if last_err[0]:
-                print("  sync working again", flush=True)
+                log("sync working again")
                 last_err[0] = ""
             if changed:
-                print(f"  {now_stamp()} synced: " + ", ".join(
+                log("synced: " + ", ".join(
                     f"{n} ({'here' if m else ''}{' and ' if m and t else ''}{'server' if t else ''})"
-                    for n, (m, t) in sorted(changed.items())), flush=True)
+                    for n, (m, t) in sorted(changed.items())))
             return True
         say_err(f"sync with {url}: kept changing; trying again later")
         return False
@@ -2520,13 +2602,18 @@ def cmd_creds(args):
         if sys.stdout.isatty():
             sys.exit("  refusing to print secrets to a terminal; pipe it (deploy.sh does)")
         out = {"creds": {}, "tokens": {}}
+        only = {p.strip() for p in (getattr(args, "only", "") or "").split(",") if p.strip()}
+        if only - set(providers):
+            sys.exit(f"  ! unknown provider(s): {', '.join(sorted(only - set(providers)))}")
         for p, fields in providers.items():
+            if only and p not in only:
+                continue
             got = {f: v for f, *_ in fields if (v := connectors.kc_get(p, f))}
             if got:
                 out["creds"][p] = got
         for t in TOKEN_FILES:
             path = os.path.expanduser(t)
-            if os.path.exists(path):
+            if os.path.exists(path) and not only:
                 with open(path) as f:
                     out["tokens"][os.path.basename(path)] = f.read()
         json.dump(out, sys.stdout)
@@ -2558,7 +2645,7 @@ def heartbeat():
     try:
         urllib.request.urlopen(HEARTBEAT_URL, timeout=10).close()
     except Exception as e:  # noqa: BLE001
-        print(f"  ! heartbeat: {e}")
+        warn(f"heartbeat: {e}")
 
 
 def local_macs():
@@ -3531,7 +3618,7 @@ function cell(d,c){
  if(c.t=='sig')return sig(d);
  if(c.t=='mac')return `<span class=pill>${esc(d.MAC)}</span>`;
  if(c.k=='Device'){const base=d.Device?esc(d.Device):`<i>${esc(d.Hostname||'—')}</i>`;
-  return base+(WRITABLE?` <span class=edit title="rename" onclick="rename('${esc(d.MAC)}')">&#9998;</span>`:'')}
+  return base+(WRITABLE?` <span class=edit title="rename" data-mac="${esc(d.MAC)}">&#9998;</span>`:'')}
  return esc(val(d,c))}
 function rowHtml(d,ev){
  const cls=[d.signal=='weak'?'weak':'',d.Status!='online'?'dim':'',ev?'ev':''].filter(Boolean).join(' ');
@@ -3570,14 +3657,18 @@ function renderBody(){
      `<span class=caret>${col?'▸':'▾'}</span>${esc(glbl(k))}${roll}</td></tr>`;
    if(!col){n=0;html+=g.map(d=>rowHtml(d,(n++)%2==1)).join('')}}}
  t.innerHTML=html||`<tr><td colspan=${COLS.length} style=color:#999;padding:12px>no devices match</td></tr>`;
+ t.querySelectorAll('.edit[data-mac]').forEach(s=>s.onclick=()=>rename(s.dataset.mac));
  t.querySelectorAll('tr.grp').forEach(r=>r.onclick=()=>{
   const id=r.dataset.cid;ST.collapsed[id]=!ST.collapsed[id];renderBody()});
  shown.textContent=rows.length}
 function render(){renderHead();renderBody()}
 let shownTotal={total:0,online:0,unnamed:0};const shown={set textContent(v){upSum(v)}};
 function upSum(v){sum.innerHTML=`<b>${v}</b> shown · ${shownTotal.total} total · `+
-  `${shownTotal.online} online · <span style="cursor:pointer;text-decoration:underline dotted" `+
-  `title="filter to unnamed" onclick="tog('unnamed')">${shownTotal.unnamed} unnamed</span>`}
+  `${shownTotal.online} online · <span id=unn style="cursor:pointer;text-decoration:underline dotted" `+
+  `title="filter to unnamed">${shownTotal.unnamed} unnamed</span>`+
+  (shownTotal.agent_last_sync?` · <span title="this copy is kept in step by the Pi">`+
+   `synced from the Pi ${esc(shownTotal.agent_last_sync.replace('T',' '))}</span>`:'');
+ const u=document.getElementById('unn');if(u)u.onclick=()=>tog('unnamed')}
 function tog(f){ST[f]=!ST[f];({weak:cw,off:co,unnamed:cu,def:cd})[f].classList.toggle('on',ST[f]);renderBody()}
 async function rename(mac){const d=D.find(x=>x.MAC==mac);if(!d)return;
  const name=prompt('Device name for '+mac+' (blank to clear):',d.Device||'');
@@ -4028,8 +4119,9 @@ class PasscodeGuard:
     its sender a DELAY (outside the lock, so other clients aren't held up)."""
     MAX, WINDOW, DELAY = 10, 600, 1.0
 
-    def __init__(self):
+    def __init__(self, what="passcodes", locks="its edits"):
         import threading
+        self.what, self.locks = what, locks       # for the log line
         self._lock = threading.Lock()
         self._fails = {}                 # address -> [miss times]
         self._until = {}                 # address -> locked until
@@ -4044,8 +4136,8 @@ class PasscodeGuard:
             fails = [t for t in self._fails.get(addr, []) if now - t < self.WINDOW] + [now]
             if len(fails) >= self.MAX:
                 self._until[addr], fails = now + self.WINDOW, []
-                print(f"  ! {self.MAX} wrong passcodes from {addr}: its edits locked "
-                      f"for {self.WINDOW // 60} minutes")
+                warn(f"{self.MAX} wrong {self.what} from {addr}: {self.locks} locked "
+                     f"for {self.WINDOW // 60} minutes")
             self._fails[addr] = fails
         time.sleep(self.DELAY)
 
@@ -4118,9 +4210,95 @@ def _local_client(addr, headers=None):
 
 
 def serve_passcode():
-    """The passcode other devices need to edit through serve, or ''."""
+    """What checks the passcode other devices need to edit through serve: a
+    scrypt verifier (see passcode_hash), a plain passcode stored by an older
+    version, or '' when none is set."""
     import connectors
     return connectors.kc_get("serve", "passcode") or ""
+
+
+_SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1, "dklen": 32}
+
+
+def passcode_hash(p):
+    """A salted scrypt verifier, so the stored value is never the passcode."""
+    import hashlib
+    salt = os.urandom(16)
+    h = hashlib.scrypt(p.encode(), salt=salt, **_SCRYPT)
+    return f"scrypt${salt.hex()}${h.hex()}"
+
+
+def passcode_ok(given, stored):
+    """Constant-time check of a passcode against what serve_passcode() holds."""
+    import hashlib
+    import hmac
+    if stored.startswith("scrypt$"):
+        try:
+            _, salt, want = stored.split("$")
+            got = hashlib.scrypt(given.encode(), salt=bytes.fromhex(salt), **_SCRYPT)
+            return hmac.compare_digest(got.hex(), want)
+        except ValueError:
+            return False
+    return hmac.compare_digest(given.encode(), stored.encode())
+
+
+def _upgrade_passcode(stored):
+    """Store a plain passcode left by an older version as a verifier.
+    Returns what serve should check against from now on."""
+    if not stored or stored.startswith("scrypt$"):
+        return stored
+    import connectors
+    verifier = passcode_hash(stored)
+    try:
+        connectors.kc_set("serve", "passcode", verifier)
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"  ! couldn't store the passcode as a hash ({e}); still checking it",
+              file=sys.stderr)
+    return verifier
+
+
+# Sent with every response from serve. No CORS header (see _send). The pages
+# keep their scripts inline, hence 'unsafe-inline'; everything else stays on
+# this origin, and no other site may frame the pages (clickjacking an edit).
+_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'")
+
+
+# Edits through serve, and refused attempts, one line each. It stays on this
+# copy (sync never carries it, so the agent can't rewrite it) and is capped:
+# past AUDIT_MAX bytes it moves to audit.csv.1 and a new one starts.
+AUDIT_LOG = os.path.join(DATA_DIR, "audit.csv")
+AUDIT_MAX = 1_000_000
+AUDIT_KEYS = ("device", "mac", "id", "old", "room", "name", "type", "app", "key")
+# what the agent pushes from a scan, not anyone's edit
+SCAN_FILES = {"devices.csv", "monitor_state.json", "events.csv", "app_rooms.csv",
+              "battery_history.csv"}
+_audit_lock = threading.Lock()
+
+
+def audit(who, action, target, status, detail=""):
+    row = [now_stamp(), who, action, str(target)[:120], str(status), str(detail)[:300]]
+    with _audit_lock:
+        try:
+            new = not os.path.exists(AUDIT_LOG)
+            if not new and os.path.getsize(AUDIT_LOG) > AUDIT_MAX:
+                os.replace(AUDIT_LOG, AUDIT_LOG + ".1")
+                new = True
+            with open(AUDIT_LOG, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f, delimiter=";")
+                if new:
+                    w.writerow(["Time", "Who", "Action", "Target", "Status", "Detail"])
+                w.writerow(row)
+        except OSError as e:
+            warn(f"audit: couldn't write {AUDIT_LOG}: {e}")
+
+
+def _security_headers(handler):
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Content-Security-Policy", _CSP)
+    handler.send_header("X-Frame-Options", "DENY")
+    handler.send_header("Referrer-Policy", "no-referrer")
 
 
 def _lan_ip():
@@ -4146,8 +4324,8 @@ def cmd_set_passcode(args):
         sys.exit("  ! use at least 8 characters")
     if getpass.getpass("Again: ") != p:
         sys.exit("  ! the two entries differ")
-    connectors.kc_set("serve", "passcode", p)
-    print("  stored in Keychain. Restart serve; each phone or browser asks for it once.")
+    connectors.kc_set("serve", "passcode", passcode_hash(p))
+    print("  stored (as a salted hash). Restart serve; each phone or browser asks for it once.")
 
 
 # Shared by every page: send a write, and when the server wants the passcode
@@ -4461,10 +4639,16 @@ def export_site(out):
     pages = {"index.html": _DASHBOARD, "rooms/index.html": _ROOMS_PAGE,
              "batteries/index.html": _BATTERY_PAGE}
     files = {}
+    banner = (f'<div style="background:#fff4d6;color:#5c4400;padding:6px 12px;'
+              f'font:13px system-ui">{note}</div>')
     for rel, html in pages.items():
         html = html.replace("__WRITABLE__", "false").replace("__AUTHJS__", _AUTH_JS)
         for hint in _RO_HINTS:
             html = html.replace(hint, note)
+        # Every page says it's a snapshot (the dashboard has no read-only
+        # hint to replace), and none polls for news that can't come.
+        html = html.replace("</style>", "</style>" + banner, 1)
+        html = re.sub(r"setInterval\(load,\d+\)", "0", html)
         if "/" in rel:
             html = html.replace("<meta charset=utf-8>", '<meta charset=utf-8><base href="../">', 1)
         files[rel] = html.encode()
@@ -4481,9 +4665,12 @@ def export_site(out):
 def cmd_export_site(args):
     for rel in export_site(args.out):
         print(f"  wrote {os.path.join(args.out, rel)}")
+    print("  These files hold every device's MAC and IP, the rooms and the join/leave\n"
+          "  history: publish them only behind a login.")
 
 
 def cmd_serve(args):
+    _upgrade_passcode(serve_passcode())  # not in make_server: tests build servers
     srv = make_server(args)
     try:
         srv.serve_forever()
@@ -4512,15 +4699,20 @@ def make_server(args):
                       "/api/app-add", "/api/app-edit", "/api/app-delete", "/api/room-edit")
     BATTERY_PATHS = {"/api/battery-log": "add", "/api/battery-edit": "edit",
                      "/api/battery-delete": "delete", "/api/battery-device": "device"}
+    WRITE_PATHS = ("/api/name", "/api/room", "/api/room-add", "/api/rename",
+                   "/api/type", "/api/app", "/api/delete", "/api/room-delete",
+                   "/api/room-rename", *CATEGORY_PATHS, *BATTERY_PATHS)
+    agent_seen = [None]                  # when the agent last synced, for /api/summary
+    verify_slots = threading.BoundedSemaphore(2)   # concurrent passcode (scrypt) checks
     import hmac
-    import threading
     write_lock = threading.Lock()
     guard = PasscodeGuard()
     hosts = None                         # HostCheck, once the port is bound (below)
     # The agent (the Pi) connects to /api/agent/* with this token; unset, those
     # paths don't exist. `changed` wakes its stream after an edit made here.
     agent_secret = agent_token()
-    agent_guard = PasscodeGuard()        # its own count: token misses never lock out edits
+    # its own count: token misses never lock out edits
+    agent_guard = PasscodeGuard("agent tokens", "its agent sync")
     changed = threading.Condition()
     generation = [0]
 
@@ -4533,16 +4725,38 @@ def make_server(args):
         # No Access-Control-Allow-Origin: the pages are same-origin and the app
         # isn't a browser, so a CORS header would only let other websites open
         # in a browser on the LAN read the inventory through this machine's IP.
+        self._status = code              # for the audit line (see do_POST)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
+        _security_headers(self)
         self.end_headers()
         self.wfile.write(body)
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *a):  # quiet
+        # A client that opens a connection and then sends nothing (or a body
+        # slower than this per read) is dropped, so it can't hold a thread.
+        timeout = 30
+
+        def log_message(self, *a):  # quiet: successes aren't logged (SD card)
             pass
+
+        def send_error(self, code, *a, **kw):
+            self._status = code
+            super().send_error(code, *a, **kw)
+
+        def log_request(self, code="-", size="-"):
+            # Refusals and errors only: a 401/403/421/429 is someone without
+            # the passcode or token, a 5xx is a bug. The query string is left
+            # out; nothing secret travels in it, and it keeps lines short.
+            # A garbled request is answered before headers/path exist.
+            if str(code)[:1] in ("4", "5"):
+                try:
+                    who = _client_key(self.client_address[0], getattr(self, "headers", None) or {})
+                    path = (getattr(self, "path", "") or "").split("?")[0]
+                    log(f"serve: {who} {getattr(self, 'command', '-')} {path} -> {code}")
+                except Exception:  # noqa: BLE001  (logging must never break a reply)
+                    pass
 
         def _host_ok(self):
             """Answer only requests addressed to this machine: a page on another
@@ -4579,9 +4793,46 @@ def make_server(args):
             if data is None:
                 self.send_error(404)
                 return
+            if path == "/api/summary" and agent_seen[0]:
+                # A server copy has no data of its own: say how fresh it is.
+                # (The Pi holds the token too, but no agent syncs into it.)
+                data = dict(data, agent_last_sync=agent_seen[0])
             _send(self, 200, _json.dumps(data).encode(), "application/json")
 
         def do_POST(self):
+            """Every edit, and every refused one, leaves a line in audit.csv:
+            who (this machine, a LAN address, the agent), what, and the answer."""
+            self._status, self._raw, self._audit_detail = None, b"", ""
+            try:
+                self._do_post()
+            finally:
+                self._audit_post()
+
+        def _audit_post(self):
+            path = self.path.split("?")[0]
+            if path not in WRITE_PATHS and path != "/api/agent/sync":
+                return                   # unknown paths: the access log has them
+            if path == "/api/agent/sync" and (self._status != 200 or not self._audit_detail):
+                # Only the agent's own imports of edits. Tokenless probes from
+                # the internet (401/429) are in the access log; recording them
+                # here would let a stranger push the real edits out of the file.
+                return
+            local = _local_client(self.client_address[0], self.headers)
+            who = "this machine" if local else _client_key(self.client_address[0],
+                                                           self.headers)
+            if path == "/api/agent/sync":
+                who += " (agent)"
+            target = ""
+            try:
+                req = _json.loads(self._raw or b"{}")
+                if isinstance(req, dict):
+                    target = next((str(req[k]) for k in AUDIT_KEYS if req.get(k)), "")
+            except (ValueError, TypeError):
+                pass
+            audit(who, path.rsplit("/", 1)[-1], target, self._status or "-",
+                  self._audit_detail)
+
+        def _do_post(self):
             # Read the body before any reply: answering a client that is still
             # sending (e.g. a 401) makes the close look like a connection reset
             # to many HTTP clients, the app's included.
@@ -4602,6 +4853,8 @@ def make_server(args):
                 _send(self, 413, b'{"error":"body too large"}', "application/json")
                 return
             raw = self.rfile.read(n) if n else b""
+            if not agent_call:
+                self._raw = raw          # for the audit line (agent bodies are big)
             if not self._host_ok():
                 return
             path = self.path.split("?")[0]
@@ -4609,9 +4862,7 @@ def make_server(args):
                 if self._agent_ok():
                     self._agent_sync(raw)
                 return
-            if path not in ("/api/name", "/api/room", "/api/room-add", "/api/rename",
-                            "/api/type", "/api/app", "/api/delete", "/api/room-delete",
-                            "/api/room-rename", *CATEGORY_PATHS, *BATTERY_PATHS):
+            if path not in WRITE_PATHS:
                 self.send_error(404)
                 return
             if not allow_write:
@@ -4651,7 +4902,17 @@ def make_server(args):
                           "application/json")
                     return
                 given = self.headers.get("X-Netinv-Passcode", "")
-                if not hmac.compare_digest(given.encode(), passcode.encode()):
+                # scrypt takes ~16 MB a check: at most two at a time, so a burst
+                # of wrong guesses queues (and meets the lockout, re-checked
+                # inside) instead of exhausting a Pi's memory.
+                with verify_slots:
+                    locked_now = guard.locked(client)
+                    ok = not locked_now and passcode_ok(given, passcode)
+                if locked_now:
+                    _send(self, 429, b'{"error":"too many wrong passcodes; try again later"}',
+                          "application/json")
+                    return
+                if not ok:
                     guard.fail(client)
                     _send(self, 401, b'{"error":"passcode required","auth":true}',
                           "application/json")
@@ -4723,8 +4984,13 @@ def make_server(args):
                     elif req.get("op") == "import":
                         sync.agent_import(DATA_DIR, req.get("files"), req.get("expect"))
                         out = {"ok": True}
+                        # scan data arrives every few minutes; only edits are audited
+                        edits = sorted(set(req["files"]) - SCAN_FILES)
+                        if edits:
+                            self._audit_detail = "wrote " + ", ".join(edits)
                     else:
                         raise ValueError("op must be export or import")
+                    agent_seen[0] = now_stamp()
             except sync.Conflict as e:
                 _send(self, 409, _json.dumps({"error": f"{e} changed; sync again"}).encode(),
                       "application/json")
@@ -4734,11 +5000,12 @@ def make_server(args):
                       "application/json")
                 return
             body = gzip.compress(_json.dumps(out).encode())
+            self._status = 200
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("X-Content-Type-Options", "nosniff")
+            _security_headers(self)
             self.end_headers()
             self.wfile.write(body)
 
@@ -5221,8 +5488,18 @@ def main():
         x = sub.add_parser(name, help=f"(used by deploy.sh --copy-credentials) {act} "
                                       "stored credentials as JSON on a pipe")
         x.set_defaults(func=cmd_creds, action=act)
+        if act == "export":
+            x.add_argument("--only", default="",
+                           help="only these providers, comma-separated (e.g. agent,serve for a "
+                                "server copy that scans nothing); also skips login-token files")
 
     args = p.parse_args()
+    # Under launchd, systemd or docker stdout is a pipe, which Python fills in
+    # 8 KB blocks: a warning could wait hours, or die with the process.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     args.func(args)
 
 

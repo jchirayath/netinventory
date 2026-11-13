@@ -158,11 +158,13 @@ String isoDate(DateTime d) =>
 class BatteriesTab extends StatefulWidget {
   final Api api;
   final Map<String, dynamic> data; // /api/batteries
+  final String? error; // the load failed: say so, not "no devices"
   final Future<void> Function() onChanged;
   const BatteriesTab(
       {super.key,
       required this.api,
       required this.data,
+      this.error,
       required this.onChanged});
 
   @override
@@ -429,11 +431,16 @@ class _BatteriesTabState extends State<BatteriesTab> {
     final name = '${s['device']}'; // the monitor's name: what log entries use
     final entries = _log.cast<Map>().where((e) => e['Device'] == name).toList();
     final cs = Theme.of(context).colorScheme;
-    // Full level history; an older agent without /api/battery shows none.
+    // Full level history; an older agent without /api/battery shows none,
+    // any other failure is shown as one (null readings + the error).
+    String? readingsError;
     final readings = widget.api
         .battery(name)
         .then((m) => levelReadings(m))
-        .catchError((_) => <LevelReading>[]);
+        .catchError((Object e) {
+      if (e is! ApiError || !e.notFound) readingsError = '$e';
+      return <LevelReading>[];
+    });
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -488,7 +495,10 @@ class _BatteriesTabState extends State<BatteriesTab> {
                       style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                   const SizedBox(height: 6),
                   if (r.isEmpty)
-                    Text('No level readings yet.',
+                    Text(
+                        readingsError != null
+                            ? 'History unavailable: $readingsError'
+                            : 'No level readings yet.',
                         style: TextStyle(fontSize: 12.5, color: Brand.offline))
                   else ...[
                     LevelChart(r),
@@ -693,9 +703,11 @@ class _BatteriesTabState extends State<BatteriesTab> {
                 child: Padding(
                   padding: const EdgeInsets.all(24),
                   child: Text(
-                      _devices.isEmpty
-                          ? 'No battery devices yet.\nOn the agent: netinv monitor suggest --apply'
-                          : 'No batteries match',
+                      widget.error != null
+                          ? "Couldn't load batteries (${widget.error}).\nRefresh to try again."
+                          : _devices.isEmpty
+                              ? 'No battery devices yet.\nOn the agent: netinv monitor suggest --apply'
+                              : 'No batteries match',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Brand.offline, fontSize: 13)),
                 ),

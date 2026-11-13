@@ -8,6 +8,8 @@ import csv
 import os
 import re
 
+import store
+
 ROOM_FIELDS = ["Room", "Floor", "Aliases"]
 APP_ROOM_FIELDS = ["App", "Device", "Room", "Id"]   # app_rooms.csv, from `home rooms`
 # Via: the Device of the hub a device connects or pairs through.
@@ -368,19 +370,15 @@ def starter_rooms():
     return [{"Room": r, "Floor": TODO, "Aliases": a} for r, a in STARTER_ROOMS]
 
 
-def _read(path, fields):
-    if not os.path.exists(path):
-        return []
-    with open(path, newline="", encoding="utf-8") as f:
-        return [{k: (r.get(k) or "").strip() for k in fields}
-                for r in csv.DictReader(f, delimiter=";")]
+_read = store.read_rows
 
 
-def write_csv(path, fields, rows):
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
-        w.writeheader()
-        w.writerows(rows)
+def name_key(s):
+    """The one way device names are compared, when a name is checked for
+    uniqueness and when a monitor, battery or reading is matched to it: case,
+    spacing and quote style don't count ("Jacob’s Mac" == "jacob's  mac")."""
+    return " ".join(re.sub(r"[’‘`´]", "'", s or "").lower().split())
+write_csv = store.write_rows     # atomic: a crash mid-write keeps the old file
 
 
 def load_rooms(path):
@@ -707,9 +705,9 @@ def rename(home, master_rows, app_rooms, key, new):
                   and not r.get("Device", "").strip()), None)
         if r is None:
             raise ValueError("unknown device")
-        taken = {x.get("Device", "").strip().lower() for x in master_rows} \
-            | {h["Device"].lower() for h in home} | {h["Name"].lower() for h in home}
-        if new.lower() in taken:
+        taken = {name_key(x.get("Device", "")) for x in master_rows} \
+            | {name_key(h["Device"]) for h in home} | {name_key(h["Name"]) for h in home}
+        if name_key(new) in taken:
             raise ValueError(f"'{new}' is already used by another device")
         r["Device"] = new
         row = new_row(r, TODO)
@@ -723,10 +721,10 @@ def rename(home, master_rows, app_rooms, key, new):
     if is_device and not any(r.get("Device", "").strip() == old for r in master_rows) \
             and not any(h["Device"] == old for h in home):
         raise ValueError("unknown device")
-    if new.lower() != old.lower():
-        taken = {r.get("Device", "").strip().lower() for r in master_rows} \
-            | {h["Device"].lower() for h in home} | {h["Name"].lower() for h in home}
-        if new.lower() in taken:
+    if name_key(new) != name_key(old):
+        taken = {name_key(r.get("Device", "")) for r in master_rows} \
+            | {name_key(h["Device"]) for h in home} | {name_key(h["Name"]) for h in home}
+        if name_key(new) in taken:
             raise ValueError(f"'{new}' is already used by another device")
     if is_device:
         for r in master_rows:

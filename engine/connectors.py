@@ -525,8 +525,9 @@ def blink_run(c, work):
             try:
                 await blink.save(token_path)  # refreshed token -> no 2FA next time
                 os.chmod(token_path, 0o600)
-            except Exception:  # noqa: BLE001
-                pass
+            except OSError as e:
+                print(f"  ! blink: couldn't save the login token to {token_path} ({e}); "
+                      "the next run will ask for 2FA again")
             return await work(blink)
 
     try:

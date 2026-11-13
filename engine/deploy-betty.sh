@@ -118,4 +118,10 @@ done
 sleep 2
 gated || die "$SITE is not gated as it should be after the restart — check sites/$SITE.caddy now"
 ok "running; gates still in place"
+# Caddy reaches the container from a docker bridge address. Unless serve
+# trusts that network's X-Forwarded-For, every visitor shares Caddy's address,
+# and a stranger's wrong tokens would lock the Pi's agent out.
+tp="$("${SSH[@]}" "$HOST_IP" "sudo docker exec podcast-netinventory-1 printenv NETINV_TRUSTED_PROXIES" 2>/dev/null || true)"
+[[ -n "$tp" ]] || die "NETINV_TRUSTED_PROXIES is not set in the container: set it in $STACK/compose.yml (the docker networks, e.g. 172.16.0.0/12)"
+ok "per-visitor lockouts (trusted proxies: $tp)"
 echo "  https://$SITE/batteries"

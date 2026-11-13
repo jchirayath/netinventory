@@ -1,8 +1,14 @@
 # Optional dependencies for the smart-home cloud connectors (connectors.py).
 # Install only the ones you use:  pip install -r requirements-cloud.txt
-tinytuya      # tuya / smartlife  -> device name + MAC + IP
-wyze-sdk      # wyze              -> nickname + MAC
-blinkpy       # blink             -> camera names (no MAC)
-aiohttp       # required by blinkpy
-bleak         # monitors: hear Bluetooth sensors (Govee) from this Mac
+# Floors are the first versions without known advisories (osv-scanner,
+# 2026-11-13); Dependabot proposes newer ones after a 7-day cooldown.
+tinytuya                 # tuya / smartlife  -> device name + MAC + IP
+wyze-sdk                 # wyze              -> nickname + MAC
+blinkpy                  # blink             -> camera names (no MAC)
+aiohttp>=3.14.4          # required by blinkpy
+bleak                    # monitors: hear Bluetooth sensors (Govee) from this Mac
+# pulled in by the libraries above; floors for advisories in older versions
+certifi>=2026.10.18
+idna>=3.15
+pycryptodomex>=3.19.1
 # smartthings and govee use the Python standard library only (token / API key)
