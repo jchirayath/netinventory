@@ -197,6 +197,18 @@ engine/deploy-betty.sh            # ship the committed engine, restart, verify t
 engine/deploy-betty.sh --check    # only verify the gates
 ```
 
+## netinventory.aspl.net: the project website
+
+A public static page about the project, separate from the dashboard: `site/index.html`
+plus the README's dashboard screenshots (from the fictional demo home) and the logo. No
+sign-in and no data: it never talks to any copy of the engine. betty's Caddy serves it
+from `www/netinventory` (site block `stack/sites/netinventory.aspl.net.caddy` in
+`podcasthost`). Publish a change with:
+
+```bash
+site/deploy-betty.sh              # stage, sync, verify; --dry-run shows the changes
+```
+
 ## How the copies stay in step
 
 ### Mac → Pi: ssh, every 15 minutes

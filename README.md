@@ -15,6 +15,7 @@
 </p>
 
 <p align="center">
+  <a href="https://netinventory.aspl.net"><b>Website</b></a> ·
   <a href="#features">Features</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#how-it-runs">How it runs</a> ·
