@@ -56,8 +56,8 @@ netinventory/
   connection, and edits made on any copy reach the others.
 - **Updates itself.** The Pi pulls `main` nightly and switches only if the tests
   pass on the Pi and both services come back up, otherwise it rolls back.
-- **An audit trail.** Every edit, and every refused one, is recorded with who made
-  it.
+- **An audit trail.** Every edit, and every wrong passcode, is recorded with who
+  made it.
 - **Private by design.** Network data is git-ignored, credentials stay in the
   Keychain (or an owner-only file on Linux), and CI blocks committing a data
   file or a real MAC.

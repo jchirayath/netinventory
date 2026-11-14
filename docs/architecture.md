@@ -185,6 +185,10 @@ Caddy's site `sites/net.aspl.net.caddy` routes requests two ways:
 | `/api/agent/sync`, `/api/agent/stream` | none in Caddy; serve requires the agent's bearer token |
 | everything else | Entra sign-in (`entra-auth`), then serve; edits also need the passcode |
 
+The container's definition (the `netinventory` service and the `netinv_edge` network in
+`stack/compose.yml`) and the Caddy site (`stack/sites/net.aspl.net.caddy`) are kept in
+betty's own repo, `podcasthost`, not here. Change them there and copy them to the box.
+
 The code isn't updated automatically. After netinventory changes reach `main`, run this
 from a Mac logged in with `az login`:
 
