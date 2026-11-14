@@ -550,7 +550,7 @@ class TestPresence(unittest.TestCase):
         self.assertEqual(log.call_args.kwargs["kind"], "update")
 
     def test_merge_keeps_vendor_when_a_source_respells_it(self):
-        mac = "D0:C2:4E:B6:CE:42"
+        mac = "00:00:5E:00:53:A8"
         master = {mac: self.row(mac, "online", Vendor="Samsung Electronics")}
         seen = {"mac": mac, "ip": "10.0.0.1", "hostname": "", "online": True}
         netinv.merge(master, [dict(seen, vendor="Samsung", source="ssdp")])
@@ -668,10 +668,10 @@ class TestPairs(unittest.TestCase):
         return out
 
     def test_router_suffix_on_two_links_is_one_box(self):
-        m = self._m(("B8:27:EB:AB:43:0E", "homeassistant", "Ethernet", "Home Assistant"),
-                    ("B8:27:EB:FE:16:5B", "homeassistant-29", "Wi-Fi 2.4 GHz", "Home Assistant 2"))
+        m = self._m(("00:00:5E:00:53:A5", "homeassistant", "Ethernet", "Home Assistant"),
+                    ("00:00:5E:00:53:A6", "homeassistant-29", "Wi-Fi 2.4 GHz", "Home Assistant 2"))
         self.assertEqual([sorted(r["MAC"] for r in g) for g in netinv.suggest_pairs(m)],
-                         [["B8:27:EB:AB:43:0E", "B8:27:EB:FE:16:5B"]])
+                         [["00:00:5E:00:53:A5", "00:00:5E:00:53:A6"]])
 
     def test_router_suffix_on_one_link_stays_separate(self):
         m = self._m(("68:FF:7B:00:00:01", "HS200", "Wi-Fi 2.4 GHz", "Switch 1"),
@@ -693,10 +693,10 @@ class TestConnectors(unittest.TestCase):
             def cloudrequest(self, url, query):
                 ids = query["device_ids"].split(",")
                 calls.append(ids)
-                return {"result": [{"id": i, "mac": "382ce5d211ed" if i == "a" else None}
+                return {"result": [{"id": i, "mac": "00005e0053a2" if i == "a" else None}
                                    for i in ids]}
         got = connectors._tuya_factory_macs(Cloud(), ["a"] + [f"x{n}" for n in range(20)] + [""])
-        self.assertEqual(got, {"a": "38:2C:E5:D2:11:ED"})
+        self.assertEqual(got, {"a": "00:00:5E:00:53:A2"})
         self.assertEqual([len(c) for c in calls], [20, 1])
 
     def test_cloud_merge_keeps_other_providers_reference_rows(self):
@@ -704,7 +704,7 @@ class TestConnectors(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             ref = os.path.join(d, "cloud_devices.csv")
             with open(ref, "w") as f:
-                f.write("Provider;Name;Model;MAC;IP\ntuya;Front Door Sensor;mcs;38:2C:E5:D2:11:ED;\n"
+                f.write("Provider;Name;Model;MAC;IP\ntuya;Front Door Sensor;mcs;00:00:5E:00:53:A2;\n"
                         "govee;Old Govee;H1;;\n")
             item = {"provider": "govee", "name": "Thermo", "model": "H5074", "mac": "", "ip": ""}
             with mock.patch.object(netinv, "CLOUD_REF", ref), \
@@ -716,11 +716,11 @@ class TestConnectors(unittest.TestCase):
 
     def test_cloud_merge_records_app_names_per_provider(self):
         import tempfile
-        m = "E8:9F:80:1E:9F:FB"
+        m = "00:00:5E:00:53:A9"
         master = {m: {k: "" for k in netinv.FIELDS}, "AA:00:00:00:00:09": {k: "" for k in netinv.FIELDS}}
         master[m].update(MAC=m, Device="WeMo Study", AppNames="kasa=Old; smartthings=Gone")
         master["AA:00:00:00:00:09"].update(AppNames="smartthings=Removed From App")
-        st = {"provider": "smartthings", "name": "Study", "model": "", "mac": "E8:9F:80:1E:9F:FA", "ip": ""}
+        st = {"provider": "smartthings", "name": "Study", "model": "", "mac": "00:00:5E:00:53:A8", "ip": ""}
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(netinv, "CLOUD_REF", os.path.join(d, "ref.csv")), \
                 mock.patch.object(netinv, "arp_table", return_value={}):
@@ -729,21 +729,21 @@ class TestConnectors(unittest.TestCase):
         self.assertEqual(master["AA:00:00:00:00:09"]["AppNames"], "")             # smartthings ran
 
     def test_adjacent_mac_only_when_unambiguous(self):
-        master = {"E8:9F:80:1E:9F:FB": {}, "AA:00:00:00:00:05": {}, "AA:00:00:00:00:07": {}}
-        self.assertEqual(netinv._adjacent_mac("E8:9F:80:1E:9F:FA", master), "E8:9F:80:1E:9F:FB")
+        master = {"00:00:5E:00:53:A9": {}, "AA:00:00:00:00:05": {}, "AA:00:00:00:00:07": {}}
+        self.assertEqual(netinv._adjacent_mac("00:00:5E:00:53:A8", master), "00:00:5E:00:53:A9")
         self.assertEqual(netinv._adjacent_mac("AA:00:00:00:00:06", master), "")   # two neighbours
         self.assertEqual(netinv._adjacent_mac("AA:00:00:00:00:FF", master), "")
 
     def test_smartthings_lan_network_id_is_the_mac(self):
         data = {"items": [
-            {"label": "Study", "type": "LAN", "lan": {"networkId": "E89F801E9FFA"}},
-            {"label": "Leak", "type": "ZIGBEE", "zigbee": {"networkId": "4B75", "eui": "286D970001096B2D"}},
+            {"label": "Study", "type": "LAN", "lan": {"networkId": "00005E0053A8"}},
+            {"label": "Leak", "type": "ZIGBEE", "zigbee": {"networkId": "4B75", "eui": "00005EEF10000001"}},
             {"label": "Plug", "type": "VIPER", "viper": {"modelName": "HS103(US)"}}]}
         resp = mock.MagicMock()
         resp.__enter__.return_value.read.return_value = json.dumps(data).encode()
         with mock.patch.object(connectors.urllib.request, "urlopen", return_value=resp):
             got = [(i["name"], i["mac"], i["model"]) for i in connectors.discover_smartthings({"token": "t"})]
-        self.assertEqual(got, [("Study", "E8:9F:80:1E:9F:FA", ""), ("Leak", "", ""),
+        self.assertEqual(got, [("Study", "00:00:5E:00:53:A8", ""), ("Leak", "", ""),
                                ("Plug", "", "HS103(US)")])
 
     def test_tuya_room_move_keeps_what_the_room_already_holds(self):
@@ -804,21 +804,21 @@ class TestConnectors(unittest.TestCase):
         self.assertLessEqual(len(got), 256)
 
     def test_govee_id_mac_guess(self):
-        self.assertEqual(connectors._mac_from_govee_id("64:09:c5:32:37:36:2d:13"),
-                         "C5:32:37:36:2D:13")
+        self.assertEqual(connectors._mac_from_govee_id("2d:13:00:00:5e:00:53:b0"),
+                         "00:00:5E:00:53:B0")
         self.assertEqual(connectors._mac_from_govee_id("AA:BB:CC"), "")
 
     def test_govee_hub_sensor_ids_yield_the_hub_mac(self):
-        self.assertEqual(connectors._govee_hub_mac("2EF43291D1D800A00A"), "2C:F4:32:91:D1:D8")
-        self.assertEqual(connectors._govee_hub_mac("02:F5:E0:12:1D:62:04:47"), "")
+        self.assertEqual(connectors._govee_hub_mac("02005E0053A100A00A"), "00:00:5E:00:53:A1")
+        self.assertEqual(connectors._govee_hub_mac("04:47:00:00:5E:00:53:B1"), "")
         from unittest import mock
-        cloud = [{"device": "2EF43291D1D800A00A", "sku": "H5054", "deviceName": "Washer"},
-                 {"device": "2EF43291D1D8009FD7", "sku": "H5054", "deviceName": "Guest"}]
+        cloud = [{"device": "02005E0053A100A00A", "sku": "H5054", "deviceName": "Washer"},
+                 {"device": "02005E0053A1009FD7", "sku": "H5054", "deviceName": "Guest"}]
         with mock.patch.object(connectors, "_govee_cloud_devices", return_value=cloud), \
                 mock.patch.object(connectors, "govee_lan_scan", return_value={}):
             got = [(i["name"], i["mac"]) for i in connectors.discover_govee({"api_key": "k"})]
         self.assertEqual(got, [("Washer", ""), ("Guest", ""),
-                               ("Govee Hub (H5054 sensors)", "2C:F4:32:91:D1:D8")])
+                               ("Govee Hub (H5054 sensors)", "00:00:5E:00:53:A1")])
 
     def test_govee_lan_mac_beats_the_guess_and_lan_only_devices_are_kept(self):
         from unittest import mock
@@ -829,12 +829,12 @@ class TestConnectors(unittest.TestCase):
         with mock.patch.object(connectors, "_govee_cloud_devices", return_value=cloud), \
                 mock.patch.object(connectors, "govee_lan_scan", return_value=lan), \
                 mock.patch.object(connectors, "_resolve_arp",
-                                  return_value={"10.0.0.5": "A8:46:74:0A:84:F0",
-                                                "10.0.0.9": "2C:F4:32:91:D1:D8"}):
+                                  return_value={"10.0.0.5": "00:00:5E:00:53:A4",
+                                                "10.0.0.9": "00:00:5E:00:53:A1"}):
             got = {i["name"]: (i["mac"], i["ip"]) for i in connectors.discover_govee({"api_key": "k"})}
-        self.assertEqual(got, {"Hall Strip": ("A8:46:74:0A:84:F0", "10.0.0.5"),
+        self.assertEqual(got, {"Hall Strip": ("00:00:5E:00:53:A4", "10.0.0.5"),
                                "Thermo": ("AA:00:00:00:00:02", ""),        # id guess only
-                               "Govee H6008": ("2C:F4:32:91:D1:D8", "10.0.0.9")})
+                               "Govee H6008": ("00:00:5E:00:53:A1", "10.0.0.9")})
 
     def test_resolve_arp_never_pings_a_non_ip(self):
         from unittest import mock
@@ -945,7 +945,7 @@ class TestConnectors(unittest.TestCase):
 
         async def info(blink, net, cid):
             calls.append(cid)
-            return {"camera": [{"mac_address": "c0:95:cf:8e:82:e6",
+            return {"camera": [{"mac_address": "00:00:5e:00:53:a7",
                                 "last_connect": {"ip_address": "10.0.0.7"}}]}
 
         with mock.patch("blinkpy.api.request_camera_info", info):
@@ -954,20 +954,20 @@ class TestConnectors(unittest.TestCase):
                                  ("", ""))
             self.assertEqual(calls, [])
             self.assertEqual(asyncio.run(connectors._blink_mac_ip(None, Cam(""))),
-                             ("C0:95:CF:8E:82:E6", "10.0.0.7"))
+                             ("00:00:5E:00:53:A7", "10.0.0.7"))
 
     def test_blink_locate_new_host_blink_mac_and_mini(self):
         base = {"AA:00:00:00:00:01": "10.0.0.1"}
         bell = dict(base, **{"B4:E4:54:00:00:01": "10.0.0.9"})
         res, cams = self._locate(
-            [("Doorbell", "lotus", ""), ("Pool", "sedona", "C0:95:CF:8E:82:E6"),
+            [("Doorbell", "lotus", ""), ("Pool", "sedona", "00:00:5E:00:53:A7"),
              ("Garage Main", "owl", "")],
             [base, base, base,                                         # warm-up
              base, bell, bell,                                         # doorbell wakes
-             base, dict(base, **{"C0:95:CF:8E:82:E6": "10.0.0.7"})])   # pool wakes
+             base, dict(base, **{"00:00:5E:00:53:A7": "10.0.0.7"})])   # pool wakes
         got = {r["name"]: (r["how"], r["mac"], r["ip"]) for r in res}
         self.assertEqual(got["Doorbell"], ("appeared", "B4:E4:54:00:00:01", "10.0.0.9"))
-        self.assertEqual(got["Pool"], ("blink", "C0:95:CF:8E:82:E6", "10.0.0.7"))
+        self.assertEqual(got["Pool"], ("blink", "00:00:5E:00:53:A7", "10.0.0.7"))
         self.assertEqual(got["Garage Main"][0], "always on")
         self.assertFalse(cams["Garage Main"].snapped)          # a Mini is never woken
 
@@ -985,22 +985,22 @@ class TestConnectors(unittest.TestCase):
 
     def test_blink_locate_prefers_the_blink_made_newcomer(self):
         base = {"AA:00:00:00:00:01": "10.0.0.1"}
-        two = dict(base, **{"1C:3B:F3:22:B3:3B": "10.0.0.5", "74:AB:93:00:00:09": "10.0.0.9"})
-        vendors = {"1C:3B:F3:22:B3:3B": "TP-Link Technologies", "74:AB:93:00:00:09": "Blink by Amazon"}
+        two = dict(base, **{"00:00:5E:00:53:A0": "10.0.0.5", "74:AB:93:00:00:09": "10.0.0.9"})
+        vendors = {"00:00:5E:00:53:A0": "TP-Link Technologies", "74:AB:93:00:00:09": "Blink by Amazon"}
         res, _ = self._locate([("Doorbell", "lotus", "")], [base] * 4 + [two, two],
                               vendor=lambda m: vendors.get(m, ""))
         self.assertEqual((res[0]["how"], res[0]["mac"]), ("appeared", "74:AB:93:00:00:09"))
 
     def test_blink_locate_lone_non_blink_newcomer_is_not_the_camera(self):
         base = {"AA:00:00:00:00:01": "10.0.0.1"}
-        lock = dict(base, **{"EC:DA:3B:20:89:F8": "10.0.0.47"})     # a sleepy Wi-Fi lock
+        lock = dict(base, **{"00:00:5E:00:53:AA": "10.0.0.47"})     # a sleepy Wi-Fi lock
         res, _ = self._locate([("Back door", "lotus", "")], [base] * 4 + [lock, lock],
-                              vendor=lambda m: {"EC:DA:3B:20:89:F8": "Espressif"}.get(m, ""))
+                              vendor=lambda m: {"00:00:5E:00:53:AA": "Espressif"}.get(m, ""))
         self.assertEqual((res[0]["how"], res[0]["mac"]), ("no Blink newcomer", ""))
 
     def test_blink_locate_host_seen_earlier_in_run_is_not_the_camera(self):
         base = {"AA:00:00:00:00:01": "10.0.0.1"}
-        mini = dict(base, **{"74:58:F3:EE:22:77": "10.0.0.50"})   # flaky always-on Mini
+        mini = dict(base, **{"00:00:5E:00:53:A3": "10.0.0.50"})   # flaky always-on Mini
         # Mini shows in a warm-up sweep, drops out, then "reappears" after the wake.
         res, _ = self._locate([("Back door", "lotus", "")],
                               [mini, base, base, base, mini, mini],

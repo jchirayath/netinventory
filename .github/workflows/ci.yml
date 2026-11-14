@@ -39,10 +39,19 @@ jobs:
             fi
           done
       - name: No real MACs committed
+        # Every MAC is judged on its own (a fake one on the same line no longer
+        # hides a real one). An 8-byte Govee id is judged by its last 6 bytes,
+        # the part read as a MAC. Allowed: the RFC 7042 documentation range
+        # (00:00:5E:00:53:xx, and 02:... with the local bit), the fixture
+        # prefixes the tests use, and a vendor prefix with a 00:00:xx device
+        # part (tests that need a real OUI).
         run: |
-          hits=$(git grep -InE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' \
+          allow='^(00:00:5E:00:53|02:00:5E:00:53|AA:BB:CC|AA:00:00|A2:00:00|00:11:22|11:22:AA|08:00:27|AC:11:22|AC:AA:00|AE:11:22|00:AA:BB|00:00:0C|99:99:BB|DE:AD:BE|FF:FF:FF)|^..:..:..:00:00:..$'
+          hits=$(git grep -InoE '([0-9a-fA-F]{2}:){5,7}[0-9a-fA-F]{2}' \
                    -- ':!engine/data/*' ':!*.gz' \
-                 | grep -viE '(AA:BB:CC|A2:00:00|00:11:22|08:00:27|AC:11:22|AE:11:22|00:AA:BB|00:00:0C|FF:FF:FF|aa:bb:cc)' \
+                 | awk -F: -v allow="$allow" '{
+                     mac = toupper($(NF-5) ":" $(NF-4) ":" $(NF-3) ":" $(NF-2) ":" $(NF-1) ":" $NF)
+                     if (mac !~ allow) print $1 ":" $2 ": " mac }' \
                  || true)
           if [ -n "$hits" ]; then
             echo "::error::possible real MAC address committed:"; echo "$hits"; exit 1
@@ -62,5 +71,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter analyze
+          # Warnings and errors fail the build; info-level notices (such as a
+          # new stable release deprecating an import) are shown, not fatal.
+          flutter analyze --no-fatal-infos
           flutter test

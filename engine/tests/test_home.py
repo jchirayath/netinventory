@@ -310,7 +310,7 @@ class TestBoard(unittest.TestCase):
             home.rename(rows, master, [], "mac:AA:00:00:00:00:08", "kitchen plug")
 
     def test_hub_linked_sensors_take_the_hubs_address_and_own_rooms(self):
-        master = [{"Device": "Leak Hub", "MAC": "2C:F4:32:91:D1:D8", "IP": "10.0.0.8",
+        master = [{"Device": "Leak Hub", "MAC": "00:00:5E:00:53:A1", "IP": "10.0.0.8",
                    "Hostname": "ESP-91D1D8", "Status": "online"}]
         rows = [row(Device="", Name="Washer Leak Sensor", Room="Kitchen", Type="sensor", Via="Leak Hub"),
                 row(Device="", Name="Guest Leak Sensor", Room="Garage", Type="sensor", Via="Leak Hub")]

@@ -843,7 +843,7 @@ def _govee_cloud_devices(key):
 
 
 def _mac_from_govee_id(device_id):
-    """Govee ids are 8 bytes ('64:09:C5:32:37:36:2D:13'); the last 6 are a
+    """Govee ids are 8 bytes ('2D:13:00:00:5E:00:53:B0'); the last 6 are a
     guess at the MAC. cloud_merge only uses it if that MAC is on the LAN."""
     p = (device_id or "").split(":")
     return ":".join(p[-6:]).upper() if len(p) == 8 else ""
@@ -852,7 +852,7 @@ def _mac_from_govee_id(device_id):
 def _govee_hub_mac(device_id):
     """A sensor paired to a Govee Wi-Fi hub has a colon-less 18-hex id: the
     hub's MAC with the locally-administered bit set, then the sensor's own
-    suffix ('2EF43291D1D800A00A' -> hub 2C:F4:32:91:D1:D8)."""
+    suffix ('02005E0053A100A00A' -> hub 00:00:5E:00:53:A1)."""
     s = (device_id or "").upper()
     if not re.fullmatch(r"[0-9A-F]{18}", s):
         return ""
