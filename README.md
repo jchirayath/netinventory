@@ -119,6 +119,14 @@ Writes are atomic, so a crash never leaves a half-written file.
 
 ## Works with your smart-home apps
 
+**Built in today**
+
+| How it connects | Sources |
+|---|---|
+| Smart-home apps, through their APIs | Home Assistant · Blink · Flume · Tuya / Smart Life · Govee (developer API) · Govee app account · SmartThings · Wyze · Apple (iCloud) |
+| On your own network | Kasa (no account) · nmap sweep and ARP · SSDP / UPnP · mDNS / Bonjour · Spotify Connect · Xfinity gateway's device list · OUI vendor lookup and port fingerprinting |
+| Over Bluetooth | Govee thermometers (battery) · any device you match, for presence |
+
 A network scan sees an address and a vendor. Your smart-home apps know far
 more: what you named each device, its model, its battery, and whether it's
 really online, even for sensors that never touch Wi-Fi. netinventory signs in
