@@ -595,17 +595,24 @@ WiFi, so they land in `cloud_devices.csv` as a name reference.
 
 ### Smart-home cloud connectors
 
-| Provider | Credentials | Yields | Match |
-|---|---|---|---|
-| **tuya** / SmartLife | Tuya IoT Cloud project → Access ID/Secret + region | name + MAC + IP | direct |
-| **wyze** | Wyze API Key ID + API Key (+ login) | nickname + MAC | direct |
-| **blink** | account email/password (+ 2FA) | camera names | by IP / reference |
-| **smartthings** | Personal Access Token | device labels | reference |
-| **apple** | Apple ID + app-specific password | device roster (name + model) | reference¹ |
-| **govee** | API key (Govee Home app → Profile → Settings → Apply for API Key) | app name + model; MAC + IP with LAN Control on | direct² / reference |
-| **kasa** | none: local protocol on port 9999, always on | app name + MAC + IP | direct |
-| **flume** | API client id + secret (portal.flumewater.com) + login | bridge/sensor + sensor battery | reference |
-| **govee-app** | Govee account email + password (`govee-login` for the emailed code) | sensor battery + online (monitors only) | — |
+`cloud` (or `update --cloud`) merges names, models, MACs and IPs into
+`devices.csv`; `watch` asks the ones with batteries (Batteries column) every
+`monitor_cloud_every` (default 1h) for levels and online state, which feed the
+monitors and `battery_history.csv`.
+
+| Provider | Credentials | Yields | Batteries | Match |
+|---|---|---|---|---|
+| **ha** (Home Assistant) | URL + long-lived access token | device names; MAC where HA's device registry has one. `home push --to ha` sets names and areas | every battery entity, whatever integration feeds it (SmartThings, Zigbee, Z-Wave…), + online | direct / name |
+| **tuya** / SmartLife | Tuya IoT Cloud project → Access ID/Secret + region | name + MAC + IP. `home push --to tuya --rooms-only` | level or low/ok + online | direct |
+| **blink** | account email/password (+ 2FA) | camera and doorbell names, model, MAC + IP where Blink reports them; `blink-locate` learns the rest | ok/low, signal bars, online (camera and its sync module), last check-in | by MAC / IP / reference |
+| **flume** | API client id + secret (portal.flumewater.com) + login | bridge and sensor | sensor battery + connected | reference |
+| **govee-app** | Govee account email + password (`govee-login` for the emailed code) | — | leak sensors behind a hub: battery + online (live, unlike the developer API) | name |
+| **govee** | API key (Govee Home app → Profile → Settings → Apply for API Key) | app name + model; MAC + IP with LAN Control on | — | direct² / reference |
+| **smartthings** | Personal Access Token | device labels; MAC of LAN devices. `home push --to smartthings --rooms-only` | via Home Assistant | direct / reference |
+| **wyze** | Wyze API Key ID + API Key (+ login) | nickname + MAC | — | direct |
+| **kasa** | none: local protocol on port 9999, always on | app name + MAC + IP | — | direct |
+| **apple** | Apple ID + app-specific password | device roster (name + model) | — | reference¹ |
+| Bluetooth | none: this Mac's passive scan (`pip install bleak`) | — | Govee thermometers' battery; presence for `ble` monitors | `Match ble=` |
 
 ² Govee devices answer a LAN scan (UDP 4001/4002) only with **LAN Control** switched
 on per device in the Govee app; others are matched by a MAC guessed from the device id,

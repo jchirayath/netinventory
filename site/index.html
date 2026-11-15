@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>netinventory: every device on your home network, named</title>
+<meta name="description" content="Open-source home network inventory. Every device keyed by MAC so names survive DHCP, alerts when a device joins or drops off, battery tracking, a rooms board, and a dashboard on a Mac, a Raspberry Pi or the web.">
+<meta property="og:title" content="netinventory">
+<meta property="og:description" content="Every device on your home network, named and in its room.">
+<meta property="og:image" content="https://netinventory.aspl.net/img/web-rooms.png">
+<link rel="icon" href="img/netinventory-logo.svg" type="image/svg+xml">
+<style>
+:root {
+  --paper: #f2f5f7;
+  --panel: #ffffff;
+  --ink: #12202b;
+  --soft: #4a5b68;
+  --line: #c3d0d9;
+  --wall: #8fa3b1;
+  --teal: #0d9488;
+  --teal-hi: #2dd4bf;
+  --amber: #c2710c;
+  --off: #9aa8b3;
+  --code: #e6edf1;
+  --shot-shadow: 0 1px 0 rgba(18,32,43,.06), 0 18px 40px -18px rgba(18,32,43,.35);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0c111a;
+    --panel: #121a26;
+    --ink: #e6eef3;
+    --soft: #9fb0bd;
+    --line: #26354a;
+    --wall: #3d5068;
+    --teal: #2dd4bf;
+    --teal-hi: #5eead4;
+    --amber: #f0a43a;
+    --off: #5c6b7a;
+    --code: #162130;
+    --shot-shadow: 0 0 0 1px #26354a, 0 18px 40px -18px rgba(0,0,0,.7);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 17px/1.6 "Avenir Next", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+a { color: var(--teal); text-underline-offset: .18em; }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--teal-hi); outline-offset: 3px; border-radius: 4px; }
+img { max-width: 100%; height: auto; display: block; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+@media (max-width: 600px) { .wrap { padding: 0 16px; } body { font-size: 16px; } }
+
+/* header */
+.top { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 18px; letter-spacing: -.01em; }
+.brand img { width: 30px; height: 30px; border-radius: 8px; }
+.top nav { display: flex; gap: 22px; font-size: 15px; }
+.top nav a { color: var(--soft); text-decoration: none; }
+.top nav a:hover { color: var(--ink); }
+@media (max-width: 600px) { .top nav a.opt { display: none; } }
+
+/* hero */
+.hero { display: grid; grid-template-columns: 5fr 6fr; gap: 48px; align-items: center; padding: 40px 0 72px; }
+@media (max-width: 900px) { .hero { grid-template-columns: 1fr; gap: 28px; padding: 16px 0 56px; } }
+h1 {
+  font-family: "Avenir Next", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  font-weight: 700; font-size: clamp(36px, 5.4vw, 60px); line-height: 1.04; letter-spacing: -.035em;
+  margin: 0 0 20px; max-width: 13ch;
+}
+.lede { font-size: clamp(17px, 1.6vw, 19px); color: var(--soft); max-width: 36em; margin: 0 0 28px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.btn { display: inline-block; padding: 12px 20px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 16px; }
+.btn.primary { background: var(--ink); color: var(--paper); }
+.btn.primary:hover { background: var(--teal); }
+.btn.quiet { color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--line); }
+.btn.quiet:hover { box-shadow: inset 0 0 0 1.5px var(--teal); }
+
+/* floor plan */
+.plan { width: 100%; height: auto; }
+.plan .floor { fill: var(--panel); }
+.plan .wall { fill: none; stroke: var(--wall); stroke-width: 3; stroke-linejoin: round; }
+.plan .inner { fill: none; stroke: var(--wall); stroke-width: 1.5; }
+.plan .room { font-size: 11px; fill: var(--soft); letter-spacing: .02em; }
+.plan .dev { font-size: 10.5px; fill: var(--ink); }
+.plan .dot { fill: var(--teal); }
+.plan .dot.low { fill: var(--amber); }
+.plan .dot.off { fill: var(--off); }
+.plan .ring { fill: none; stroke: var(--teal); stroke-width: 1.5; }
+.plan .hub { fill: var(--ink); }
+.plan .pulse { fill: none; stroke: var(--teal-hi); stroke-width: 2; opacity: 0; }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--soft); margin-top: 10px; }
+.legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: var(--teal); vertical-align: 1px; }
+.legend .low::before { background: var(--amber); }
+.legend .off::before { background: var(--off); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .plan .pulse { animation: sweep 2.6s cubic-bezier(.2,.6,.3,1) .3s 1 both; transform-origin: 262px 208px; transform-box: view-box; }
+  .plan .d { opacity: 0; animation: found .45s ease-out both; }
+  @keyframes sweep { 0% { opacity: .9; transform: scale(.04); } 80% { opacity: .35; } 100% { opacity: 0; transform: scale(1.6); } }
+  @keyframes found { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+}
+
+/* sections */
+section { padding: 64px 0; border-top: 1px solid var(--line); }
+h2 { font-size: clamp(26px, 3vw, 34px); line-height: 1.15; letter-spacing: -.025em; margin: 0 0 12px; font-weight: 700; }
+.intro { color: var(--soft); max-width: 40em; margin: 0 0 40px; }
+.feature { display: grid; grid-template-columns: 4fr 7fr; gap: 44px; align-items: start; margin: 0 0 64px; }
+.feature:last-child { margin-bottom: 0; }
+.feature.flip { grid-template-columns: 7fr 4fr; }
+.feature.flip .text { order: 2; }
+@media (max-width: 900px) { .feature, .feature.flip { grid-template-columns: 1fr; gap: 20px; } .feature.flip .text { order: 0; } }
+.feature h3 { font-size: 21px; letter-spacing: -.015em; margin: 4px 0 10px; }
+.feature p { margin: 0 0 12px; color: var(--soft); }
+.feature ul { margin: 0; padding-left: 1.1em; color: var(--soft); }
+.feature li { margin: 4px 0; }
+.feature.wide { grid-template-columns: 1fr; gap: 22px; }
+.feature.wide .text { max-width: 40em; }
+.shot { border-radius: 12px; overflow: hidden; box-shadow: var(--shot-shadow); background: #fff; }
+.pair { display: grid; grid-template-columns: 1.55fr 1fr; gap: 24px; align-items: start; }
+@media (max-width: 600px) { .pair { grid-template-columns: 1fr; } }
+
+.more { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px 40px; margin-top: 8px; }
+@media (max-width: 900px) { .more { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 600px) { .more { grid-template-columns: 1fr; } }
+.more h3 { font-size: 17px; margin: 0 0 6px; letter-spacing: -.01em; }
+.more p { margin: 0; color: var(--soft); font-size: 15.5px; }
+
+/* apps */
+.apps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+@media (max-width: 900px) { .apps { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 520px) { .apps { grid-template-columns: 1fr; } }
+.apps > div { padding: 18px 20px 20px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.apps h3 { font-size: 16.5px; margin: 0 0 6px; letter-spacing: -.01em; }
+.apps p { margin: 0; color: var(--soft); font-size: 15px; line-height: 1.5; }
+
+/* three copies */
+.copies { width: 100%; height: auto; max-width: 980px; }
+.copies .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+.copies .t { font-size: 15px; font-weight: 600; fill: var(--ink); }
+.copies .s { font-size: 12.5px; fill: var(--soft); }
+.copies .link { stroke: var(--teal); stroke-width: 2.5; fill: none; }
+.copies .lab { font-size: 12px; fill: var(--teal); font-weight: 600; }
+.copies .arrow { fill: var(--teal); }
+
+/* install */
+ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 0; display: grid; gap: 22px; max-width: 760px; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 14px; }
+ol.steps li::before { content: counter(s); width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px; color: var(--paper); background: var(--ink); }
+ol.steps p { margin: 3px 0 8px; }
+pre { margin: 0; background: var(--code); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font: 14px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+code { font: .92em ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+.privacy { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 40px; padding: 0; margin: 0; list-style: none; max-width: 900px; }
+@media (max-width: 700px) { .privacy { grid-template-columns: 1fr; } }
+.privacy li { padding-left: 26px; position: relative; color: var(--soft); }
+.privacy li::before { content: ""; position: absolute; left: 0; top: .5em; width: 12px; height: 12px; border-radius: 3px; background: var(--teal); }
+.privacy b { color: var(--ink); font-weight: 600; }
+
+footer { border-top: 1px solid var(--line); padding: 28px 0 44px; color: var(--soft); font-size: 14.5px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+footer .links { display: flex; gap: 20px; flex-wrap: wrap; }
+.note { font-size: 13px; color: var(--soft); margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="./"><img src="img/netinventory-logo.svg" alt="" width="30" height="30">netinventory</a>
+    <nav>
+      <a class="opt" href="#features">Features</a>
+      <a class="opt" href="#apps">Apps</a>
+      <a class="opt" href="#how">How it runs</a>
+      <a class="opt" href="#start">Get started</a>
+      <a href="https://github.com/jchirayath/netinventory">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+  <div class="hero">
+    <div>
+      <h1>Every device on your network, named and in its room.</h1>
+      <p class="lede">netinventory finds everything on your home network, from the TV to the leak sensor in the garage. It keeps the names you give them, tells you when something new joins or a device you care about drops off, and warns you before a battery dies.</p>
+      <div class="actions">
+        <a class="btn primary" href="https://github.com/jchirayath/netinventory">Get it on GitHub</a>
+        <a class="btn quiet" href="#features">See what it does</a>
+      </div>
+    </div>
+
+    <figure style="margin:0">
+      <svg class="plan" viewBox="0 0 540 400" role="img" aria-labelledby="plan-t">
+        <title id="plan-t">A floor plan of a home, with each network device shown in its room: online devices in teal, a low battery in amber, an offline device in grey.</title>
+        <rect class="floor" x="20" y="20" width="500" height="360" rx="6"/>
+        <!-- outer walls -->
+        <rect class="wall" x="20" y="20" width="500" height="360" rx="6"/>
+        <!-- interior walls -->
+        <path class="inner" d="M220 20 V160 M220 196 V250 M20 250 H120 M156 250 H330 M366 250 H520 M330 250 V380 M380 20 V120 M380 156 V250 M220 160 H300 M336 160 H380"/>
+        <text class="room" x="34" y="42">Living room</text>
+        <text class="room" x="234" y="42">Kitchen</text>
+        <text class="room" x="394" y="42">Office</text>
+        <text class="room" x="234" y="182">Hallway</text>
+        <text class="room" x="34" y="272">Garage</text>
+        <text class="room" x="344" y="272">Bedroom</text>
+
+        <circle class="pulse" cx="262" cy="208" r="300"/>
+
+        <!-- router -->
+        <g class="d" style="animation-delay:.2s">
+          <circle class="hub" cx="262" cy="208" r="7"/>
+          <circle class="ring" cx="262" cy="208" r="13"/>
+          <text class="dev" x="280" y="212">Home Router</text>
+        </g>
+
+        <g class="d" style="animation-delay:.75s"><circle class="dot" cx="70" cy="168" r="6"/><text class="dev" x="82" y="172">Thermostat</text></g>
+        <g class="d" style="animation-delay:.8s"><circle class="dot" cx="250" cy="84" r="6"/><text class="dev" x="262" y="88">Kitchen Speaker</text></g>
+        <g class="d" style="animation-delay:.85s"><circle class="dot" cx="250" cy="124" r="6"/><text class="dev" x="262" y="128">Back Door Lock</text></g>
+        <g class="d" style="animation-delay:.95s"><circle class="dot" cx="70" cy="88" r="6"/><text class="dev" x="82" y="92">Living Room TV</text></g>
+        <g class="d" style="animation-delay:1s"><circle class="dot" cx="70" cy="128" r="6"/><text class="dev" x="82" y="132">Living Room Speaker</text></g>
+        <g class="d" style="animation-delay:1.05s"><circle class="dot" cx="410" cy="200" r="6"/><text class="dev" x="422" y="204">Office Printer</text></g>
+        <g class="d" style="animation-delay:1.15s"><circle class="dot" cx="410" cy="76" r="6"/><text class="dev" x="422" y="80">Work Laptop</text></g>
+        <g class="d" style="animation-delay:1.2s"><circle class="dot" cx="370" cy="310" r="6"/><text class="dev" x="382" y="314">Bedroom TV</text></g>
+        <g class="d" style="animation-delay:1.25s"><circle class="dot off" cx="370" cy="346" r="6"/><text class="dev" x="382" y="350">Sam's Phone, away</text></g>
+        <g class="d" style="animation-delay:1.3s"><circle class="dot" cx="60" cy="306" r="6"/><text class="dev" x="72" y="310">Garage Camera</text></g>
+        <g class="d" style="animation-delay:1.35s"><circle class="dot" cx="60" cy="344" r="6"/><text class="dev" x="72" y="348">Garage Door</text></g>
+        <g class="d" style="animation-delay:1.4s"><circle class="dot low" cx="180" cy="326" r="6"/><text class="dev" x="192" y="330">Leak Sensor, 12%</text></g>
+      </svg>
+      <figcaption class="legend"><span>online</span><span class="low">battery low</span><span class="off">offline</span></figcaption>
+    </figure>
+  </div>
+
+  <section id="features">
+    <h2>Know what is on your network</h2>
+    <p class="intro">Routers forget names and hand out new addresses. netinventory keys every device by its hardware address, so a name you give it sticks, and it brings together what the router, the network itself and your smart-home apps know about each one.</p>
+
+    <div class="feature">
+      <div class="text">
+        <h3>One list of everything</h3>
+        <p>Every device with its address, vendor, signal strength and when it was last seen. A device with wired and Wi-Fi connections is one row, and anything you haven't named yet is easy to find.</p>
+        <ul>
+          <li>Found through the router, a network sweep, SSDP and mDNS</li>
+          <li>Smart-home clouds fill in what each app calls a device</li>
+          <li>Unknown devices get a vendor lookup and a fingerprint</li>
+        </ul>
+      </div>
+      <img class="shot" src="img/web-devices.png" alt="The devices page: a table of 32 devices with status, address, category, Wi-Fi band, signal, vendor and when each was last seen" width="2800" height="1954" loading="lazy">
+    </div>
+
+    <div class="feature flip">
+      <div class="text">
+        <h3>Every device in its room</h3>
+        <p>The rooms board shows the house the way you think about it. Drag a device to another room, type or app. Each device gets one room and one name, and netinventory can rename it to match in Home Assistant, SmartThings, Google Home, Alexa, Apple Home and Smart Life.</p>
+      </div>
+      <img class="shot" src="img/web-rooms.png" alt="The rooms board: devices grouped into Living Room, Kitchen, Family Room, Office, Bedroom, Hallway, Basement, Garage and Front Porch" width="2800" height="1790" loading="lazy">
+    </div>
+
+    <div class="feature wide">
+      <div class="text">
+        <h3>Batteries, before they die</h3>
+        <p>Levels from your sensors, locks and cameras, worst first. Log a battery change with its type, and netinventory notices replacements on its own, learns how long a set lasts and tells you when the next change is due.</p>
+        <p>Click a device for its level over time and every change.</p>
+      </div>
+      <div class="pair">
+        <img class="shot" src="img/web-batteries.png" alt="The batteries page: six battery devices worst first, a leak sensor at 12 percent, and the change log" width="2800" height="1524" loading="lazy">
+        <img class="shot" src="img/web-battery-history.png" alt="A camera's battery history: the level falls to 9 percent, jumps to 100 when the batteries were replaced, then drifts down" width="1520" height="1284" loading="lazy">
+      </div>
+    </div>
+
+    <div class="more">
+      <div><h3>Alerts that matter</h3><p>An email or notification when a new device joins, an address changes, or a device that was gone for a month comes back.</p></div>
+      <div><h3>Watch the ones you care about</h3><p>Pick devices to monitor. You hear once when one stays offline or its battery runs low, and once when it recovers.</p></div>
+      <div><h3>A companion app</h3><p>The same devices and batteries on your Mac and iPhone, with edits that need your passcode.</p></div>
+    </div>
+  </section>
+
+  <section id="apps">
+    <h2>Your smart-home apps fill in the rest</h2>
+    <p class="intro">A network scan sees an address and a vendor. Your apps know what you named each device, its model, its battery, and whether it's really online, even for sensors that never touch Wi-Fi. netinventory signs in to each app with your own account and puts that detail on the same row.</p>
+    <div class="apps">
+      <div><h3>Home Assistant</h3><p>Every battery from any integration it runs, and names. It can also set names and areas back.</p></div>
+      <div><h3>Blink</h3><p>Each camera and doorbell: model, battery, signal, whether it and its sync module are online, and when it last checked in.</p></div>
+      <div><h3>Flume</h3><p>The water sensor and its bridge: battery level and whether each is connected.</p></div>
+      <div><h3>Tuya and Smart Life</h3><p>App names, addresses, battery and online state. It can file devices into their rooms.</p></div>
+      <div><h3>Govee</h3><p>App names and models, plus battery and online state for leak sensors behind a hub.</p></div>
+      <div><h3>SmartThings</h3><p>Device labels and network addresses. It can file devices into their rooms.</p></div>
+      <div><h3>Wyze, Kasa and Apple</h3><p>Names, models and addresses, so a device shows the name you already gave it.</p></div>
+      <div><h3>Bluetooth</h3><p>Battery and presence of thermometers your Mac can hear, with no account at all.</p></div>
+    </div>
+    <p class="note">Sign-ins stay in the macOS Keychain, or an owner-only file on Linux. Battery levels are read every hour and kept as a history.</p>
+  </section>
+
+  <section id="how">
+    <h2>Runs at home, reachable anywhere</h2>
+    <p class="intro">A Mac does the scanning, because it has the radios and the CPU. A Raspberry Pi serves the dashboard to the house all day. A copy on the web lets you check from anywhere, and the Pi keeps it current over one outbound connection, so nothing on the internet ever connects into your home.</p>
+    <svg class="copies" viewBox="0 0 980 200" role="img" aria-labelledby="copies-t">
+      <title id="copies-t">The Mac scans and syncs to the Raspberry Pi every 15 minutes; the Pi keeps the web copy current over one outbound connection.</title>
+      <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="arrow" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+      <rect class="box" x="10" y="40" width="234" height="110" rx="12"/>
+      <text class="t" x="32" y="80">Mac</text>
+      <text class="s" x="32" y="104">scans the network and clouds</text>
+      <text class="s" x="32" y="124">sends the alerts</text>
+      <rect class="box" x="373" y="40" width="234" height="110" rx="12"/>
+      <text class="t" x="395" y="80">Raspberry Pi</text>
+      <text class="s" x="395" y="104">always on, serves the house</text>
+      <text class="s" x="395" y="124">phones and the app connect here</text>
+      <rect class="box" x="736" y="40" width="234" height="110" rx="12"/>
+      <text class="t" x="758" y="80">The web</text>
+      <text class="s" x="758" y="104">your dashboard from anywhere</text>
+      <text class="s" x="758" y="124">behind a sign-in</text>
+      <path class="link" d="M248 95 H369" marker-end="url(#ah)" marker-start="url(#ah)"/>
+      <text class="lab" x="308" y="84" text-anchor="middle">sync, 15 min</text>
+      <path class="link" d="M611 95 H732" marker-end="url(#ah)"/>
+      <text class="lab" x="671" y="84" text-anchor="middle">one outbound link</text>
+      <text class="s" x="490" y="185" text-anchor="middle">Edits made on any copy reach the others.</text>
+    </svg>
+    <p class="note">One machine is enough to start: run it on your Mac or your Pi alone, and add the others later.</p>
+  </section>
+
+  <section id="start">
+    <h2>Get started</h2>
+    <p class="intro">You need Python 3.8 or later. The core needs nothing else; cloud connectors and Excel reports are an optional install.</p>
+    <ol class="steps">
+      <li><div><p>Get the code.</p><pre>git clone https://github.com/jchirayath/netinventory
+cd netinventory/engine</pre></div></li>
+      <li><div><p>Scan your network and build the inventory.</p><pre>python3 netinv.py update --scan</pre></div></li>
+      <li><div><p>Open the dashboard at <code>http://127.0.0.1:8787</code>.</p><pre>python3 netinv.py serve</pre></div></li>
+      <li><div><p>To see it on your phone and edit from other devices, set a passcode and share it on your network.</p><pre>python3 netinv.py set-passcode
+python3 netinv.py serve --lan --allow-write</pre></div></li>
+    </ol>
+    <p class="note">The <a href="https://github.com/jchirayath/netinventory/blob/main/engine/README.md">engine guide</a> covers cloud connectors, alerts, monitors and running on a Raspberry Pi.</p>
+  </section>
+
+  <section id="privacy">
+    <h2>Your network stays yours</h2>
+    <p class="intro">netinventory runs on your own machines. There's no account and no service to send your data to.</p>
+    <ul class="privacy">
+      <li><b>Read-only unless you say so.</b> Editing is off until you turn it on, and other devices need your passcode.</li>
+      <li><b>No plain-text passcode.</b> It's stored only as a salted hash, and repeated wrong guesses lock that device out.</li>
+      <li><b>Credentials in the Keychain.</b> Logins for your smart-home apps stay in the macOS Keychain, or an owner-only file on Linux.</li>
+      <li><b>A record of every edit.</b> Who changed what, and every wrong passcode, kept on the machine where it happened.</li>
+    </ul>
+  </section>
+  </main>
+
+  <footer>
+    <span>netinventory is open source under the MIT license.</span>
+    <span class="links"><a href="https://github.com/jchirayath/netinventory">Source</a><a href="https://github.com/jchirayath/netinventory/blob/main/docs/architecture.md">Architecture</a><a href="https://github.com/jchirayath/netinventory/blob/main/SECURITY.md">Report a vulnerability</a></span>
+  </footer>
+  <p class="note" style="margin:-24px 0 40px">Screenshots show a made-up home, not a real network.</p>
+</div>
+</body>
+</html>

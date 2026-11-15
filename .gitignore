@@ -21,6 +21,8 @@ audit.csv.1
 # Cached/scraped pages and any raw captures
 *.html
 router_devices_raw.html
+# ...except the project website, which is written by hand and has no data
+!site/*.html
 
 # Dashboard screenshots & browser snapshots — contain real MACs/IPs/hostnames
 /*.png

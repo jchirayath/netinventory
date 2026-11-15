@@ -42,8 +42,9 @@ about, and tracks their batteries.
 
 ### 🔎 Find everything
 nmap/ARP sweep, SSDP/UPnP, mDNS/DNS-SD (works on randomized MACs), Spotify
-Connect, the router's device list, and smart-home clouds: Tuya/Smart Life,
-Wyze, Blink, SmartThings, Apple, Govee, Kasa, Flume and Home Assistant.
+Connect and the router's device list, then the apps' own APIs for the
+details a network can't show: battery, online state, model and the name you
+gave it. [See what each app gives you](#works-with-your-smart-home-apps).
 
 </td>
 <td width="50%" valign="top">
@@ -115,6 +116,40 @@ Writes are atomic, so a crash never leaves a half-written file.
 </td>
 </tr>
 </table>
+
+## Works with your smart-home apps
+
+A network scan sees an address and a vendor. Your smart-home apps know far
+more: what you named each device, its model, its battery, and whether it's
+really online, even for sensors that never touch Wi-Fi. netinventory signs in
+to each app's API with your own account and merges that detail into the same
+row, matched by MAC wherever the app reveals one.
+
+| App | What netinventory reads | Sign-in |
+|---|---|---|
+| **Home Assistant** | Every battery entity from any integration it runs, the device's MAC where HA knows it, and names; `home push --to ha` sets names and areas back | URL + long-lived token |
+| **Blink** | Each camera and doorbell: name, model, battery (OK / low), signal bars, online (including its sync module), last check-in; MAC and IP where Blink reports them, and `blink-locate` wakes each camera to learn the rest | account + 2FA code |
+| **Flume** | The water sensor and its bridge: battery level and whether each is connected | API client ID and secret + account |
+| **Tuya / Smart Life** | App name, MAC and IP (from a local scan), battery and online; `home push --to tuya --rooms-only` files devices into rooms | Tuya IoT project ID and secret |
+| **Govee** | App name and model, with MAC and IP for devices with LAN Control on; the Govee account adds battery and online for leak sensors behind a hub | API key, or account + emailed code |
+| **SmartThings** | Device labels, the MAC of LAN devices; `home push --to smartthings --rooms-only` files devices into rooms | personal access token |
+| **Wyze** | Nickname and MAC | API key + account |
+| **Kasa** | Name, MAC and IP, over the local network | none |
+| **Apple** | Your device roster: name and model | Apple ID + app-specific password |
+| **Bluetooth** | Battery and presence of Govee thermometers this Mac can hear | none |
+
+```bash
+cd engine && python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements-cloud.txt   # only the SDKs you use
+./.venv/bin/netinv set-cloud blink      # asks for the sign-in, stores it in the Keychain
+./.venv/bin/netinv cloud                # pull names and details from every app set up
+./.venv/bin/netinv monitor suggest      # propose battery and offline monitors from them
+```
+
+Sign-ins live in the macOS Keychain (an owner-only file on Linux), never in the
+repo or a config file. Battery levels are read hourly by `watch` and kept as a
+history, so the Batteries page can tell how long a set lasts. Per-app setup
+notes are in [engine/README.md](engine/README.md#smart-home-cloud-connectors).
 
 ## Screenshots
 
