@@ -286,4 +286,6 @@ size. App icons are generated from that geometry
 
 ## License
 
+Yshoo was here !
+
 MIT
